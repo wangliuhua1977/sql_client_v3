@@ -225,7 +225,8 @@ public class MainFrame extends JFrame {
 
     private boolean focusExistingFrame(Long noteId) {
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel && panel.getNote().getId().equals(noteId)) {
+            EditorTabPanel panel = extractPanelFromFrame(frame);
+            if (panel != null && panel.getNote().getId().equals(noteId)) {
                 try {
                     frame.setIcon(false);
                     frame.setSelected(true);
@@ -240,7 +241,8 @@ public class MainFrame extends JFrame {
     private boolean focusExistingTab(Long noteId) {
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
             Component comp = tabbedPane.getComponentAt(i);
-            if (comp instanceof EditorTabPanel panel && panel.getNote().getId().equals(noteId)) {
+            EditorTabPanel panel = extractPanel(comp);
+            if (panel != null && panel.getNote().getId().equals(noteId)) {
                 tabbedPane.setSelectedIndex(i);
                 return true;
             }
@@ -304,29 +306,26 @@ public class MainFrame extends JFrame {
         if (windowMode) {
             JInternalFrame frame = desktopPane.getSelectedFrame();
             if (frame != null && frame.getContentPane().getComponentCount() > 0) {
-                Component comp = frame.getContentPane().getComponent(0);
-                if (comp instanceof EditorTabPanel panel) {
-                    return panel;
-                }
+                return extractPanel(frame.getContentPane().getComponent(0));
             }
         } else {
             Component comp = tabbedPane.getSelectedComponent();
-            if (comp instanceof EditorTabPanel panel) {
-                return panel;
-            }
+            return extractPanel(comp);
         }
         return null;
     }
 
     private void saveAll() {
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
+            EditorTabPanel panel = extractPanelFromFrame(frame);
+            if (panel != null) {
                 panel.saveNow();
             }
         }
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
             Component comp = tabbedPane.getComponentAt(i);
-            if (comp instanceof EditorTabPanel panel) {
+            EditorTabPanel panel = extractPanel(comp);
+            if (panel != null) {
                 panel.saveNow();
             }
         }
@@ -356,6 +355,19 @@ public class MainFrame extends JFrame {
         }
     }
 
+    private EditorTabPanel extractPanel(Component comp) {
+        if (comp instanceof EditorTabPanel) {
+            return (EditorTabPanel) comp;
+        }
+        return null;
+    }
+
+    private EditorTabPanel extractPanelFromFrame(JInternalFrame frame) {
+        if (frame == null) return null;
+        if (frame.getContentPane().getComponentCount() == 0) return null;
+        return extractPanel(frame.getContentPane().getComponent(0));
+    }
+
     private void updateTabTitle(EditorTabPanel panel, String title) {
         int idx = tabbedPane.indexOfComponent(panel);
         if (idx >= 0) {
@@ -368,7 +380,8 @@ public class MainFrame extends JFrame {
             if (p.getNote().getId().equals(noteId)) {
                 updateTabTitle(p, title);
                 for (JInternalFrame frame : desktopPane.getAllFrames()) {
-                    if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) == p) {
+                    EditorTabPanel framePanel = extractPanelFromFrame(frame);
+                    if (framePanel == p) {
                         frame.setTitle(title);
                         break;
                     }
@@ -381,13 +394,15 @@ public class MainFrame extends JFrame {
     private void persistOpenFrames() {
         java.util.Set<Long> ids = new java.util.LinkedHashSet<>();
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
+            EditorTabPanel panel = extractPanelFromFrame(frame);
+            if (panel != null) {
                 ids.add(panel.getNote().getId());
             }
         }
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
             Component comp = tabbedPane.getComponentAt(i);
-            if (comp instanceof EditorTabPanel panel) {
+            EditorTabPanel panel = extractPanel(comp);
+            if (panel != null) {
                 ids.add(panel.getNote().getId());
             }
         }

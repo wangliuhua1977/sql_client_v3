@@ -256,7 +256,8 @@ public class SuggestionEngine {
         String content = textArea.getText();
         if (caret <= 0 || content == null) return null;
         String statement = currentStatement(content, caret);
-        String line = statement.substring(statement.lastIndexOf('\n') + 1);
+        String statementPrefix = currentStatementPrefix(content, caret);
+        String line = statementPrefix.substring(statementPrefix.lastIndexOf('\n') + 1);
         if (line.trim().startsWith("--")) {
             return null; // 注释行不联想
         }
@@ -283,7 +284,7 @@ public class SuggestionEngine {
             }
         }
 
-        String lower = statement.toLowerCase();
+        String lower = statementPrefix.toLowerCase();
         if (endsWithKeyword(lower, List.of(" from ", " join ", " where ", " into ", " update ", " delete from ", " insert into ", " truncate ", " table ", " view " ))) {
             return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
         }
@@ -306,6 +307,14 @@ public class SuggestionEngine {
     }
 
     private String currentStatement(String content, int caret) {
+        int start = content.lastIndexOf(';', Math.max(0, caret - 1));
+        start = (start < 0) ? 0 : start + 1;
+        int end = content.indexOf(';', caret);
+        end = (end < 0) ? content.length() : end;
+        return content.substring(start, end);
+    }
+
+    private String currentStatementPrefix(String content, int caret) {
         int start = content.lastIndexOf(';', Math.max(0, caret - 1));
         start = (start < 0) ? 0 : start + 1;
         return content.substring(start, caret);

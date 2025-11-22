@@ -51,6 +51,17 @@ public class EditorTabPanel extends JPanel {
         if (textArea.getDocument() instanceof javax.swing.text.AbstractDocument doc) {
             doc.setDocumentFilter(fullWidthFilter);
         }
+        this.textArea.addKeyListener(new java.awt.event.KeyAdapter() {
+            @Override
+            public void keyTyped(java.awt.event.KeyEvent e) {
+                if (!fullWidthFilter.isEnabled()) return;
+                char mapped = fullWidthFilter.normalizeChar(e.getKeyChar());
+                if (mapped != e.getKeyChar()) {
+                    e.consume();
+                    textArea.replaceSelection(String.valueOf(mapped));
+                }
+            }
+        });
         this.textArea.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
         this.textArea.setText(note.getContent());
         initLayout();
@@ -137,6 +148,10 @@ public class EditorTabPanel extends JPanel {
             this.enabled = enabled;
         }
 
+        public boolean isEnabled() {
+            return enabled;
+        }
+
         @Override
         public void insertString(FilterBypass fb, int offset, String string, javax.swing.text.AttributeSet attr) throws javax.swing.text.BadLocationException {
             super.insertString(fb, offset, convert(string), attr);
@@ -151,12 +166,12 @@ public class EditorTabPanel extends JPanel {
             if (!enabled || input == null) return input;
             StringBuilder sb = new StringBuilder(input.length());
             for (char ch : input.toCharArray()) {
-                sb.append(mapChar(ch));
+                sb.append(normalizeChar(ch));
             }
             return sb.toString();
         }
 
-        private char mapChar(char ch) {
+        public char normalizeChar(char ch) {
             return switch (ch) {
                 case '，' -> ',';
                 case '。' -> '.';
