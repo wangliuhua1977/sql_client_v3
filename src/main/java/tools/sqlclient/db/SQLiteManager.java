@@ -48,6 +48,10 @@ public class SQLiteManager {
                     "db_type TEXT NOT NULL, " +
                     "updated_at INTEGER NOT NULL"
                     + ")");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS app_state (" +
+                    "key TEXT PRIMARY KEY, " +
+                    "value TEXT"
+                    + ")");
         } catch (Exception e) {
             throw new RuntimeException("初始化 SQLite 失败", e);
         }

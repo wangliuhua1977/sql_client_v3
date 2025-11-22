@@ -105,6 +105,28 @@ public class NoteRepository {
         return notes;
     }
 
+    public List<Note> listByIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) return List.of();
+        String placeholders = ids.stream().map(i -> "?").collect(java.util.stream.Collectors.joining(","));
+        String sql = "SELECT id, title, content, db_type, updated_at FROM notes WHERE id IN (" + placeholders + ") ORDER BY updated_at DESC";
+        List<Note> notes = new ArrayList<>();
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            for (Long id : ids) {
+                ps.setLong(idx++, id);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    notes.add(mapRow(rs));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("按 ID 获取笔记失败", e);
+        }
+        return notes;
+    }
+
     private Note mapRow(ResultSet rs) throws Exception {
         return new Note(
                 rs.getLong("id"),

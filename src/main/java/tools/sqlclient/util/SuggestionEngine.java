@@ -121,10 +121,18 @@ public class SuggestionEngine {
     private String currentToken() {
         int caret = textArea.getCaretPosition();
         try {
-            String before = textArea.getText(0, caret);
-            int start = Math.max(Math.max(before.lastIndexOf(' '), before.lastIndexOf('\n')), before.lastIndexOf('\t')) + 1;
-            int length = caret - start;
-            return textArea.getText(start, length).trim();
+            String text = textArea.getText(0, caret);
+            int start = caret - 1;
+            while (start >= 0) {
+                char ch = text.charAt(start);
+                if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '%' || ch == '.') {
+                    start--;
+                } else {
+                    break;
+                }
+            }
+            start = start + 1;
+            return text.substring(start).trim();
         } catch (Exception e) {
             return "";
         }
@@ -257,19 +265,19 @@ public class SuggestionEngine {
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
                 "(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
         java.util.regex.Matcher matcher = pattern.matcher(sqlText);
-        String resolved = null;
         while (matcher.find()) {
             String tableToken = matcher.group(2);
             String aliasToken = matcher.group(3);
             if (aliasToken != null && aliasToken.equals(alias)) {
-                resolved = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
-            } else if (aliasToken == null) {
+                return tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
+            }
+            if (aliasToken == null) {
                 String base = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
                 if (base.equals(alias)) {
-                    resolved = base;
+                    return base;
                 }
             }
         }
-        return resolved;
+        return null;
     }
 }

@@ -1,5 +1,6 @@
 package tools.sqlclient.ui;
 
+import tools.sqlclient.db.AppStateRepository;
 import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.editor.EditorTabPanel;
@@ -30,6 +31,7 @@ public class MainFrame extends JFrame {
     private final JLabel taskLabel = new JLabel("后台任务: 0");
     private final SQLiteManager sqliteManager;
     private final NoteRepository noteRepository;
+    private final AppStateRepository appStateRepository;
     private final MetadataService metadataService;
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
 
@@ -43,10 +45,17 @@ public class MainFrame extends JFrame {
         this.sqliteManager = new SQLiteManager(java.nio.file.Path.of("metadata.db"));
         this.metadataService = new MetadataService(java.nio.file.Path.of("metadata.db"));
         this.noteRepository = new NoteRepository(sqliteManager);
+        this.appStateRepository = new AppStateRepository(sqliteManager);
         buildMenu();
         buildContent();
         buildStatusBar();
         metadataService.refreshMetadataAsync(() -> {});
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                persistOpenFrames();
+            }
+        });
     }
 
     private void buildMenu() {
@@ -138,7 +147,17 @@ public class MainFrame extends JFrame {
 
     private void buildContent() {
         add(desktopPane, BorderLayout.CENTER);
-        createNote(DatabaseType.POSTGRESQL);
+        restoreSession();
+    }
+
+    private void restoreSession() {
+        java.util.List<Long> openIds = appStateRepository.loadOpenNotes();
+        if (!openIds.isEmpty()) {
+            noteRepository.listByIds(openIds).forEach(this::addFrame);
+        }
+        if (desktopPane.getAllFrames().length == 0) {
+            createNote(DatabaseType.POSTGRESQL);
+        }
     }
 
     private void buildStatusBar() {
@@ -175,6 +194,7 @@ public class MainFrame extends JFrame {
         try {
             frame.setSelected(true);
         } catch (java.beans.PropertyVetoException ignored) { }
+        persistOpenFrames();
     }
 
     private void installRenameHandler(JInternalFrame frame, EditorTabPanel panel) {
@@ -260,6 +280,7 @@ public class MainFrame extends JFrame {
                 panel.saveNow();
             }
         }
+        persistOpenFrames();
     }
 
     private void openNoteFromDb() {
@@ -282,6 +303,17 @@ public class MainFrame extends JFrame {
                 break;
             }
         }
+        persistOpenFrames();
+    }
+
+    private void persistOpenFrames() {
+        java.util.List<Long> ids = new java.util.ArrayList<>();
+        for (JInternalFrame frame : desktopPane.getAllFrames()) {
+            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
+                ids.add(panel.getNote().getId());
+            }
+        }
+        appStateRepository.saveOpenNotes(ids);
     }
 
     private void tileFrames() {
