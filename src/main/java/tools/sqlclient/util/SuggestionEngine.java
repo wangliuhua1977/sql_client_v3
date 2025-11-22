@@ -10,7 +10,10 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -25,6 +28,7 @@ public class SuggestionEngine {
     private List<SuggestionItem> currentItems = List.of();
     private int replaceStart = -1;
     private int replaceEnd = -1;
+    private boolean showTableHintForColumns = true;
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -37,8 +41,8 @@ public class SuggestionEngine {
             public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
                 JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
                 if (value instanceof SuggestionItem item) {
-                    String suffix = Objects.equals(item.type(), "column") && item.tableHint() != null ?
-                            "  (" + item.tableHint() + ")" : "";
+                    String suffix = (Objects.equals(item.type(), "column") && item.tableHint() != null && showTableHintForColumns)
+                            ? "  (" + item.tableHint() + ")" : "";
                     String count = " [" + item.useCount() + "]";
                     label.setText(item.name() + suffix + count);
                     if (item.useCount() > 0) {
@@ -144,6 +148,7 @@ public class SuggestionEngine {
 
     private void showSuggestions(String token, SuggestionContext context, boolean skipFetch) {
         boolean refreshing = false;
+        this.showTableHintForColumns = context.showTableHint();
         if (!skipFetch && context.type() == SuggestionType.COLUMN && context.tableHint() != null) {
             refreshing = metadataService.ensureColumnsCachedAsync(context.tableHint(),
                     () -> SwingUtilities.invokeLater(() -> showSuggestions(token, context, true)));
@@ -182,7 +187,11 @@ public class SuggestionEngine {
     private void commitSelection() {
         SuggestionItem item = list.getSelectedValue();
         if (item == null || "loading".equals(item.type())) return;
-        insertText(item.name());
+        String text = item.name();
+        if ("function".equalsIgnoreCase(item.type()) || "procedure".equalsIgnoreCase(item.type())) {
+            text = item.name() + "()";
+        }
+        insertText(text);
         if ("table".equals(item.type()) || "view".equals(item.type())) {
             metadataService.ensureColumnsCachedAsync(item.name());
         }
@@ -221,67 +230,90 @@ public class SuggestionEngine {
         int caret = textArea.getCaretPosition();
         String content = textArea.getText();
         if (caret <= 0 || content == null) return null;
-        String before = content.substring(0, caret);
-        String line = before.substring(before.lastIndexOf('\n') + 1);
+        String statement = currentStatement(content, caret);
+        String line = statement.substring(statement.lastIndexOf('\n') + 1);
         if (line.trim().startsWith("--")) {
             return null; // 注释行不联想
         }
+        List<TableBinding> bindings = parseBindings(statement);
+        int tableCount = (int) bindings.stream().map(TableBinding::table).distinct().count();
         String token = currentToken();
         if (token.contains(".")) {
             String[] parts = token.split("\\.");
             if (parts.length >= 1) {
                 String aliasOrTable = parts[0];
-                String table = resolveAlias(aliasOrTable, before, caret);
+                String table = resolveAlias(aliasOrTable, bindings);
+                boolean showHint = false;
                 if (table == null && metadataService.isKnownTableOrViewCached(aliasOrTable)) {
-                    table = aliasOrTable; // 直接输入表名的场景
+                    table = aliasOrTable; // 直接输入表名
                 }
-                if (table != null) {
-                    return new SuggestionContext(SuggestionType.COLUMN, table);
+                if (table == null && tableCount == 1 && !bindings.isEmpty()) {
+                    table = bindings.get(0).table();
                 }
+                if (table == null) {
+                    showHint = tableCount > 1;
+                    return new SuggestionContext(SuggestionType.COLUMN, null, showHint);
+                }
+                return new SuggestionContext(SuggestionType.COLUMN, table, false);
             }
         }
 
-        String lower = before.toLowerCase();
-        if (endsWithKeyword(lower, List.of(" from ", " join ", " into ", " update ", " delete from ", " insert into ", " truncate ", " table ", " view " ))) {
-            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null);
+        String lower = statement.toLowerCase();
+        if (endsWithKeyword(lower, List.of(" from ", " join ", " where ", " into ", " update ", " delete from ", " insert into ", " truncate ", " table ", " view " ))) {
+            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false);
+        }
+        if (endsWithKeyword(lower, List.of(" select " ))) {
+            return new SuggestionContext(SuggestionType.FUNCTION, null, false);
         }
         if (endsWithKeyword(lower, List.of(" call ", " exec ", " execute " ))) {
-            return new SuggestionContext(SuggestionType.FUNCTION_OR_PROCEDURE, null);
+            return new SuggestionContext(SuggestionType.PROCEDURE, null, false);
         }
         return null;
     }
 
     private boolean endsWithKeyword(String text, List<String> keywords) {
         for (String kw : keywords) {
-            int idx = text.lastIndexOf(kw);
-            if (idx >= 0 && idx >= text.length() - kw.length() - currentToken().length() - 1) {
+            if (text.endsWith(kw) || text.matches(".*" + java.util.regex.Pattern.quote(kw.trim()) + "\\s+$")) {
                 return true;
             }
         }
         return false;
     }
 
-    private String resolveAlias(String alias, String sqlTextUpToCaret, int caret) {
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                "(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
-        java.util.regex.Matcher matcher = pattern.matcher(sqlTextUpToCaret);
-        String resolved = null;
+    private String currentStatement(String content, int caret) {
+        int start = content.lastIndexOf(';', Math.max(0, caret - 1));
+        start = (start < 0) ? 0 : start + 1;
+        return content.substring(start, caret);
+    }
+
+    private Map<String, String> resolveAliasMap(List<TableBinding> bindings) {
+        Map<String, String> map = new HashMap<>();
+        for (TableBinding b : bindings) {
+            map.putIfAbsent(b.table().toLowerCase(), b.table());
+            if (b.alias() != null) {
+                map.put(b.alias().toLowerCase(), b.table());
+            }
+        }
+        return map;
+    }
+
+    private String resolveAlias(String alias, List<TableBinding> bindings) {
+        Map<String, String> map = resolveAliasMap(bindings);
+        return map.get(alias.toLowerCase());
+    }
+
+    private List<TableBinding> parseBindings(String statement) {
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
+        java.util.regex.Matcher matcher = pattern.matcher(statement);
+        java.util.List<TableBinding> bindings = new java.util.ArrayList<>();
         while (matcher.find()) {
             String tableToken = matcher.group(2);
             String aliasToken = matcher.group(3);
             String base = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
-            int matchEnd = matcher.end();
-            if (aliasToken != null && alias.equalsIgnoreCase(aliasToken)) {
-                // 优先采用光标之前最近一次匹配
-                if (matchEnd <= caret || resolved == null) {
-                    resolved = base;
-                }
-            } else if (aliasToken == null && base.equalsIgnoreCase(alias)) {
-                if (matchEnd <= caret || resolved == null) {
-                    resolved = base;
-                }
-            }
+            bindings.add(new TableBinding(base, aliasToken));
         }
-        return resolved;
+        return bindings;
     }
+
+    private record TableBinding(String table, String alias) {}
 }

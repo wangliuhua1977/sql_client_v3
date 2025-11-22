@@ -294,7 +294,8 @@ public class MetadataService {
         if (likePattern == null) return List.of();
         return switch (context.type()) {
             case TABLE_OR_VIEW -> queryObjects(likePattern, Set.of("table", "view"), limit);
-            case FUNCTION_OR_PROCEDURE -> queryObjects(likePattern, Set.of("function", "procedure"), limit);
+            case FUNCTION -> queryObjects(likePattern, Set.of("function"), limit);
+            case PROCEDURE -> queryObjects(likePattern, Set.of("procedure"), limit);
             case COLUMN -> queryColumns(likePattern, context.tableHint(), limit);
         };
     }
@@ -456,13 +457,14 @@ public class MetadataService {
         return List.of();
     }
 
-    public record SuggestionContext(SuggestionType type, String tableHint) {}
+    public record SuggestionContext(SuggestionType type, String tableHint, boolean showTableHint) {}
 
     public record TableEntry(String name, String type) {}
 
     public enum SuggestionType {
         TABLE_OR_VIEW,
-        FUNCTION_OR_PROCEDURE,
+        FUNCTION,
+        PROCEDURE,
         COLUMN
     }
 
