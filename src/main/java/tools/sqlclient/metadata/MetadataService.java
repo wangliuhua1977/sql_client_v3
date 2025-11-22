@@ -206,7 +206,7 @@ public class MetadataService {
         }
         if (root.isJsonObject()) {
             JsonObject obj = root.getAsJsonObject();
-            for (String key : List.of("data", "rows", "list", "items", "result")) {
+            for (String key : List.of("Data", "data", "rows", "list", "items", "result")) {
                 JsonElement maybeArray = obj.get(key);
                 if (maybeArray != null && maybeArray.isJsonArray()) {
                     JsonArray arr = maybeArray.getAsJsonArray();
