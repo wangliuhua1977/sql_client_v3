@@ -134,8 +134,8 @@ public class MainFrame extends JFrame {
 
     private void buildStatusBar() {
         JPanel status = new JPanel(new BorderLayout());
-        status.setBorder(new EmptyBorder(4,8,4,8));
-        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10,0));
+        status.setBorder(new EmptyBorder(4, 8, 4, 8));
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         left.add(statusLabel);
         left.add(autosaveLabel);
         left.add(taskLabel);
@@ -150,12 +150,25 @@ public class MainFrame extends JFrame {
     }
 
     private void addFrame(Note note) {
-        EditorTabPanel panel = new EditorTabPanel(noteRepository, metadataService,
-                this::updateAutosaveTime, this::updateTaskCount,
-                newTitle -> renameFrame(panel, newTitle), note);
+        // 用数组把 panel 包起来，避免“可能尚未初始化变量 panel”的编译错误
+        final EditorTabPanel[] holder = new EditorTabPanel[1];
+
+        EditorTabPanel panel = new EditorTabPanel(
+                noteRepository,
+                metadataService,
+                this::updateAutosaveTime,
+                this::updateTaskCount,
+                newTitle -> renameFrame(holder[0], newTitle),
+                note
+        );
+        holder[0] = panel;
+
         JInternalFrame frame = new JInternalFrame(note.getTitle(), true, true, true, true);
         frame.setSize(600, 400);
-        frame.setLocation(20 * desktopPane.getAllFrames().length, 20 * desktopPane.getAllFrames().length);
+        frame.setLocation(
+                20 * desktopPane.getAllFrames().length,
+                20 * desktopPane.getAllFrames().length
+        );
         frame.setVisible(true);
         frame.add(panel, BorderLayout.CENTER);
         installRenameHandler(frame, panel);
@@ -163,7 +176,7 @@ public class MainFrame extends JFrame {
         desktopPane.add(frame);
         try {
             frame.setSelected(true);
-        } catch (java.beans.PropertyVetoException ignored) { }
+        } catch (java.beans.PropertyVetoException ignored) {}
     }
 
     private void installRenameHandler(JInternalFrame frame, EditorTabPanel panel) {
@@ -176,8 +189,9 @@ public class MainFrame extends JFrame {
                         String current = panel.getNote().getTitle();
                         String newTitle = JOptionPane.showInputDialog(frame, "重命名笔记", current);
                         if (newTitle != null && !newTitle.isBlank()) {
-                            panel.rename(newTitle.trim());
-                            frame.setTitle(newTitle.trim());
+                            String t = newTitle.trim();
+                            panel.rename(t);
+                            frame.setTitle(t);
                         }
                     }
                 }
@@ -209,7 +223,8 @@ public class MainFrame extends JFrame {
 
     private void saveAll() {
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
+            if (frame.getContentPane().getComponentCount() > 0 &&
+                    frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
                 panel.saveNow();
             }
         }
@@ -221,8 +236,15 @@ public class MainFrame extends JFrame {
             JOptionPane.showMessageDialog(this, "暂无笔记，请先新建");
             return;
         }
-        Note selected = (Note) JOptionPane.showInputDialog(this, "选择要打开的笔记", "打开笔记",
-                JOptionPane.PLAIN_MESSAGE, null, notes.toArray(), notes.get(0));
+        Note selected = (Note) JOptionPane.showInputDialog(
+                this,
+                "选择要打开的笔记",
+                "打开笔记",
+                JOptionPane.PLAIN_MESSAGE,
+                null,
+                notes.toArray(),
+                notes.get(0)
+        );
         if (selected != null) {
             addFrame(selected);
         }
@@ -230,7 +252,8 @@ public class MainFrame extends JFrame {
 
     private void renameFrame(EditorTabPanel panel, String title) {
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) == panel) {
+            if (frame.getContentPane().getComponentCount() > 0 &&
+                    frame.getContentPane().getComponent(0) == panel) {
                 frame.setTitle(title);
                 break;
             }
