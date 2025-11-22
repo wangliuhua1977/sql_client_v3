@@ -224,9 +224,10 @@ public class MainFrame extends JFrame {
     }
 
     private boolean focusExistingFrame(Long noteId) {
+        long targetId = noteId != null ? noteId : -1L;
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
             EditorTabPanel panel = extractPanelFromFrame(frame);
-            if (panel != null && panel.getNote().getId().equals(noteId)) {
+            if (panel != null && panel.getNote().getId() == targetId) {
                 try {
                     frame.setIcon(false);
                     frame.setSelected(true);
@@ -239,10 +240,11 @@ public class MainFrame extends JFrame {
     }
 
     private boolean focusExistingTab(Long noteId) {
+        long targetId = noteId != null ? noteId : -1L;
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
             Component comp = tabbedPane.getComponentAt(i);
             EditorTabPanel panel = extractPanel(comp);
-            if (panel != null && panel.getNote().getId().equals(noteId)) {
+            if (panel != null && panel.getNote().getId() == targetId) {
                 tabbedPane.setSelectedIndex(i);
                 return true;
             }
@@ -376,8 +378,9 @@ public class MainFrame extends JFrame {
     }
 
     private void updateTitleForPanel(String title, Long noteId) {
+        long targetId = noteId != null ? noteId : -1L;
         panelCache.values().forEach(p -> {
-            if (p.getNote().getId().equals(noteId)) {
+            if (p.getNote().getId() == targetId) {
                 updateTabTitle(p, title);
                 for (JInternalFrame frame : desktopPane.getAllFrames()) {
                     EditorTabPanel framePanel = extractPanelFromFrame(frame);
