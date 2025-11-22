@@ -1,5 +1,7 @@
 package tools.sqlclient.db;
 
+import org.sqlite.SQLiteConfig;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -18,7 +20,12 @@ public class SQLiteManager {
     }
 
     public Connection getConnection() throws SQLException {
-        return DriverManager.getConnection("jdbc:sqlite:" + dbPath.toAbsolutePath());
+        SQLiteConfig config = new SQLiteConfig();
+        // WAL + busy timeout 能够减少多线程写入时的锁冲突
+        config.setJournalMode(SQLiteConfig.JournalMode.WAL);
+        config.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
+        config.setBusyTimeout(5000);
+        return DriverManager.getConnection("jdbc:sqlite:" + dbPath.toAbsolutePath(), config.toProperties());
     }
 
     public void initSchema() {

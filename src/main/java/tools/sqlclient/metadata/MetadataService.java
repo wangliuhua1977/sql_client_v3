@@ -17,6 +17,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -43,6 +44,7 @@ public class MetadataService {
     private final ExecutorService networkPool = Executors.newFixedThreadPool(6, r -> new Thread(r, "network-pool"));
     private final Gson gson = new Gson();
     private final HttpClient httpClient = TrustAllHttpClient.create();
+    private final Object dbWriteLock = new Object();
 
     public MetadataService(Path dbPath) {
         this.sqliteManager = new SQLiteManager(dbPath);
@@ -58,35 +60,37 @@ public class MetadataService {
             List<RemoteObject> remoteObjects = fetchObjects();
             Set<String> remoteNames = remoteObjects.stream().map(o -> o.object_name).collect(Collectors.toSet());
 
-            try (Connection conn = sqliteManager.getConnection()) {
-                conn.setAutoCommit(false);
-                Set<String> existing = new HashSet<>();
-                try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT object_name FROM objects")) {
-                    while (rs.next()) {
-                        existing.add(rs.getString(1));
-                    }
-                }
-                // 插入新增
-                try (PreparedStatement ps = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)")) {
-                    for (RemoteObject obj : remoteObjects) {
-                        ps.setString(1, obj.schema_name);
-                        ps.setString(2, obj.object_name);
-                        ps.setString(3, obj.object_type);
-                        ps.addBatch();
-                    }
-                    ps.executeBatch();
-                }
-                // 删除不存在（可扩展: 通过配置控制，这里默认删除）
-                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM objects WHERE object_name = ?")) {
-                    for (String old : existing) {
-                        if (!remoteNames.contains(old)) {
-                            ps.setString(1, old);
-                            ps.addBatch();
+            synchronized (dbWriteLock) {
+                try (Connection conn = sqliteManager.getConnection()) {
+                    conn.setAutoCommit(false);
+                    Set<String> existing = new HashSet<>();
+                    try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT object_name FROM objects")) {
+                        while (rs.next()) {
+                            existing.add(rs.getString(1));
                         }
                     }
-                    ps.executeBatch();
+                    // 插入新增
+                    try (PreparedStatement ps = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)")) {
+                        for (RemoteObject obj : remoteObjects) {
+                            ps.setString(1, obj.schema_name);
+                            ps.setString(2, obj.object_name);
+                            ps.setString(3, obj.object_type);
+                            ps.addBatch();
+                        }
+                        ps.executeBatch();
+                    }
+                    // 删除不存在（可扩展: 通过配置控制，这里默认删除）
+                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM objects WHERE object_name = ?")) {
+                        for (String old : existing) {
+                            if (!remoteNames.contains(old)) {
+                                ps.setString(1, old);
+                                ps.addBatch();
+                            }
+                        }
+                        ps.executeBatch();
+                    }
+                    conn.commit();
                 }
-                conn.commit();
             }
 
             // 更新列信息
@@ -114,7 +118,8 @@ public class MetadataService {
 
     private void updateColumns(String objectName) {
         try {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(COL_API_TEMPLATE.formatted(objectName))).GET().build();
+            String encodedName = URLEncoder.encode(objectName, StandardCharsets.UTF_8);
+            HttpRequest request = HttpRequest.newBuilder(URI.create(COL_API_TEMPLATE.formatted(encodedName))).GET().build();
             HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
             Type listType = new TypeToken<List<RemoteColumn>>(){}.getType();
             List<RemoteColumn> columns;
@@ -123,34 +128,36 @@ public class MetadataService {
                 columns = parseListFromJson(root, listType);
             }
             if (columns == null) return;
-            try (Connection conn = sqliteManager.getConnection()) {
-                conn.setAutoCommit(false);
-                List<String> localCols = new ArrayList<>();
-                try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=?")) {
-                    ps.setString(1, objectName);
-                    try (ResultSet rs = ps.executeQuery()) {
-                        while (rs.next()) localCols.add(rs.getString(1));
-                    }
-                }
-                boolean changed = columns.size() != localCols.size() ||
-                        !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
-                if (changed) {
-                    try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
-                        del.setString(1, objectName);
-                        del.executeUpdate();
-                    }
-                    try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
-                        int i = 0;
-                        for (RemoteColumn col : columns) {
-                            ins.setString(1, col.schema_name);
-                            ins.setString(2, objectName);
-                            ins.setString(3, col.column_name);
-                            ins.setInt(4, i++);
-                            ins.addBatch();
+            synchronized (dbWriteLock) {
+                try (Connection conn = sqliteManager.getConnection()) {
+                    conn.setAutoCommit(false);
+                    List<String> localCols = new ArrayList<>();
+                    try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=?")) {
+                        ps.setString(1, objectName);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            while (rs.next()) localCols.add(rs.getString(1));
                         }
-                        ins.executeBatch();
                     }
-                    conn.commit();
+                    boolean changed = columns.size() != localCols.size() ||
+                            !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
+                    if (changed) {
+                        try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
+                            del.setString(1, objectName);
+                            del.executeUpdate();
+                        }
+                        try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
+                            int i = 0;
+                            for (RemoteColumn col : columns) {
+                                ins.setString(1, col.schema_name);
+                                ins.setString(2, objectName);
+                                ins.setString(3, col.column_name);
+                                ins.setInt(4, i++);
+                                ins.addBatch();
+                            }
+                            ins.executeBatch();
+                        }
+                        conn.commit();
+                    }
                 }
             }
         } catch (Exception e) {
