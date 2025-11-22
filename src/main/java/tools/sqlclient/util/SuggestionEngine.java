@@ -2,14 +2,17 @@ package tools.sqlclient.util;
 
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
 import tools.sqlclient.metadata.MetadataService;
+import tools.sqlclient.metadata.MetadataService.SuggestionContext;
+import tools.sqlclient.metadata.MetadataService.SuggestionItem;
+import tools.sqlclient.metadata.MetadataService.SuggestionType;
 
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 
 /**
  * 基于 SQLite 元数据的模糊联想。
@@ -18,7 +21,8 @@ public class SuggestionEngine {
     private final MetadataService metadataService;
     private final RSyntaxTextArea textArea;
     private final JPopupMenu popup = new JPopupMenu();
-    private final JList<String> list = new JList<>();
+    private final JList<SuggestionItem> list = new JList<>();
+    private List<SuggestionItem> currentItems = List.of();
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -26,10 +30,27 @@ public class SuggestionEngine {
         popup.setFocusable(false);
         popup.add(new JScrollPane(list));
         list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        list.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting() && list.getSelectedValue() != null) {
-                insertText(list.getSelectedValue());
-                popup.setVisible(false);
+        list.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if (value instanceof SuggestionItem item) {
+                    String suffix = Objects.equals(item.type(), "column") && item.tableHint() != null ?
+                            "  (" + item.tableHint() + ")" : "";
+                    label.setText(item.name() + suffix);
+                    if (item.useCount() > 0) {
+                        label.setFont(label.getFont().deriveFont(Font.BOLD));
+                    }
+                }
+                return label;
+            }
+        });
+        list.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() == 2) {
+                    commitSelection();
+                }
             }
         });
     }
@@ -38,6 +59,25 @@ public class SuggestionEngine {
         return new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
+                if (popup.isVisible()) {
+                    if (e.getKeyCode() == KeyEvent.VK_DOWN) {
+                        int next = Math.min(list.getSelectedIndex() + 1, list.getModel().getSize() - 1);
+                        list.setSelectedIndex(next);
+                        list.ensureIndexIsVisible(next);
+                        e.consume();
+                        return;
+                    } else if (e.getKeyCode() == KeyEvent.VK_UP) {
+                        int prev = Math.max(list.getSelectedIndex() - 1, 0);
+                        list.setSelectedIndex(prev);
+                        list.ensureIndexIsVisible(prev);
+                        e.consume();
+                        return;
+                    } else if (e.getKeyCode() == KeyEvent.VK_ENTER) {
+                        commitSelection();
+                        e.consume();
+                        return;
+                    }
+                }
                 if (e.getKeyCode() == KeyEvent.VK_SPACE && e.isControlDown()) {
                     ctrlSpaceEnabled.set(!ctrlSpaceEnabled.get());
                     JOptionPane.showMessageDialog(textArea, "自动联想已" + (ctrlSpaceEnabled.get() ? "开启" : "关闭"));
@@ -50,9 +90,13 @@ public class SuggestionEngine {
                     popup.setVisible(false);
                     return;
                 }
-                if (shouldTrigger(e)) {
+                SuggestionContext ctx = analyzeContext();
+                if (ctx != null && shouldTrigger(e)) {
                     String prefix = currentToken();
-                    showSuggestions(prefix);
+                    if (prefix.contains(".")) {
+                        prefix = prefix.substring(prefix.lastIndexOf('.') + 1);
+                    }
+                    showSuggestions(prefix, ctx);
                 } else {
                     popup.setVisible(false);
                 }
@@ -62,15 +106,14 @@ public class SuggestionEngine {
 
     private boolean shouldTrigger(KeyEvent e) {
         char ch = e.getKeyChar();
-        return Character.isAlphabetic(ch) || ch == '%' || ch == '.' || e.getKeyCode() == KeyEvent.VK_SPACE;
+        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '.' || e.getKeyCode() == KeyEvent.VK_SPACE;
     }
 
     private String currentToken() {
         int caret = textArea.getCaretPosition();
         try {
-            int start = Math.max(textArea.getText(0, caret).lastIndexOf(' ') + 1, 0);
-            int lastNewLine = textArea.getText(0, caret).lastIndexOf('\n') + 1;
-            start = Math.max(start, lastNewLine);
+            String before = textArea.getText(0, caret);
+            int start = Math.max(Math.max(before.lastIndexOf(' '), before.lastIndexOf('\n')), before.lastIndexOf('\t')) + 1;
             int length = caret - start;
             return textArea.getText(start, length).trim();
         } catch (Exception e) {
@@ -78,23 +121,32 @@ public class SuggestionEngine {
         }
     }
 
-    private void showSuggestions(String token) {
+    private void showSuggestions(String token, SuggestionContext context) {
         if (token.isEmpty()) {
             popup.setVisible(false);
             return;
         }
-        List<String> suggestions = metadataService.fuzzyMatch(token, 15);
-        if (suggestions.isEmpty()) {
+        currentItems = metadataService.suggest(token, context, 15);
+        if (currentItems.isEmpty()) {
             popup.setVisible(false);
             return;
         }
-        list.setListData(suggestions.toArray(String[]::new));
+        list.setListData(currentItems.toArray(new SuggestionItem[0]));
+        list.setSelectedIndex(0);
         try {
             Rectangle view = textArea.modelToView(textArea.getCaretPosition());
             popup.show(textArea, view.x, view.y + view.height);
         } catch (Exception ignored) {
             popup.setVisible(false);
         }
+    }
+
+    private void commitSelection() {
+        SuggestionItem item = list.getSelectedValue();
+        if (item == null) return;
+        insertText(item.name());
+        metadataService.recordUsage(item);
+        popup.setVisible(false);
     }
 
     private void insertText(String text) {
@@ -105,5 +157,43 @@ public class SuggestionEngine {
             textArea.getDocument().insertString(start, text, null);
         } catch (Exception ignored) {
         }
+    }
+
+    private SuggestionContext analyzeContext() {
+        int caret = textArea.getCaretPosition();
+        String content = textArea.getText();
+        if (caret <= 0 || content == null) return null;
+        String before = content.substring(0, caret);
+        String line = before.substring(before.lastIndexOf('\n') + 1);
+        if (line.trim().startsWith("--")) {
+            return null; // 注释行不联想
+        }
+        String token = currentToken();
+        if (token.contains(".")) {
+            String[] parts = token.split("\\.");
+            if (parts.length >= 1) {
+                String table = parts[0];
+                return new SuggestionContext(SuggestionType.COLUMN, table);
+            }
+        }
+
+        String lower = before.toLowerCase();
+        if (endsWithKeyword(lower, List.of(" from ", " join ", " into ", " update ", " delete from ", " insert into ", " truncate ", " table ", " view " ))) {
+            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null);
+        }
+        if (endsWithKeyword(lower, List.of(" call ", " exec ", " execute " ))) {
+            return new SuggestionContext(SuggestionType.FUNCTION_OR_PROCEDURE, null);
+        }
+        return null;
+    }
+
+    private boolean endsWithKeyword(String text, List<String> keywords) {
+        for (String kw : keywords) {
+            int idx = text.lastIndexOf(kw);
+            if (idx >= 0 && idx >= text.length() - kw.length() - currentToken().length() - 1) {
+                return true;
+            }
+        }
+        return false;
     }
 }

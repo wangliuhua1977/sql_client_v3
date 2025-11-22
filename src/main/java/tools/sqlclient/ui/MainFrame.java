@@ -6,8 +6,6 @@ import tools.sqlclient.model.DatabaseType;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
-import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.DefaultTreeModel;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.nio.file.Path;
@@ -17,7 +15,6 @@ import java.nio.file.Path;
  */
 public class MainFrame extends JFrame {
     private final JTabbedPane tabbedPane = new JTabbedPane();
-    private final JTree objectTree = new JTree();
     private final JLabel statusLabel = new JLabel("就绪");
     private final JLabel autosaveLabel = new JLabel("自动保存: -");
     private final JLabel taskLabel = new JLabel("后台任务: 0");
@@ -32,10 +29,9 @@ public class MainFrame extends JFrame {
 
         this.metadataService = new MetadataService(Path.of("metadata.db"));
         buildMenu();
-        buildToolbar();
         buildContent();
         buildStatusBar();
-        metadataService.refreshMetadataAsync(this::reloadTree);
+        metadataService.refreshMetadataAsync(() -> {});
     }
 
     private void buildMenu() {
@@ -46,10 +42,30 @@ public class MainFrame extends JFrame {
         JMenu tools = new JMenu("工具");
         JMenu help = new JMenu("帮助");
 
-        file.add(new JMenuItem(new AbstractAction("新建标签") {
+        file.add(new JMenuItem(new AbstractAction("新建 PostgreSQL 标签") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 addTab(DatabaseType.POSTGRESQL);
+            }
+        }));
+        file.add(new JMenuItem(new AbstractAction("新建 Hive 标签") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                addTab(DatabaseType.HIVE);
+            }
+        }));
+        file.addSeparator();
+        file.add(new JMenuItem(new AbstractAction("打开文件") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                JOptionPane.showMessageDialog(MainFrame.this, "示例版本未实现打开文件，可直接新建标签编辑");
+            }
+        }));
+        file.add(new JMenuItem(new AbstractAction("保存当前") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                EditorTabPanel panel = getCurrentTab();
+                if (panel != null) panel.saveNow();
             }
         }));
         file.add(new JMenuItem(new AbstractAction("保存全部") {
@@ -70,7 +86,7 @@ public class MainFrame extends JFrame {
         tools.add(new JMenuItem(new AbstractAction("刷新元数据") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                metadataService.refreshMetadataAsync(MainFrame.this::reloadTree);
+                metadataService.refreshMetadataAsync(() -> {});
             }
         }));
 
@@ -82,54 +98,8 @@ public class MainFrame extends JFrame {
         setJMenuBar(menuBar);
     }
 
-    private void buildToolbar() {
-        JToolBar bar = new JToolBar();
-        bar.setFloatable(false);
-        bar.add(new JButton(new AbstractAction("新建") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                addTab(DatabaseType.POSTGRESQL);
-            }
-        }));
-        bar.add(new JButton(new AbstractAction("打开") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                // 简化：示例中未实现打开逻辑
-                JOptionPane.showMessageDialog(MainFrame.this, "示例中仅演示新建/自动保存");
-            }
-        }));
-        bar.add(new JButton(new AbstractAction("保存") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                EditorTabPanel panel = getCurrentTab();
-                if (panel != null) panel.saveNow();
-            }
-        }));
-        bar.add(new JButton(new AbstractAction("保存全部") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                saveAll();
-            }
-        }));
-        bar.addSeparator();
-        bar.add(new JButton(new AbstractAction("刷新元数据") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                metadataService.refreshMetadataAsync(MainFrame.this::reloadTree);
-            }
-        }));
-
-        add(bar, BorderLayout.NORTH);
-    }
-
     private void buildContent() {
-        JSplitPane splitPane = new JSplitPane();
-        splitPane.setResizeWeight(0.2);
-        JScrollPane treeScroll = new JScrollPane(objectTree);
-        treeScroll.setBorder(new EmptyBorder(5,5,5,5));
-        splitPane.setLeftComponent(treeScroll);
-        splitPane.setRightComponent(tabbedPane);
-        add(splitPane, BorderLayout.CENTER);
+        add(tabbedPane, BorderLayout.CENTER);
         addTab(DatabaseType.POSTGRESQL);
     }
 
@@ -163,12 +133,6 @@ public class MainFrame extends JFrame {
                 panel.saveNow();
             }
         }
-    }
-
-    private void reloadTree() {
-        DefaultMutableTreeNode root = new DefaultMutableTreeNode("对象浏览器");
-        metadataService.loadTree(root);
-        objectTree.setModel(new DefaultTreeModel(root));
     }
 
     private void updateAutosaveTime(String text) {

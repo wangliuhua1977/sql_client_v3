@@ -10,7 +10,6 @@ import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.network.TrustAllHttpClient;
 
-import javax.swing.tree.DefaultMutableTreeNode;
 import java.io.InputStreamReader;
 import java.lang.reflect.Type;
 import java.net.URI;
@@ -23,7 +22,6 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.Statement;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -64,9 +62,11 @@ public class MetadataService {
                 try (Connection conn = sqliteManager.getConnection()) {
                     conn.setAutoCommit(false);
                     Set<String> existing = new HashSet<>();
-                    try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery("SELECT object_name FROM objects")) {
-                        while (rs.next()) {
-                            existing.add(rs.getString(1));
+                    try (PreparedStatement st = conn.prepareStatement("SELECT object_name FROM objects")) {
+                        try (ResultSet rs = st.executeQuery()) {
+                            while (rs.next()) {
+                                existing.add(rs.getString(1));
+                            }
                         }
                     }
                     // 插入新增
@@ -165,39 +165,99 @@ public class MetadataService {
         }
     }
 
-    public void loadTree(DefaultMutableTreeNode root) {
-        try (Connection conn = sqliteManager.getConnection();
-             Statement st = conn.createStatement();
-             ResultSet rs = st.executeQuery("SELECT object_type, object_name FROM objects ORDER BY object_type, object_name")) {
-            Map<String, DefaultMutableTreeNode> typeNodes = new LinkedHashMap<>();
-            while (rs.next()) {
-                String type = rs.getString("object_type");
-                String name = rs.getString("object_name");
-                DefaultMutableTreeNode typeNode = typeNodes.computeIfAbsent(type, DefaultMutableTreeNode::new);
-                typeNode.add(new DefaultMutableTreeNode(name));
-            }
-            typeNodes.values().forEach(root::add);
-        } catch (Exception e) {
-            log.error("加载树失败", e);
-        }
+    public List<SuggestionItem> suggest(String token, SuggestionContext context, int limit) {
+        String likePattern = toLikePattern(token);
+        if (likePattern == null) return List.of();
+        return switch (context.type()) {
+            case TABLE_OR_VIEW -> queryObjects(likePattern, Set.of("table", "view"), limit);
+            case FUNCTION_OR_PROCEDURE -> queryObjects(likePattern, Set.of("function", "procedure"), limit);
+            case COLUMN -> queryColumns(likePattern, context.tableHint(), limit);
+        };
     }
 
-    public List<String> fuzzyMatch(String token, int limit) {
+    private String toLikePattern(String token) {
+        if (token == null || token.isBlank()) return null;
         String[] keywords = token.toLowerCase().split("%");
-        String likeSql = Arrays.stream(keywords).map(k -> "%" + k + "%").collect(Collectors.joining());
-        String sql = "SELECT object_name FROM objects WHERE lower(object_name) LIKE ? ORDER BY use_count DESC, object_name ASC LIMIT ?";
+        return Arrays.stream(keywords).map(k -> "%" + k + "%").collect(Collectors.joining());
+    }
+
+    private List<SuggestionItem> queryObjects(String likeSql, Set<String> types, int limit) {
+        String placeholders = types.stream().map(t -> "?").collect(Collectors.joining(","));
+        String sql = "SELECT object_name, object_type, use_count FROM objects WHERE object_type IN (" + placeholders + ") " +
+                "AND lower(object_name) LIKE ? ORDER BY use_count DESC, object_name ASC LIMIT ?";
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, likeSql);
-            ps.setInt(2, limit);
+            int idx = 1;
+            for (String type : types) {
+                ps.setString(idx++, type);
+            }
+            ps.setString(idx++, likeSql);
+            ps.setInt(idx, limit);
             try (ResultSet rs = ps.executeQuery()) {
-                List<String> list = new ArrayList<>();
-                while (rs.next()) list.add(rs.getString(1));
-                return list;
+                List<SuggestionItem> items = new ArrayList<>();
+                while (rs.next()) {
+                    items.add(new SuggestionItem(rs.getString("object_name"), rs.getString("object_type"), null,
+                            rs.getInt("use_count")));
+                }
+                return items;
             }
         } catch (Exception e) {
             log.error("模糊匹配失败", e);
             return List.of();
+        }
+    }
+
+    private List<SuggestionItem> queryColumns(String likeSql, String tableHint, int limit) {
+        StringBuilder sql = new StringBuilder("SELECT column_name, object_name, sort_no, use_count FROM columns WHERE lower(column_name) LIKE ?");
+        if (tableHint != null && !tableHint.isBlank()) {
+            sql.append(" AND object_name = ?");
+        }
+        sql.append(" ORDER BY use_count DESC, sort_no ASC, column_name ASC LIMIT ?");
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            ps.setString(idx++, likeSql);
+            if (tableHint != null && !tableHint.isBlank()) {
+                ps.setString(idx++, tableHint);
+            }
+            ps.setInt(idx, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<SuggestionItem> items = new ArrayList<>();
+                while (rs.next()) {
+                    items.add(new SuggestionItem(rs.getString("column_name"), "column", rs.getString("object_name"),
+                            rs.getInt("use_count")));
+                }
+                return items;
+            }
+        } catch (Exception e) {
+            log.error("列模糊匹配失败", e);
+            return List.of();
+        }
+    }
+
+    public void recordUsage(SuggestionItem item) {
+        long now = Instant.now().toEpochMilli();
+        synchronized (dbWriteLock) {
+            try (Connection conn = sqliteManager.getConnection()) {
+                if ("column".equals(item.type())) {
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            "UPDATE columns SET use_count = use_count + 1, last_used_at=? WHERE object_name=? AND column_name=?")) {
+                        ps.setLong(1, now);
+                        ps.setString(2, item.tableHint());
+                        ps.setString(3, item.name());
+                        ps.executeUpdate();
+                    }
+                } else {
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            "UPDATE objects SET use_count = use_count + 1, last_used_at=? WHERE object_name=?")) {
+                        ps.setLong(1, now);
+                        ps.setString(2, item.name());
+                        ps.executeUpdate();
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("更新使用次数失败: {}", item.name(), e);
+            }
         }
     }
 
@@ -225,6 +285,16 @@ public class MetadataService {
         log.warn("未能从 JSON 解析出数组结构: {}", root);
         return List.of();
     }
+
+    public record SuggestionContext(SuggestionType type, String tableHint) {}
+
+    public enum SuggestionType {
+        TABLE_OR_VIEW,
+        FUNCTION_OR_PROCEDURE,
+        COLUMN
+    }
+
+    public record SuggestionItem(String name, String type, String tableHint, int useCount) {}
 
     static class RemoteObject {
         String schema_name;
