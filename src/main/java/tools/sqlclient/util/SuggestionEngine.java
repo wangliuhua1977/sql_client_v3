@@ -128,6 +128,9 @@ public class SuggestionEngine {
     }
 
     private void showSuggestions(String token, SuggestionContext context) {
+        if (context.type() == SuggestionType.COLUMN && context.tableHint() != null) {
+            metadataService.ensureColumnsCachedAsync(context.tableHint());
+        }
         currentItems = metadataService.suggest(token, context, 15);
         if (currentItems.isEmpty()) {
             popup.setVisible(false);
@@ -153,6 +156,9 @@ public class SuggestionEngine {
         SuggestionItem item = list.getSelectedValue();
         if (item == null) return;
         insertText(item.name());
+        if ("table".equals(item.type()) || "view".equals(item.type())) {
+            metadataService.ensureColumnsCachedAsync(item.name());
+        }
         metadataService.recordUsage(item);
         popup.setVisible(false);
     }

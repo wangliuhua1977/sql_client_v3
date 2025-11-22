@@ -43,6 +43,7 @@ public class MetadataService {
     private final Gson gson = new Gson();
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Object dbWriteLock = new Object();
+    private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
 
     public MetadataService(Path dbPath) {
         this.sqliteManager = new SQLiteManager(dbPath);
@@ -103,6 +104,36 @@ public class MetadataService {
             CompletableFuture.allOf(tasks.toArray(new CompletableFuture[0])).join();
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
+        }
+    }
+
+    /**
+     * 在用户选择表名或输入别名时，后台补齐字段元数据，避免列联想时出现空列表。
+     */
+    public void ensureColumnsCachedAsync(String tableName) {
+        if (tableName == null || tableName.isBlank()) return;
+        if (hasColumns(tableName)) return;
+        if (inflightColumns.contains(tableName)) return;
+        inflightColumns.add(tableName);
+        CompletableFuture.runAsync(() -> {
+            try {
+                updateColumns(tableName);
+            } finally {
+                inflightColumns.remove(tableName);
+            }
+        }, networkPool);
+    }
+
+    private boolean hasColumns(String tableName) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM columns WHERE object_name=?")) {
+            ps.setString(1, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) > 0;
+            }
+        } catch (Exception e) {
+            log.warn("检查列缓存失败: {}", tableName, e);
+            return false;
         }
     }
 

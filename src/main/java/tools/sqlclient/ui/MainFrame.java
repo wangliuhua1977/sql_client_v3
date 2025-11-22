@@ -134,8 +134,8 @@ public class MainFrame extends JFrame {
 
     private void buildStatusBar() {
         JPanel status = new JPanel(new BorderLayout());
-        status.setBorder(new EmptyBorder(4, 8, 4, 8));
-        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        status.setBorder(new EmptyBorder(4,8,4,8));
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10,0));
         left.add(statusLabel);
         left.add(autosaveLabel);
         left.add(taskLabel);
@@ -150,16 +150,9 @@ public class MainFrame extends JFrame {
     }
 
     private void addFrame(Note note) {
-        // 关键修改：不要在构造参数里闭包捕获 panel 本身，改为用 note 来定位重命名窗口
-        EditorTabPanel panel = new EditorTabPanel(
-                noteRepository,
-                metadataService,
-                this::updateAutosaveTime,
-                this::updateTaskCount,
-                newTitle -> renameFrame(note, newTitle),
-                note
-        );
-
+        EditorTabPanel panel = new EditorTabPanel(noteRepository, metadataService,
+                this::updateAutosaveTime, this::updateTaskCount,
+                newTitle -> renameFrame(panel, newTitle), note);
         JInternalFrame frame = new JInternalFrame(note.getTitle(), true, true, true, true);
         frame.setSize(600, 400);
         frame.setLocation(20 * desktopPane.getAllFrames().length, 20 * desktopPane.getAllFrames().length);
@@ -170,8 +163,7 @@ public class MainFrame extends JFrame {
         desktopPane.add(frame);
         try {
             frame.setSelected(true);
-        } catch (java.beans.PropertyVetoException ignored) {
-        }
+        } catch (java.beans.PropertyVetoException ignored) { }
     }
 
     private void installRenameHandler(JInternalFrame frame, EditorTabPanel panel) {
@@ -181,26 +173,50 @@ public class MainFrame extends JFrame {
                 @Override
                 public void mouseClicked(MouseEvent e) {
                     if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
-                        Rectangle originBounds = frame.getBounds();
-                        boolean originMax = frame.isMaximum();
-                        String current = panel.getNote().getTitle();
-                        String newTitle = JOptionPane.showInputDialog(frame, "重命名笔记", current);
-                        if (newTitle != null && !newTitle.isBlank()) {
-                            panel.rename(newTitle.trim());
-                            frame.setTitle(newTitle.trim());
-                        }
-                        try {
-                            frame.setMaximum(originMax);
-                        } catch (java.beans.PropertyVetoException ignored) {
-                        }
-                        if (!originMax) {
-                            frame.setBounds(originBounds);
-                        }
+                        startInlineRename(frame, panel, e.getPoint());
                         e.consume();
                     }
                 }
             });
         }
+    }
+
+    private void startInlineRename(JInternalFrame frame, EditorTabPanel panel, Point clickPoint) {
+        BasicInternalFrameUI ui = (BasicInternalFrameUI) frame.getUI();
+        JComponent north = ui != null ? (JComponent) ui.getNorthPane() : null;
+        if (north == null) return;
+        JTextField field = new JTextField(frame.getTitle());
+        field.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
+        Dimension size = new Dimension(Math.max(140, field.getPreferredSize().width + 20), north.getHeight() - 6);
+        field.setSize(size);
+        int x = Math.max(6, clickPoint.x - size.width / 2);
+        int y = 3;
+        field.setLocation(x, y);
+        north.add(field, 0);
+        north.setLayout(null);
+        north.revalidate();
+        north.repaint();
+        field.selectAll();
+        field.requestFocusInWindow();
+
+        Runnable commit = () -> {
+            String text = field.getText();
+            if (text != null && !text.isBlank()) {
+                panel.rename(text.trim());
+                frame.setTitle(text.trim());
+            }
+            north.remove(field);
+            north.revalidate();
+            north.repaint();
+        };
+
+        field.addActionListener(e -> commit.run());
+        field.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                commit.run();
+            }
+        });
     }
 
     private void installMaximizeTiling(JInternalFrame frame) {
@@ -227,8 +243,7 @@ public class MainFrame extends JFrame {
 
     private void saveAll() {
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0
-                    && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
+            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
                 panel.saveNow();
             }
         }
@@ -240,31 +255,18 @@ public class MainFrame extends JFrame {
             JOptionPane.showMessageDialog(this, "暂无笔记，请先新建");
             return;
         }
-        Note selected = (Note) JOptionPane.showInputDialog(
-                this,
-                "选择要打开的笔记",
-                "打开笔记",
-                JOptionPane.PLAIN_MESSAGE,
-                null,
-                notes.toArray(),
-                notes.get(0)
-        );
+        Note selected = (Note) JOptionPane.showInputDialog(this, "选择要打开的笔记", "打开笔记",
+                JOptionPane.PLAIN_MESSAGE, null, notes.toArray(), notes.get(0));
         if (selected != null) {
             addFrame(selected);
         }
     }
 
-    /**
-     * 根据 Note 找到对应窗口并改标题，避免对 panel 的未初始化捕获。
-     */
-    private void renameFrame(Note note, String title) {
+    private void renameFrame(EditorTabPanel panel, String title) {
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0) {
-                Component comp = frame.getContentPane().getComponent(0);
-                if (comp instanceof EditorTabPanel editorPanel && editorPanel.getNote() == note) {
-                    frame.setTitle(title);
-                    break;
-                }
+            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) == panel) {
+                frame.setTitle(title);
+                break;
             }
         }
     }
@@ -282,8 +284,7 @@ public class MainFrame extends JFrame {
             int c = i % cols;
             try {
                 frames[i].setMaximum(false);
-            } catch (Exception ignored) {
-            }
+            } catch (Exception ignored) {}
             frames[i].setBounds(c * w, r * h, w, h);
         }
     }
