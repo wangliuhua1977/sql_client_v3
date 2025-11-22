@@ -112,12 +112,20 @@ public class MetadataService {
      * @return 是否发起了新的抓取
      */
     public boolean ensureColumnsCachedAsync(String tableName, Runnable onFreshLoaded) {
-        if (tableName == null || tableName.isBlank()) return false;
-        if (hasColumns(tableName)) return false;
-        if (!inflightColumns.add(tableName)) return false;
-        CompletableFuture.runAsync(() -> updateColumns(tableName), networkPool)
+        return ensureColumnsCachedAsync(tableName, false, onFreshLoaded);
+    }
+
+    public boolean ensureColumnsCachedAsync(String tableName, boolean forceRefresh) {
+        return ensureColumnsCachedAsync(tableName, forceRefresh, null);
+    }
+
+    public boolean ensureColumnsCachedAsync(String tableName, boolean forceRefresh, Runnable onFreshLoaded) {
+        if (!shouldFetchColumns(tableName, forceRefresh)) return false;
+        String key = tableName + (forceRefresh ? "#force" : "");
+        if (!inflightColumns.add(key)) return false;
+        CompletableFuture.runAsync(() -> updateColumns(tableName, forceRefresh), networkPool)
                 .whenComplete((v, ex) -> {
-                    inflightColumns.remove(tableName);
+                    inflightColumns.remove(key);
                     if (onFreshLoaded != null) {
                         SwingUtilities.invokeLater(onFreshLoaded);
                     }
@@ -126,7 +134,14 @@ public class MetadataService {
     }
 
     public boolean ensureColumnsCachedAsync(String tableName) {
-        return ensureColumnsCachedAsync(tableName, null);
+        return ensureColumnsCachedAsync(tableName, false, null);
+    }
+
+    private boolean shouldFetchColumns(String tableName, boolean forceRefresh) {
+        if (tableName == null || tableName.isBlank()) return false;
+        if (!isLikelyTableName(tableName)) return false;
+        if (!forceRefresh && hasColumns(tableName)) return false;
+        return true;
     }
 
     private boolean hasColumns(String tableName) {
@@ -142,6 +157,14 @@ public class MetadataService {
         }
     }
 
+    private boolean isLikelyTableName(String name) {
+        if (name == null) return false;
+        String trimmed = name.trim();
+        if (trimmed.isEmpty()) return false;
+        if (trimmed.contains(" ") || trimmed.contains("\n")) return false;
+        return trimmed.matches("[A-Za-z0-9_\\.]{2,128}");
+    }
+
     private List<RemoteObject> fetchObjects() throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create(OBJ_API)).GET().build();
         HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
@@ -152,7 +175,7 @@ public class MetadataService {
         }
     }
 
-    private void updateColumns(String objectName) {
+    private void updateColumns(String objectName, boolean forceRefresh) {
         boolean knownTableOrView = isTableOrView(objectName);
         int attempts = 0;
         while (attempts < 3) {
@@ -170,7 +193,11 @@ public class MetadataService {
                 if (columns == null || columns.isEmpty()) return;
                 synchronized (dbWriteLock) {
                     try (Connection conn = sqliteManager.getConnection()) {
-                        conn.setAutoCommit(false);
+                        boolean auto = conn.getAutoCommit();
+                        if (auto) {
+                            conn.setAutoCommit(false);
+                        }
+                        java.sql.Savepoint sp = conn.setSavepoint("col_upd");
                         try {
                             if (!knownTableOrView) {
                                 try (PreparedStatement up = conn.prepareStatement(
@@ -190,7 +217,7 @@ public class MetadataService {
                                     while (rs.next()) localCols.add(rs.getString(1));
                                 }
                             }
-                            boolean changed = columns.size() != localCols.size() ||
+                            boolean changed = forceRefresh || columns.size() != localCols.size() ||
                                     !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
                             if (changed) {
                                 try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
@@ -209,10 +236,13 @@ public class MetadataService {
                                     ins.executeBatch();
                                 }
                             }
+                            conn.releaseSavepoint(sp);
                             conn.commit();
                         } catch (Exception ex) {
-                            try { conn.rollback(); } catch (Exception ignore) {}
+                            try { conn.rollback(sp); } catch (Exception ignore) {}
                             throw ex;
+                        } finally {
+                            try { if (auto) conn.setAutoCommit(true); } catch (Exception ignore) {}
                         }
                     }
                 }
