@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.network.TrustAllHttpClient;
 
+import javax.swing.*;
 import java.io.InputStreamReader;
 import java.lang.reflect.Type;
 import java.net.URI;
@@ -110,18 +111,28 @@ public class MetadataService {
     /**
      * 在用户选择表名或输入别名时，后台补齐字段元数据，避免列联想时出现空列表。
      */
-    public void ensureColumnsCachedAsync(String tableName) {
-        if (tableName == null || tableName.isBlank()) return;
-        if (hasColumns(tableName)) return;
-        if (inflightColumns.contains(tableName)) return;
-        inflightColumns.add(tableName);
-        CompletableFuture.runAsync(() -> {
-            try {
-                updateColumns(tableName);
-            } finally {
-                inflightColumns.remove(tableName);
-            }
-        }, networkPool);
+    /**
+     * 异步补齐字段缓存，可在完成后回调刷新 UI。
+     * @param tableName 目标表/视图
+     * @param onFreshLoaded 当本次确实发起远程抓取且成功完成时的回调（UI 线程）
+     * @return 是否发起了新的抓取
+     */
+    public boolean ensureColumnsCachedAsync(String tableName, Runnable onFreshLoaded) {
+        if (tableName == null || tableName.isBlank()) return false;
+        if (hasColumns(tableName)) return false;
+        if (!inflightColumns.add(tableName)) return false;
+        CompletableFuture.runAsync(() -> updateColumns(tableName), networkPool)
+                .whenComplete((v, ex) -> {
+                    inflightColumns.remove(tableName);
+                    if (onFreshLoaded != null) {
+                        SwingUtilities.invokeLater(onFreshLoaded);
+                    }
+                });
+        return true;
+    }
+
+    public boolean ensureColumnsCachedAsync(String tableName) {
+        return ensureColumnsCachedAsync(tableName, null);
     }
 
     private boolean hasColumns(String tableName) {
@@ -266,6 +277,50 @@ public class MetadataService {
         }
     }
 
+    /**
+     * 提供对象浏览器使用的表/视图 + 字段列表查询。
+     */
+    public List<TableWithColumns> listTablesWithColumns(String keyword) {
+        String like = (keyword == null || keyword.isBlank()) ? "%" : toLikePattern(keyword);
+        if (like == null) like = "%";
+        String sql = "SELECT object_name, object_type FROM objects WHERE object_type IN ('table','view')" +
+                ("%".equals(like) ? "" : " AND lower(object_name) LIKE ?") + " ORDER BY object_name";
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (!"%".equals(like)) {
+                ps.setString(1, like);
+            }
+            List<TableWithColumns> list = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String name = rs.getString("object_name");
+                    String type = rs.getString("object_type");
+                    list.add(new TableWithColumns(name, type, fetchColumns(conn, name)));
+                }
+            }
+            return list;
+        } catch (Exception e) {
+            log.error("查询对象浏览器数据失败", e);
+            return List.of();
+        }
+    }
+
+    private List<String> fetchColumns(Connection conn, String tableName) {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no ASC, column_name ASC")) {
+            ps.setString(1, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<String> cols = new ArrayList<>();
+                while (rs.next()) {
+                    cols.add(rs.getString(1));
+                }
+                return cols;
+            }
+        } catch (Exception e) {
+            log.warn("读取列失败: {}", tableName, e);
+            return List.of();
+        }
+    }
+
     public void recordUsage(SuggestionItem item) {
         long now = Instant.now().toEpochMilli();
         synchronized (dbWriteLock) {
@@ -318,6 +373,8 @@ public class MetadataService {
     }
 
     public record SuggestionContext(SuggestionType type, String tableHint) {}
+
+    public record TableWithColumns(String name, String type, List<String> columns) {}
 
     public enum SuggestionType {
         TABLE_OR_VIEW,

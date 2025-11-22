@@ -128,12 +128,20 @@ public class SuggestionEngine {
     }
 
     private void showSuggestions(String token, SuggestionContext context) {
-        if (context.type() == SuggestionType.COLUMN && context.tableHint() != null) {
-            metadataService.ensureColumnsCachedAsync(context.tableHint());
+        showSuggestions(token, context, false);
+    }
+
+    private void showSuggestions(String token, SuggestionContext context, boolean skipFetch) {
+        boolean refreshing = false;
+        if (!skipFetch && context.type() == SuggestionType.COLUMN && context.tableHint() != null) {
+            refreshing = metadataService.ensureColumnsCachedAsync(context.tableHint(),
+                    () -> SwingUtilities.invokeLater(() -> showSuggestions(token, context, true)));
         }
         currentItems = metadataService.suggest(token, context, 15);
         if (currentItems.isEmpty()) {
-            popup.setVisible(false);
+            if (!refreshing) {
+                popup.setVisible(false);
+            }
             return;
         }
         computeReplacementRange(token);

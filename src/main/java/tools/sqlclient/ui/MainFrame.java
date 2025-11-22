@@ -6,6 +6,7 @@ import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.ui.ObjectBrowserDialog;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -111,6 +112,14 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        view.add(new JMenuItem(new AbstractAction("对象浏览器") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
+                dialog.setVisible(true);
+            }
+        }));
+
         window.add(new JMenuItem(new AbstractAction("平铺窗口") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -150,9 +159,11 @@ public class MainFrame extends JFrame {
     }
 
     private void addFrame(Note note) {
+        EditorTabPanel[] holder = new EditorTabPanel[1];
         EditorTabPanel panel = new EditorTabPanel(noteRepository, metadataService,
                 this::updateAutosaveTime, this::updateTaskCount,
-                newTitle -> renameFrame(panel, newTitle), note);
+                newTitle -> renameFrame(holder[0], newTitle), note);
+        holder[0] = panel;
         JInternalFrame frame = new JInternalFrame(note.getTitle(), true, true, true, true);
         frame.setSize(600, 400);
         frame.setLocation(20 * desktopPane.getAllFrames().length, 20 * desktopPane.getAllFrames().length);
