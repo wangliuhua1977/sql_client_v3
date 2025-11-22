@@ -29,6 +29,7 @@ public class SuggestionEngine {
     private int replaceStart = -1;
     private int replaceEnd = -1;
     private boolean showTableHintForColumns = true;
+    private SuggestionContext lastContext;
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -44,8 +45,8 @@ public class SuggestionEngine {
                     String suffix = (Objects.equals(item.type(), "column") && item.tableHint() != null && showTableHintForColumns)
                             ? "  (" + item.tableHint() + ")" : "";
                     String count = " [" + item.useCount() + "]";
-                    label.setText(item.name() + suffix + count);
-                    if (item.useCount() > 0) {
+                    label.setText(item.name() + suffix + ("all_columns".equals(item.type()) ? "" : count));
+                    if (item.useCount() > 0 || "all_columns".equals(item.type())) {
                         label.setFont(label.getFont().deriveFont(Font.BOLD));
                     }
                 }
@@ -149,11 +150,18 @@ public class SuggestionEngine {
     private void showSuggestions(String token, SuggestionContext context, boolean skipFetch) {
         boolean refreshing = false;
         this.showTableHintForColumns = context.showTableHint();
+        this.lastContext = context;
         if (!skipFetch && context.type() == SuggestionType.COLUMN && context.tableHint() != null) {
             refreshing = metadataService.ensureColumnsCachedAsync(context.tableHint(),
                     () -> SwingUtilities.invokeLater(() -> showSuggestions(token, context, true)));
         }
         currentItems = metadataService.suggest(token, context, 15);
+        if (context.type() == SuggestionType.COLUMN && context.tableHint() != null && !currentItems.isEmpty()) {
+            List<SuggestionItem> withAll = new ArrayList<>();
+            withAll.add(new SuggestionItem("所有字段", "all_columns", context.tableHint(), 0));
+            withAll.addAll(currentItems);
+            currentItems = withAll;
+        }
         computeReplacementRange(token);
         if (currentItems.isEmpty()) {
             if (refreshing) {
@@ -187,6 +195,23 @@ public class SuggestionEngine {
     private void commitSelection() {
         SuggestionItem item = list.getSelectedValue();
         if (item == null || "loading".equals(item.type())) return;
+        if ("all_columns".equals(item.type())) {
+            if (lastContext == null || lastContext.tableHint() == null) {
+                popup.setVisible(false);
+                return;
+            }
+            java.util.List<String> cols = metadataService.loadColumnsFromCache(lastContext.tableHint());
+            if (cols.isEmpty()) {
+                JOptionPane.showMessageDialog(textArea, "字段仍在加载，请稍后重试");
+                return;
+            }
+            String prefix = lastContext.alias() != null && !lastContext.alias().isBlank()
+                    ? lastContext.alias().trim() + "." : "";
+            String joined = String.join(", ", cols.stream().map(c -> prefix + c).toList());
+            insertText(joined);
+            popup.setVisible(false);
+            return;
+        }
         String text = item.name();
         if ("function".equalsIgnoreCase(item.type()) || "procedure".equalsIgnoreCase(item.type())) {
             text = item.name() + "()";
@@ -252,21 +277,21 @@ public class SuggestionEngine {
                 }
                 if (table == null) {
                     showHint = tableCount > 1;
-                    return new SuggestionContext(SuggestionType.COLUMN, null, showHint);
+                    return new SuggestionContext(SuggestionType.COLUMN, null, showHint, aliasOrTable);
                 }
-                return new SuggestionContext(SuggestionType.COLUMN, table, false);
+                return new SuggestionContext(SuggestionType.COLUMN, table, false, aliasOrTable);
             }
         }
 
         String lower = statement.toLowerCase();
         if (endsWithKeyword(lower, List.of(" from ", " join ", " where ", " into ", " update ", " delete from ", " insert into ", " truncate ", " table ", " view " ))) {
-            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false);
+            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
         }
         if (endsWithKeyword(lower, List.of(" select " ))) {
-            return new SuggestionContext(SuggestionType.FUNCTION, null, false);
+            return new SuggestionContext(SuggestionType.FUNCTION, null, false, null);
         }
         if (endsWithKeyword(lower, List.of(" call ", " exec ", " execute " ))) {
-            return new SuggestionContext(SuggestionType.PROCEDURE, null, false);
+            return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null);
         }
         return null;
     }

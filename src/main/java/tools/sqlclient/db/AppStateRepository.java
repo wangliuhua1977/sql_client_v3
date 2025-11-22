@@ -5,7 +5,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -14,6 +13,7 @@ import java.util.stream.Stream;
  */
 public class AppStateRepository {
     private static final String OPEN_NOTES_KEY = "open_notes";
+    private static final String FULL_WIDTH_KEY = "convert_full_width";
     private final SQLiteManager sqliteManager;
 
     public AppStateRepository(SQLiteManager sqliteManager) {
@@ -46,6 +46,40 @@ public class AppStateRepository {
             throw new RuntimeException("读取上次打开笔记失败", e);
         }
         return List.of();
+    }
+
+    public void saveBooleanOption(String key, boolean value) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("INSERT INTO app_state(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")) {
+            ps.setString(1, key);
+            ps.setString(2, value ? "1" : "0");
+            ps.executeUpdate();
+        } catch (Exception e) {
+            throw new RuntimeException("保存布尔配置失败", e);
+        }
+    }
+
+    public boolean loadBooleanOption(String key, boolean defaultValue) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT value FROM app_state WHERE key=?")) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return "1".equals(rs.getString(1));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("读取布尔配置失败", e);
+        }
+        return defaultValue;
+    }
+
+    public boolean loadFullWidthOption(boolean defaultValue) {
+        return loadBooleanOption(FULL_WIDTH_KEY, defaultValue);
+    }
+
+    public void saveFullWidthOption(boolean enabled) {
+        saveBooleanOption(FULL_WIDTH_KEY, enabled);
     }
 
     private List<Long> parseIds(String value) {

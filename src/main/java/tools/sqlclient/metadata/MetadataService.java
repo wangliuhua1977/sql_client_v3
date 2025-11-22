@@ -457,7 +457,7 @@ public class MetadataService {
         return List.of();
     }
 
-    public record SuggestionContext(SuggestionType type, String tableHint, boolean showTableHint) {}
+    public record SuggestionContext(SuggestionType type, String tableHint, boolean showTableHint, String alias) {}
 
     public record TableEntry(String name, String type) {}
 

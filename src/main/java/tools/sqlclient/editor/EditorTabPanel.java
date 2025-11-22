@@ -31,12 +31,14 @@ public class EditorTabPanel extends JPanel {
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
+    private final FullWidthFilter fullWidthFilter;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
                           java.util.function.IntConsumer taskCallback,
                           Consumer<String> titleUpdater,
-                          Note note) {
+                          Note note,
+                          boolean convertFullWidth) {
         super(new BorderLayout());
         this.noteRepository = noteRepository;
         this.note = note;
@@ -45,6 +47,10 @@ public class EditorTabPanel extends JPanel {
         this.titleUpdater = titleUpdater;
         this.autoSaveService = new AutoSaveService(autosaveCallback, taskCallback);
         this.suggestionEngine = new SuggestionEngine(metadataService, textArea);
+        this.fullWidthFilter = new FullWidthFilter(convertFullWidth);
+        if (textArea.getDocument() instanceof javax.swing.text.AbstractDocument doc) {
+            doc.setDocumentFilter(fullWidthFilter);
+        }
         this.textArea.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
         this.textArea.setText(note.getContent());
         initLayout();
@@ -109,7 +115,66 @@ public class EditorTabPanel extends JPanel {
         updateTitle();
     }
 
+    public void setFullWidthConversionEnabled(boolean enabled) {
+        fullWidthFilter.setEnabled(enabled);
+    }
+
     public Note getNote() {
         return note;
+    }
+
+    /**
+     * 将常见中文全角符号转为半角，避免 SQL 语法错误。
+     */
+    private static class FullWidthFilter extends javax.swing.text.DocumentFilter {
+        private volatile boolean enabled;
+
+        FullWidthFilter(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        @Override
+        public void insertString(FilterBypass fb, int offset, String string, javax.swing.text.AttributeSet attr) throws javax.swing.text.BadLocationException {
+            super.insertString(fb, offset, convert(string), attr);
+        }
+
+        @Override
+        public void replace(FilterBypass fb, int offset, int length, String text, javax.swing.text.AttributeSet attrs) throws javax.swing.text.BadLocationException {
+            super.replace(fb, offset, length, convert(text), attrs);
+        }
+
+        private String convert(String input) {
+            if (!enabled || input == null) return input;
+            StringBuilder sb = new StringBuilder(input.length());
+            for (char ch : input.toCharArray()) {
+                sb.append(mapChar(ch));
+            }
+            return sb.toString();
+        }
+
+        private char mapChar(char ch) {
+            return switch (ch) {
+                case '，' -> ',';
+                case '。' -> '.';
+                case '（' -> '(';
+                case '）' -> ')';
+                case '｛' -> '{';
+                case '｝' -> '}';
+                case '【' -> '[';
+                case '】' -> ']';
+                case '；' -> ';';
+                case '：' -> ':';
+                case '“', '”' -> '"';
+                case '‘', '’' -> '\'';
+                case '《' -> '<';
+                case '》' -> '>';
+                case '、' -> ',';
+                default -> ch;
+            };
+        }
     }
 }

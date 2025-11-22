@@ -39,6 +39,7 @@ public class MainFrame extends JFrame {
     private boolean windowMode = true;
     private JRadioButtonMenuItem windowModeItem;
     private JRadioButtonMenuItem panelModeItem;
+    private boolean convertFullWidth = true;
 
     public MainFrame() {
         super("SQL Notebook - 多标签 PG/Hive");
@@ -51,6 +52,7 @@ public class MainFrame extends JFrame {
         this.metadataService = new MetadataService(java.nio.file.Path.of("metadata.db"));
         this.noteRepository = new NoteRepository(sqliteManager);
         this.appStateRepository = new AppStateRepository(sqliteManager);
+        this.convertFullWidth = appStateRepository.loadFullWidthOption(true);
         buildMenu();
         buildContent();
         buildStatusBar();
@@ -108,6 +110,12 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 openNoteFromDb();
+            }
+        }));
+        file.add(new JMenuItem(new AbstractAction("设置 - SQL 编辑器选项") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openEditorSettings();
             }
         }));
         file.addSeparator();
@@ -200,7 +208,7 @@ public class MainFrame extends JFrame {
     private EditorTabPanel getOrCreatePanel(Note note) {
         return panelCache.computeIfAbsent(note.getId(), id -> new EditorTabPanel(noteRepository, metadataService,
                 this::updateAutosaveTime, this::updateTaskCount,
-                newTitle -> updateTitleForPanel(newTitle, id), note));
+                newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth));
     }
 
     private void openNoteInCurrentMode(Note note) {
@@ -338,6 +346,16 @@ public class MainFrame extends JFrame {
         }
     }
 
+    private void openEditorSettings() {
+        SqlEditorSettingsDialog dialog = new SqlEditorSettingsDialog(this, convertFullWidth);
+        dialog.setVisible(true);
+        if (dialog.isConfirmed()) {
+            convertFullWidth = dialog.isConvertFullWidthEnabled();
+            appStateRepository.saveFullWidthOption(convertFullWidth);
+            panelCache.values().forEach(p -> p.setFullWidthConversionEnabled(convertFullWidth));
+        }
+    }
+
     private void updateTabTitle(EditorTabPanel panel, String title) {
         int idx = tabbedPane.indexOfComponent(panel);
         if (idx >= 0) {
@@ -422,21 +440,27 @@ public class MainFrame extends JFrame {
         windowMode = true;
         windowModeItem.setSelected(true);
         panelModeItem.setSelected(false);
-        int offset = 0;
+        java.util.List<EditorTabPanel> panels = new java.util.ArrayList<>();
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
             Component comp = tabbedPane.getComponentAt(i);
             if (comp instanceof EditorTabPanel panel) {
-                JInternalFrame frame = new JInternalFrame(panel.getNote().getTitle(), true, true, true, true);
-                frame.setSize(600, 400);
-                frame.setLocation(20 * offset, 20 * offset);
-                offset++;
-                frame.setVisible(true);
-                frame.add(panel, BorderLayout.CENTER);
-                installRenameHandler(frame, panel);
-                desktopPane.add(frame);
+                panels.add(panel);
             }
         }
         tabbedPane.removeAll();
+        int offset = 0;
+        for (EditorTabPanel panel : panels) {
+            detachFromParent(panel);
+            JInternalFrame frame = new JInternalFrame(panel.getNote().getTitle(), true, true, true, true);
+            frame.setSize(600, 400);
+            frame.setLocation(20 * offset, 20 * offset);
+            offset++;
+            frame.setVisible(true);
+            frame.add(panel, BorderLayout.CENTER);
+            installRenameHandler(frame, panel);
+            desktopPane.add(frame);
+            try { frame.setSelected(true); } catch (java.beans.PropertyVetoException ignored) {}
+        }
         centerLayout.show(centerPanel, "window");
         persistOpenFrames();
     }
