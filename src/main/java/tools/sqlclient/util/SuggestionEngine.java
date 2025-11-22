@@ -39,7 +39,8 @@ public class SuggestionEngine {
                 if (value instanceof SuggestionItem item) {
                     String suffix = Objects.equals(item.type(), "column") && item.tableHint() != null ?
                             "  (" + item.tableHint() + ")" : "";
-                    label.setText(item.name() + suffix);
+                    String count = " [" + item.useCount() + "]";
+                    label.setText(item.name() + suffix + count);
                     if (item.useCount() > 0) {
                         label.setFont(label.getFont().deriveFont(Font.BOLD));
                     }
@@ -222,7 +223,7 @@ public class SuggestionEngine {
             String[] parts = token.split("\\.");
             if (parts.length >= 1) {
                 String aliasOrTable = parts[0];
-                String table = resolveAlias(aliasOrTable, before);
+                String table = resolveAlias(aliasOrTable, content);
                 if (table == null && metadataService.isKnownTableOrViewCached(aliasOrTable)) {
                     table = aliasOrTable; // 直接输入表名的场景
                 }
@@ -252,10 +253,10 @@ public class SuggestionEngine {
         return false;
     }
 
-    private String resolveAlias(String alias, String before) {
+    private String resolveAlias(String alias, String sqlText) {
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
                 "(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
-        java.util.regex.Matcher matcher = pattern.matcher(before);
+        java.util.regex.Matcher matcher = pattern.matcher(sqlText);
         String resolved = null;
         while (matcher.find()) {
             String tableToken = matcher.group(2);
