@@ -18,6 +18,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -26,25 +27,41 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class EditorTabPanel extends JPanel {
     private final DatabaseType databaseType;
     private final RSyntaxTextArea textArea;
-    private final Path filePath;
+    private Path filePath;
     private final AutoSaveService autoSaveService;
     private final SuggestionEngine suggestionEngine;
     private final AtomicBoolean ctrlSpaceEnabled = new AtomicBoolean(true);
     private final JLabel lastSaveLabel = new JLabel("自动保存: -");
+    private final Consumer<String> titleUpdater;
 
     public EditorTabPanel(DatabaseType databaseType, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
-                          java.util.function.IntConsumer taskCallback) {
+                          java.util.function.IntConsumer taskCallback,
+                          Consumer<String> titleUpdater) {
+        this(databaseType, metadataService, autosaveCallback, taskCallback, titleUpdater,
+                null, "");
+    }
+
+    public EditorTabPanel(DatabaseType databaseType, MetadataService metadataService,
+                          java.util.function.Consumer<String> autosaveCallback,
+                          java.util.function.IntConsumer taskCallback,
+                          Consumer<String> titleUpdater,
+                          Path existingFile, String initialContent) {
         super(new BorderLayout());
         this.databaseType = databaseType;
         this.textArea = createEditor();
-        this.filePath = Path.of("notes", databaseType.name().toLowerCase() + "_" + UUID.randomUUID() + ".sql");
+        this.filePath = existingFile;
+        this.titleUpdater = titleUpdater;
         this.autoSaveService = new AutoSaveService(autosaveCallback, taskCallback);
         this.suggestionEngine = new SuggestionEngine(metadataService, textArea);
         this.textArea.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
+        if (!initialContent.isEmpty()) {
+            this.textArea.setText(initialContent);
+        }
         initLayout();
         LinkResolver.install(textArea);
-        autoSaveService.startAutoSave(this::saveNow);
+        autoSaveService.startAutoSave(this::autoSave);
+        updateTitle();
     }
 
     private RSyntaxTextArea createEditor() {
@@ -73,18 +90,53 @@ public class EditorTabPanel extends JPanel {
     }
 
     public void saveNow() {
+        saveInternal(true);
+    }
+
+    private void autoSave() {
+        saveInternal(false);
+    }
+
+    private void saveInternal(boolean promptChooser) {
         try {
-            Files.createDirectories(filePath.getParent());
-            Files.writeString(filePath, textArea.getText(), StandardCharsets.UTF_8);
+            Path target = resolvePath(promptChooser);
+            if (target == null) return;
+            Files.createDirectories(target.getParent());
+            Files.writeString(target, textArea.getText(), StandardCharsets.UTF_8);
             String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
             lastSaveLabel.setText("自动保存: " + time);
             autoSaveService.onSaved(time);
+            updateTitle();
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "保存失败: " + ex.getMessage());
         }
     }
 
+    private Path resolvePath(boolean promptChooser) {
+        if (filePath != null) {
+            return filePath;
+        }
+        if (promptChooser) {
+            JFileChooser chooser = new JFileChooser();
+            chooser.setDialogTitle("选择保存路径");
+            int ret = chooser.showSaveDialog(this);
+            if (ret == JFileChooser.APPROVE_OPTION) {
+                filePath = chooser.getSelectedFile().toPath();
+                return filePath;
+            }
+            return null;
+        }
+        filePath = Path.of("notes", databaseType.name().toLowerCase() + "_" + UUID.randomUUID() + ".sql");
+        return filePath;
+    }
+
+    private void updateTitle() {
+        if (titleUpdater != null && filePath != null) {
+            titleUpdater.accept(filePath.getFileName().toString());
+        }
+    }
+
     public Optional<Path> getFilePath() {
-        return Optional.of(filePath);
+        return Optional.ofNullable(filePath);
     }
 }

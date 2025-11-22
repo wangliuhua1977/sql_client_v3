@@ -58,7 +58,7 @@ public class MainFrame extends JFrame {
         file.add(new JMenuItem(new AbstractAction("打开文件") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                JOptionPane.showMessageDialog(MainFrame.this, "示例版本未实现打开文件，可直接新建标签编辑");
+                openFile();
             }
         }));
         file.add(new JMenuItem(new AbstractAction("保存当前") {
@@ -115,8 +115,16 @@ public class MainFrame extends JFrame {
     }
 
     private void addTab(DatabaseType type) {
-        EditorTabPanel panel = new EditorTabPanel(type, metadataService, this::updateAutosaveTime, this::updateTaskCount);
+        EditorTabPanel panel = new EditorTabPanel(type, metadataService, this::updateAutosaveTime, this::updateTaskCount,
+                title -> renameTab(panel, title));
         tabbedPane.addTab(type == DatabaseType.POSTGRESQL ? "PG 笔记" : "Hive 笔记", panel);
+        tabbedPane.setSelectedComponent(panel);
+    }
+
+    private void addTabFromFile(DatabaseType type, Path path, String content) {
+        EditorTabPanel panel = new EditorTabPanel(type, metadataService, this::updateAutosaveTime, this::updateTaskCount,
+                title -> renameTab(panel, title), path, content);
+        tabbedPane.addTab(path.getFileName().toString(), panel);
         tabbedPane.setSelectedComponent(panel);
     }
 
@@ -132,6 +140,38 @@ public class MainFrame extends JFrame {
             if (comp instanceof EditorTabPanel panel) {
                 panel.saveNow();
             }
+        }
+    }
+
+    private void openFile() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("打开 SQL 文件");
+        int ret = chooser.showOpenDialog(this);
+        if (ret != JFileChooser.APPROVE_OPTION) return;
+        Path path = chooser.getSelectedFile().toPath();
+        DatabaseType chosen = askDbType();
+        if (chosen == null) return;
+        try {
+            String content = java.nio.file.Files.readString(path);
+            addTabFromFile(chosen, path, content);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "打开失败: " + ex.getMessage());
+        }
+    }
+
+    private DatabaseType askDbType() {
+        Object[] options = {"PostgreSQL", "Hive"};
+        int idx = JOptionPane.showOptionDialog(this, "请选择文件对应的数据库类型", "选择数据库", JOptionPane.DEFAULT_OPTION,
+                JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
+        if (idx == 0) return DatabaseType.POSTGRESQL;
+        if (idx == 1) return DatabaseType.HIVE;
+        return null;
+    }
+
+    private void renameTab(EditorTabPanel panel, String title) {
+        int index = tabbedPane.indexOfComponent(panel);
+        if (index >= 0) {
+            tabbedPane.setTitleAt(index, title);
         }
     }
 

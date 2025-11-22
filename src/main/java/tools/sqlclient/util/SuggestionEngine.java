@@ -23,6 +23,8 @@ public class SuggestionEngine {
     private final JPopupMenu popup = new JPopupMenu();
     private final JList<SuggestionItem> list = new JList<>();
     private List<SuggestionItem> currentItems = List.of();
+    private int replaceStart = -1;
+    private int replaceEnd = -1;
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -91,7 +93,7 @@ public class SuggestionEngine {
                     return;
                 }
                 SuggestionContext ctx = analyzeContext();
-                if (ctx != null && shouldTrigger(e)) {
+                if (ctx != null && (shouldTrigger(e) || popup.isVisible())) {
                     String prefix = currentToken();
                     if (prefix.contains(".")) {
                         prefix = prefix.substring(prefix.lastIndexOf('.') + 1);
@@ -106,7 +108,7 @@ public class SuggestionEngine {
 
     private boolean shouldTrigger(KeyEvent e) {
         char ch = e.getKeyChar();
-        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '.' || e.getKeyCode() == KeyEvent.VK_SPACE;
+        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '.' || ch == '_' || e.getKeyCode() == KeyEvent.VK_SPACE;
     }
 
     private String currentToken() {
@@ -122,15 +124,12 @@ public class SuggestionEngine {
     }
 
     private void showSuggestions(String token, SuggestionContext context) {
-        if (token.isEmpty()) {
-            popup.setVisible(false);
-            return;
-        }
         currentItems = metadataService.suggest(token, context, 15);
         if (currentItems.isEmpty()) {
             popup.setVisible(false);
             return;
         }
+        computeReplacementRange(token);
         list.setListData(currentItems.toArray(new SuggestionItem[0]));
         list.setSelectedIndex(0);
         try {
@@ -151,11 +150,28 @@ public class SuggestionEngine {
 
     private void insertText(String text) {
         try {
-            int start = textArea.getSelectionStart();
-            int end = textArea.getSelectionEnd();
+            int start = replaceStart >= 0 ? replaceStart : textArea.getSelectionStart();
+            int end = replaceEnd >= 0 ? replaceEnd : textArea.getSelectionEnd();
             textArea.getDocument().remove(start, end - start);
             textArea.getDocument().insertString(start, text, null);
         } catch (Exception ignored) {
+        }
+    }
+
+    private void computeReplacementRange(String token) {
+        try {
+            int caret = textArea.getCaretPosition();
+            if (token.contains(".")) {
+                int dot = token.lastIndexOf('.') + 1;
+                int len = token.length() - dot;
+                replaceStart = caret - len;
+                replaceEnd = caret;
+            } else {
+                replaceStart = caret - token.length();
+                replaceEnd = caret;
+            }
+        } catch (Exception e) {
+            replaceStart = replaceEnd = -1;
         }
     }
 
@@ -172,7 +188,7 @@ public class SuggestionEngine {
         if (token.contains(".")) {
             String[] parts = token.split("\\.");
             if (parts.length >= 1) {
-                String table = parts[0];
+                String table = resolveAlias(parts[0], before);
                 return new SuggestionContext(SuggestionType.COLUMN, table);
             }
         }
@@ -195,5 +211,25 @@ public class SuggestionEngine {
             }
         }
         return false;
+    }
+
+    private String resolveAlias(String alias, String before) {
+        String lowerBefore = before.toLowerCase();
+        String[] clauses = {" from ", " join ", " update ", " into "};
+        for (String clause : clauses) {
+            int idx = lowerBefore.lastIndexOf(clause);
+            if (idx >= 0) {
+                String snippet = before.substring(idx + clause.length());
+                String[] parts = snippet.split("[\n\r;]")[0].trim().split("\\s+");
+                if (parts.length >= 2) {
+                    String tableName = parts[0].replaceAll("[,()]", "");
+                    String aliasName = parts[1].replaceAll("[,()]", "");
+                    if (aliasName.equals(alias)) {
+                        return tableName.contains(".") ? tableName.substring(tableName.lastIndexOf('.') + 1) : tableName;
+                    }
+                }
+            }
+        }
+        return alias;
     }
 }
