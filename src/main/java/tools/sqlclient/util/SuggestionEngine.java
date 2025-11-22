@@ -92,6 +92,10 @@ public class SuggestionEngine {
                     popup.setVisible(false);
                     return;
                 }
+                if (popup.isVisible() && (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN)) {
+                    e.consume();
+                    return;
+                }
                 SuggestionContext ctx = analyzeContext();
                 if (ctx != null && (shouldTrigger(e) || popup.isVisible())) {
                     String prefix = currentToken();

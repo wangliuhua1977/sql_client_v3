@@ -1,24 +1,36 @@
 package tools.sqlclient.ui;
 
+import tools.sqlclient.db.NoteRepository;
+import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
+import tools.sqlclient.model.Note;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
+import javax.swing.plaf.basic.BasicInternalFrameUI;
 import java.awt.*;
 import java.awt.event.ActionEvent;
-import java.nio.file.Path;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.beans.PropertyChangeEvent;
+import java.beans.PropertyChangeListener;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 主窗口，符合 Windows 11 扁平化风格，全部中文。
  */
 public class MainFrame extends JFrame {
-    private final JTabbedPane tabbedPane = new JTabbedPane();
+    private final JDesktopPane desktopPane = new JDesktopPane();
     private final JLabel statusLabel = new JLabel("就绪");
     private final JLabel autosaveLabel = new JLabel("自动保存: -");
     private final JLabel taskLabel = new JLabel("后台任务: 0");
+    private final SQLiteManager sqliteManager;
+    private final NoteRepository noteRepository;
     private final MetadataService metadataService;
+    private final AtomicInteger untitledIndex = new AtomicInteger(1);
 
     public MainFrame() {
         super("SQL Notebook - 多标签 PG/Hive");
@@ -27,7 +39,9 @@ public class MainFrame extends JFrame {
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
 
-        this.metadataService = new MetadataService(Path.of("metadata.db"));
+        this.sqliteManager = new SQLiteManager(java.nio.file.Path.of("metadata.db"));
+        this.metadataService = new MetadataService(java.nio.file.Path.of("metadata.db"));
+        this.noteRepository = new NoteRepository(sqliteManager);
         buildMenu();
         buildContent();
         buildStatusBar();
@@ -39,32 +53,33 @@ public class MainFrame extends JFrame {
         JMenu file = new JMenu("文件");
         JMenu edit = new JMenu("编辑");
         JMenu view = new JMenu("视图");
+        JMenu window = new JMenu("窗口");
         JMenu tools = new JMenu("工具");
         JMenu help = new JMenu("帮助");
 
-        file.add(new JMenuItem(new AbstractAction("新建 PostgreSQL 标签") {
+        file.add(new JMenuItem(new AbstractAction("新建 PostgreSQL 笔记") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                addTab(DatabaseType.POSTGRESQL);
+                createNote(DatabaseType.POSTGRESQL);
             }
         }));
-        file.add(new JMenuItem(new AbstractAction("新建 Hive 标签") {
+        file.add(new JMenuItem(new AbstractAction("新建 Hive 笔记") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                addTab(DatabaseType.HIVE);
+                createNote(DatabaseType.HIVE);
             }
         }));
         file.addSeparator();
-        file.add(new JMenuItem(new AbstractAction("打开文件") {
+        file.add(new JMenuItem(new AbstractAction("打开笔记") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                openFile();
+                openNoteFromDb();
             }
         }));
         file.add(new JMenuItem(new AbstractAction("保存当前") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                EditorTabPanel panel = getCurrentTab();
+                EditorTabPanel panel = getCurrentPanel();
                 if (panel != null) panel.saveNow();
             }
         }));
@@ -72,6 +87,12 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 saveAll();
+            }
+        }));
+        file.add(new JMenuItem(new AbstractAction("管理笔记") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openNoteFromDb();
             }
         }));
         file.addSeparator();
@@ -90,17 +111,25 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        window.add(new JMenuItem(new AbstractAction("平铺窗口") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                tileFrames();
+            }
+        }));
+
         menuBar.add(file);
         menuBar.add(edit);
         menuBar.add(view);
+        menuBar.add(window);
         menuBar.add(tools);
         menuBar.add(help);
         setJMenuBar(menuBar);
     }
 
     private void buildContent() {
-        add(tabbedPane, BorderLayout.CENTER);
-        addTab(DatabaseType.POSTGRESQL);
+        add(desktopPane, BorderLayout.CENTER);
+        createNote(DatabaseType.POSTGRESQL);
     }
 
     private void buildStatusBar() {
@@ -114,68 +143,115 @@ public class MainFrame extends JFrame {
         add(status, BorderLayout.SOUTH);
     }
 
-    private void addTab(DatabaseType type) {
-        EditorTabPanel[] holder = new EditorTabPanel[1];
-        EditorTabPanel panel = new EditorTabPanel(type, metadataService, this::updateAutosaveTime, this::updateTaskCount,
-                title -> renameTab(holder[0], title));
-        holder[0] = panel;
-        tabbedPane.addTab(type == DatabaseType.POSTGRESQL ? "PG 笔记" : "Hive 笔记", panel);
-        tabbedPane.setSelectedComponent(panel);
+    private void createNote(DatabaseType type) {
+        String title = "未命名" + untitledIndex.getAndIncrement();
+        Note note = noteRepository.create(title, type);
+        addFrame(note);
     }
 
-    private void addTabFromFile(DatabaseType type, Path path, String content) {
-        EditorTabPanel[] holder = new EditorTabPanel[1];
-        EditorTabPanel panel = new EditorTabPanel(type, metadataService, this::updateAutosaveTime, this::updateTaskCount,
-                title -> renameTab(holder[0], title), path, content);
-        holder[0] = panel;
-        tabbedPane.addTab(path.getFileName().toString(), panel);
-        tabbedPane.setSelectedComponent(panel);
+    private void addFrame(Note note) {
+        EditorTabPanel panel = new EditorTabPanel(noteRepository, metadataService,
+                this::updateAutosaveTime, this::updateTaskCount,
+                newTitle -> renameFrame(panel, newTitle), note);
+        JInternalFrame frame = new JInternalFrame(note.getTitle(), true, true, true, true);
+        frame.setSize(600, 400);
+        frame.setLocation(20 * desktopPane.getAllFrames().length, 20 * desktopPane.getAllFrames().length);
+        frame.setVisible(true);
+        frame.add(panel, BorderLayout.CENTER);
+        installRenameHandler(frame, panel);
+        installMaximizeTiling(frame);
+        desktopPane.add(frame);
+        try {
+            frame.setSelected(true);
+        } catch (java.beans.PropertyVetoException ignored) { }
     }
 
-    private EditorTabPanel getCurrentTab() {
-        Component comp = tabbedPane.getSelectedComponent();
-        if (comp instanceof EditorTabPanel panel) return panel;
+    private void installRenameHandler(JInternalFrame frame, EditorTabPanel panel) {
+        BasicInternalFrameUI ui = (BasicInternalFrameUI) frame.getUI();
+        if (ui != null && ui.getNorthPane() != null) {
+            ui.getNorthPane().addMouseListener(new MouseAdapter() {
+                @Override
+                public void mouseClicked(MouseEvent e) {
+                    if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
+                        String current = panel.getNote().getTitle();
+                        String newTitle = JOptionPane.showInputDialog(frame, "重命名笔记", current);
+                        if (newTitle != null && !newTitle.isBlank()) {
+                            panel.rename(newTitle.trim());
+                            frame.setTitle(newTitle.trim());
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    private void installMaximizeTiling(JInternalFrame frame) {
+        frame.addPropertyChangeListener(JInternalFrame.IS_MAXIMUM_PROPERTY, new PropertyChangeListener() {
+            @Override
+            public void propertyChange(PropertyChangeEvent evt) {
+                if (Boolean.TRUE.equals(evt.getNewValue())) {
+                    tileFrames();
+                }
+            }
+        });
+    }
+
+    private EditorTabPanel getCurrentPanel() {
+        JInternalFrame frame = desktopPane.getSelectedFrame();
+        if (frame != null && frame.getContentPane().getComponentCount() > 0) {
+            Component comp = frame.getContentPane().getComponent(0);
+            if (comp instanceof EditorTabPanel panel) {
+                return panel;
+            }
+        }
         return null;
     }
 
     private void saveAll() {
-        for (int i = 0; i < tabbedPane.getTabCount(); i++) {
-            Component comp = tabbedPane.getComponentAt(i);
-            if (comp instanceof EditorTabPanel panel) {
+        for (JInternalFrame frame : desktopPane.getAllFrames()) {
+            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
                 panel.saveNow();
             }
         }
     }
 
-    private void openFile() {
-        JFileChooser chooser = new JFileChooser();
-        chooser.setDialogTitle("打开 SQL 文件");
-        int ret = chooser.showOpenDialog(this);
-        if (ret != JFileChooser.APPROVE_OPTION) return;
-        Path path = chooser.getSelectedFile().toPath();
-        DatabaseType chosen = askDbType();
-        if (chosen == null) return;
-        try {
-            String content = java.nio.file.Files.readString(path);
-            addTabFromFile(chosen, path, content);
-        } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "打开失败: " + ex.getMessage());
+    private void openNoteFromDb() {
+        List<Note> notes = noteRepository.listAll();
+        if (notes.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "暂无笔记，请先新建");
+            return;
+        }
+        Note selected = (Note) JOptionPane.showInputDialog(this, "选择要打开的笔记", "打开笔记",
+                JOptionPane.PLAIN_MESSAGE, null, notes.toArray(), notes.get(0));
+        if (selected != null) {
+            addFrame(selected);
         }
     }
 
-    private DatabaseType askDbType() {
-        Object[] options = {"PostgreSQL", "Hive"};
-        int idx = JOptionPane.showOptionDialog(this, "请选择文件对应的数据库类型", "选择数据库", JOptionPane.DEFAULT_OPTION,
-                JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
-        if (idx == 0) return DatabaseType.POSTGRESQL;
-        if (idx == 1) return DatabaseType.HIVE;
-        return null;
+    private void renameFrame(EditorTabPanel panel, String title) {
+        for (JInternalFrame frame : desktopPane.getAllFrames()) {
+            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) == panel) {
+                frame.setTitle(title);
+                break;
+            }
+        }
     }
 
-    private void renameTab(EditorTabPanel panel, String title) {
-        int index = tabbedPane.indexOfComponent(panel);
-        if (index >= 0) {
-            tabbedPane.setTitleAt(index, title);
+    private void tileFrames() {
+        JInternalFrame[] frames = desktopPane.getAllFrames();
+        int count = frames.length;
+        if (count == 0) return;
+        int rows = (int) Math.ceil(Math.sqrt(count));
+        int cols = (int) Math.ceil((double) count / rows);
+        int w = desktopPane.getWidth() / cols;
+        int h = desktopPane.getHeight() / rows;
+        for (int i = 0; i < count; i++) {
+            int r = i / cols;
+            int c = i % cols;
+            try {
+                frames[i].setMaximum(false);
+            } catch (Exception ignored) {}
+            frames[i].setBounds(c * w, r * h, w, h);
         }
     }
 

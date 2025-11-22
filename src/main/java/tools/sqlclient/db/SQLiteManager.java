@@ -41,6 +41,13 @@ public class SQLiteManager {
                     "schema_name TEXT, object_name TEXT, column_name TEXT, sort_no INTEGER, " +
                     "use_count INTEGER DEFAULT 0, last_used_at INTEGER, " +
                     "PRIMARY KEY(schema_name, object_name, column_name))");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS notes (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "title TEXT NOT NULL, " +
+                    "content TEXT, " +
+                    "db_type TEXT NOT NULL, " +
+                    "updated_at INTEGER NOT NULL"
+                    + ")");
         } catch (Exception e) {
             throw new RuntimeException("初始化 SQLite 失败", e);
         }
