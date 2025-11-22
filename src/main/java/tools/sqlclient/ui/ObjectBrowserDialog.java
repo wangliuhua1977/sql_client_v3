@@ -1,13 +1,15 @@
 package tools.sqlclient.ui;
 
 import tools.sqlclient.metadata.MetadataService;
-import tools.sqlclient.metadata.MetadataService.TableWithColumns;
+import tools.sqlclient.metadata.MetadataService.TableEntry;
 
 import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
+import javax.swing.tree.TreePath;
+import javax.swing.tree.DefaultTreeCellRenderer;
 import java.awt.*;
 import java.util.List;
 
@@ -41,6 +43,27 @@ public class ObjectBrowserDialog extends JDialog {
 
         tree.setRootVisible(true);
         tree.setShowsRootHandles(true);
+        tree.setCellRenderer(new DefaultTreeCellRenderer() {
+            @Override
+            public Component getTreeCellRendererComponent(JTree tree, Object value, boolean sel, boolean expanded, boolean leaf, int row, boolean hasFocus) {
+                JLabel label = (JLabel) super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus);
+                if (value instanceof DefaultMutableTreeNode node) {
+                    Object user = node.getUserObject();
+                    if (user instanceof TableEntry entry) {
+                        label.setText(entry.name() + " (" + entry.type() + ")");
+                    }
+                }
+                return label;
+            }
+        });
+        tree.addTreeSelectionListener(e -> {
+            DefaultMutableTreeNode node = (DefaultMutableTreeNode) tree.getLastSelectedPathComponent();
+            if (node == null) return;
+            Object user = node.getUserObject();
+            if (user instanceof TableEntry entry) {
+                loadColumnsLazy(node, entry.name());
+            }
+        });
 
         add(keyword, BorderLayout.NORTH);
         add(new JScrollPane(tree), BorderLayout.CENTER);
@@ -51,19 +74,36 @@ public class ObjectBrowserDialog extends JDialog {
     private void refresh(String keyword) {
         SwingUtilities.invokeLater(() -> {
             root.removeAllChildren();
-            List<TableWithColumns> tables = metadataService.listTablesWithColumns(keyword);
-            for (TableWithColumns table : tables) {
-                DefaultMutableTreeNode tableNode = new DefaultMutableTreeNode(table.name() + " (" + table.type() + ")");
-                for (String col : table.columns()) {
-                    tableNode.add(new DefaultMutableTreeNode(col));
-                }
+            List<TableEntry> tables = metadataService.listTables(keyword);
+            for (TableEntry table : tables) {
+                DefaultMutableTreeNode tableNode = new DefaultMutableTreeNode(table);
                 root.add(tableNode);
             }
             DefaultTreeModel model = (DefaultTreeModel) tree.getModel();
             model.reload();
-            for (int i = 0; i < tree.getRowCount(); i++) {
-                tree.expandRow(i);
-            }
+        });
+    }
+
+    private void loadColumnsLazy(DefaultMutableTreeNode tableNode, String tableName) {
+        if (tableNode.getChildCount() > 0) return; // 已加载
+        // 本地缓存直接渲染
+        List<String> cached = metadataService.loadColumnsFromCache(tableName);
+        if (!cached.isEmpty()) {
+            cached.forEach(col -> tableNode.add(new DefaultMutableTreeNode(col)));
+            ((DefaultTreeModel) tree.getModel()).reload(tableNode);
+            tree.expandPath(new TreePath(tableNode.getPath()));
+            return;
+        }
+        // 远程补齐再刷新
+        metadataService.ensureColumnsCachedAsync(tableName, () -> {
+            List<String> cols = metadataService.loadColumnsFromCache(tableName);
+            SwingUtilities.invokeLater(() -> {
+                for (String col : cols) {
+                    tableNode.add(new DefaultMutableTreeNode(col));
+                }
+                ((DefaultTreeModel) tree.getModel()).reload(tableNode);
+                tree.expandPath(new TreePath(tableNode.getPath()));
+            });
         });
     }
 }

@@ -196,6 +196,7 @@ public class MainFrame extends JFrame {
         BasicInternalFrameUI ui = (BasicInternalFrameUI) frame.getUI();
         JComponent north = ui != null ? (JComponent) ui.getNorthPane() : null;
         if (north == null) return;
+        LayoutManager originalLayout = north.getLayout();
         JTextField field = new JTextField(frame.getTitle());
         field.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
         Dimension size = new Dimension(Math.max(140, field.getPreferredSize().width + 20), north.getHeight() - 6);
@@ -217,6 +218,7 @@ public class MainFrame extends JFrame {
                 frame.setTitle(text.trim());
             }
             north.remove(field);
+            north.setLayout(originalLayout);
             north.revalidate();
             north.repaint();
         };

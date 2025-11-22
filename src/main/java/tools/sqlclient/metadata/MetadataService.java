@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Statement;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -96,13 +97,6 @@ public class MetadataService {
             }
 
             // 更新列信息
-            List<CompletableFuture<Void>> tasks = new ArrayList<>();
-            for (RemoteObject obj : remoteObjects) {
-                if (obj.object_type.equals("table") || obj.object_type.equals("view")) {
-                    tasks.add(CompletableFuture.runAsync(() -> updateColumns(obj.object_name), networkPool));
-                }
-            }
-            CompletableFuture.allOf(tasks.toArray(new CompletableFuture[0])).join();
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
         }
@@ -159,52 +153,92 @@ public class MetadataService {
     }
 
     private void updateColumns(String objectName) {
-        try {
-            String encodedName = URLEncoder.encode(objectName, StandardCharsets.UTF_8);
-            HttpRequest request = HttpRequest.newBuilder(URI.create(COL_API_TEMPLATE.formatted(encodedName))).GET().build();
-            HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-            Type listType = new TypeToken<List<RemoteColumn>>(){}.getType();
-            List<RemoteColumn> columns;
-            try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
-                JsonElement root = gson.fromJson(reader, JsonElement.class);
-                columns = parseListFromJson(root, listType);
-            }
-            if (columns == null) return;
-            synchronized (dbWriteLock) {
-                try (Connection conn = sqliteManager.getConnection()) {
-                    conn.setAutoCommit(false);
-                    List<String> localCols = new ArrayList<>();
-                    try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=?")) {
-                        ps.setString(1, objectName);
-                        try (ResultSet rs = ps.executeQuery()) {
-                            while (rs.next()) localCols.add(rs.getString(1));
+        boolean knownTableOrView = isTableOrView(objectName);
+        int attempts = 0;
+        while (attempts < 3) {
+            try {
+                attempts++;
+                String encodedName = URLEncoder.encode(objectName, StandardCharsets.UTF_8);
+                HttpRequest request = HttpRequest.newBuilder(URI.create(COL_API_TEMPLATE.formatted(encodedName))).GET().build();
+                HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+                Type listType = new TypeToken<List<RemoteColumn>>(){}.getType();
+                List<RemoteColumn> columns;
+                try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
+                    JsonElement root = gson.fromJson(reader, JsonElement.class);
+                    columns = parseListFromJson(root, listType);
+                }
+                if (columns == null || columns.isEmpty()) return;
+                synchronized (dbWriteLock) {
+                    try (Connection conn = sqliteManager.getConnection()) {
+                        conn.setAutoCommit(false);
+                        try (Statement st = conn.createStatement()) {
+                            st.execute("BEGIN IMMEDIATE");
                         }
-                    }
-                    boolean changed = columns.size() != localCols.size() ||
-                            !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
-                    if (changed) {
-                        try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
-                            del.setString(1, objectName);
-                            del.executeUpdate();
-                        }
-                        try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
-                            int i = 0;
-                            for (RemoteColumn col : columns) {
-                                ins.setString(1, col.schema_name);
-                                ins.setString(2, objectName);
-                                ins.setString(3, col.column_name);
-                                ins.setInt(4, i++);
-                                ins.addBatch();
+                        if (!knownTableOrView) {
+                            try (PreparedStatement up = conn.prepareStatement(
+                                    "INSERT OR IGNORE INTO objects(schema_name, object_name, object_type, use_count, last_used_at) VALUES(?,?,?,?,?)")) {
+                                up.setString(1, columns.get(0).schema_name);
+                                up.setString(2, objectName);
+                                up.setString(3, "table");
+                                up.setInt(4, 0);
+                                up.setLong(5, System.currentTimeMillis());
+                                up.executeUpdate();
                             }
-                            ins.executeBatch();
                         }
-                        conn.commit();
+                        List<String> localCols = new ArrayList<>();
+                        try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=?")) {
+                            ps.setString(1, objectName);
+                            try (ResultSet rs = ps.executeQuery()) {
+                                while (rs.next()) localCols.add(rs.getString(1));
+                            }
+                        }
+                        boolean changed = columns.size() != localCols.size() ||
+                                !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
+                        if (changed) {
+                            try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
+                                del.setString(1, objectName);
+                                del.executeUpdate();
+                            }
+                            try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
+                                int i = 0;
+                                for (RemoteColumn col : columns) {
+                                    ins.setString(1, col.schema_name);
+                                    ins.setString(2, objectName);
+                                    ins.setString(3, col.column_name);
+                                    ins.setInt(4, i++);
+                                    ins.addBatch();
+                                }
+                                ins.executeBatch();
+                            }
+                            conn.commit();
+                        }
                     }
+                }
+                return;
+            } catch (Exception e) {
+                if (attempts >= 3) {
+                    log.error("更新字段失败: {}", objectName, e);
+                } else {
+                    try { Thread.sleep(300L * attempts); } catch (InterruptedException ignored) {}
+                }
+            }
+        }
+    }
+
+    private boolean isTableOrView(String objectName) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT object_type FROM objects WHERE object_name=?")) {
+            ps.setString(1, objectName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String type = rs.getString(1);
+                    return "table".equalsIgnoreCase(type) || "view".equalsIgnoreCase(type);
                 }
             }
         } catch (Exception e) {
-            log.error("更新字段失败: {}", objectName, e);
+            log.warn("校验对象类型失败: {}", objectName, e);
         }
+        return false;
     }
 
     public List<SuggestionItem> suggest(String token, SuggestionContext context, int limit) {
@@ -218,7 +252,8 @@ public class MetadataService {
     }
 
     private String toLikePattern(String token) {
-        if (token == null || token.isBlank()) return null;
+        if (token == null) return null;
+        if (token.isBlank()) return "%";
         String[] keywords = token.toLowerCase().split("%");
         return Arrays.stream(keywords).map(k -> "%" + k + "%").collect(Collectors.joining());
     }
@@ -280,7 +315,7 @@ public class MetadataService {
     /**
      * 提供对象浏览器使用的表/视图 + 字段列表查询。
      */
-    public List<TableWithColumns> listTablesWithColumns(String keyword) {
+    public List<TableEntry> listTables(String keyword) {
         String like = (keyword == null || keyword.isBlank()) ? "%" : toLikePattern(keyword);
         if (like == null) like = "%";
         String sql = "SELECT object_name, object_type FROM objects WHERE object_type IN ('table','view')" +
@@ -290,12 +325,12 @@ public class MetadataService {
             if (!"%".equals(like)) {
                 ps.setString(1, like);
             }
-            List<TableWithColumns> list = new ArrayList<>();
+            List<TableEntry> list = new ArrayList<>();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     String name = rs.getString("object_name");
                     String type = rs.getString("object_type");
-                    list.add(new TableWithColumns(name, type, fetchColumns(conn, name)));
+                    list.add(new TableEntry(name, type));
                 }
             }
             return list;
@@ -305,8 +340,9 @@ public class MetadataService {
         }
     }
 
-    private List<String> fetchColumns(Connection conn, String tableName) {
-        try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no ASC, column_name ASC")) {
+    public List<String> loadColumnsFromCache(String tableName) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no ASC, column_name ASC")) {
             ps.setString(1, tableName);
             try (ResultSet rs = ps.executeQuery()) {
                 List<String> cols = new ArrayList<>();
@@ -374,7 +410,7 @@ public class MetadataService {
 
     public record SuggestionContext(SuggestionType type, String tableHint) {}
 
-    public record TableWithColumns(String name, String type, List<String> columns) {}
+    public record TableEntry(String name, String type) {}
 
     public enum SuggestionType {
         TABLE_OR_VIEW,

@@ -112,7 +112,9 @@ public class SuggestionEngine {
 
     private boolean shouldTrigger(KeyEvent e) {
         char ch = e.getKeyChar();
-        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '.' || ch == '_' || e.getKeyCode() == KeyEvent.VK_SPACE;
+        int code = e.getKeyCode();
+        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '.' || ch == '_' ||
+                code == KeyEvent.VK_PERIOD || code == KeyEvent.VK_DECIMAL || code == KeyEvent.VK_SPACE;
     }
 
     private String currentToken() {
@@ -138,13 +140,17 @@ public class SuggestionEngine {
                     () -> SwingUtilities.invokeLater(() -> showSuggestions(token, context, true)));
         }
         currentItems = metadataService.suggest(token, context, 15);
+        computeReplacementRange(token);
         if (currentItems.isEmpty()) {
-            if (!refreshing) {
+            if (refreshing) {
+                list.setListData(new SuggestionItem[]{new SuggestionItem("加载中...", "loading", null, 0)});
+                list.setSelectedIndex(0);
+                showPopup();
+            } else {
                 popup.setVisible(false);
             }
             return;
         }
-        computeReplacementRange(token);
         int keepIndex = list.getSelectedIndex();
         list.setListData(currentItems.toArray(new SuggestionItem[0]));
         if (keepIndex >= 0 && keepIndex < list.getModel().getSize()) {
@@ -152,6 +158,10 @@ public class SuggestionEngine {
         } else {
             list.setSelectedIndex(0);
         }
+        showPopup();
+    }
+
+    private void showPopup() {
         try {
             Rectangle view = textArea.modelToView(textArea.getCaretPosition());
             popup.show(textArea, view.x, view.y + view.height);
@@ -162,7 +172,7 @@ public class SuggestionEngine {
 
     private void commitSelection() {
         SuggestionItem item = list.getSelectedValue();
-        if (item == null) return;
+        if (item == null || "loading".equals(item.type())) return;
         insertText(item.name());
         if ("table".equals(item.type()) || "view".equals(item.type())) {
             metadataService.ensureColumnsCachedAsync(item.name());

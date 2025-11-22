@@ -24,7 +24,7 @@ public class SQLiteManager {
         // WAL + busy timeout 能够减少多线程写入时的锁冲突
         config.setJournalMode(SQLiteConfig.JournalMode.WAL);
         config.setSynchronous(SQLiteConfig.SynchronousMode.NORMAL);
-        config.setBusyTimeout(5000);
+        config.setBusyTimeout(15000);
         return DriverManager.getConnection("jdbc:sqlite:" + dbPath.toAbsolutePath(), config.toProperties());
     }
 
