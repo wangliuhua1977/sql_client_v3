@@ -41,6 +41,7 @@ public class EditorTabPanel extends JPanel {
         this.filePath = Path.of("notes", databaseType.name().toLowerCase() + "_" + UUID.randomUUID() + ".sql");
         this.autoSaveService = new AutoSaveService(autosaveCallback, taskCallback);
         this.suggestionEngine = new SuggestionEngine(metadataService, textArea);
+        this.textArea.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
         initLayout();
         LinkResolver.install(textArea);
         autoSaveService.startAutoSave(this::saveNow);
@@ -58,7 +59,6 @@ public class EditorTabPanel extends JPanel {
         area.setTabSize(4);
         area.setFocusable(true);
         area.setToolTipText("Ctrl+Space 开关自动联想");
-        area.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
         return area;
     }
 
