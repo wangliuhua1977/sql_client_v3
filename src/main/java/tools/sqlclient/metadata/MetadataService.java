@@ -1,6 +1,9 @@
 package tools.sqlclient.metadata;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import com.google.gson.reflect.TypeToken;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -102,18 +105,23 @@ public class MetadataService {
     private List<RemoteObject> fetchObjects() throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create(OBJ_API)).GET().build();
         HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8);
         Type listType = new TypeToken<List<RemoteObject>>(){}.getType();
-        return gson.fromJson(reader, listType);
+        try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
+            JsonElement root = gson.fromJson(reader, JsonElement.class);
+            return parseListFromJson(root, listType);
+        }
     }
 
     private void updateColumns(String objectName) {
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(COL_API_TEMPLATE.formatted(objectName))).GET().build();
             HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-            InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8);
             Type listType = new TypeToken<List<RemoteColumn>>(){}.getType();
-            List<RemoteColumn> columns = gson.fromJson(reader, listType);
+            List<RemoteColumn> columns;
+            try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
+                JsonElement root = gson.fromJson(reader, JsonElement.class);
+                columns = parseListFromJson(root, listType);
+            }
             if (columns == null) return;
             try (Connection conn = sqliteManager.getConnection()) {
                 conn.setAutoCommit(false);
@@ -184,6 +192,31 @@ public class MetadataService {
             log.error("模糊匹配失败", e);
             return List.of();
         }
+    }
+
+    /**
+     * 兼容 API 返回值既可能是数组，也可能是包装对象（如 {"data": [...]}）。
+     */
+    private <T> List<T> parseListFromJson(JsonElement root, Type listType) {
+        if (root == null || root.isJsonNull()) {
+            return List.of();
+        }
+        if (root.isJsonArray()) {
+            return gson.fromJson(root, listType);
+        }
+        if (root.isJsonObject()) {
+            JsonObject obj = root.getAsJsonObject();
+            for (String key : List.of("data", "rows", "list", "items", "result")) {
+                JsonElement maybeArray = obj.get(key);
+                if (maybeArray != null && maybeArray.isJsonArray()) {
+                    JsonArray arr = maybeArray.getAsJsonArray();
+                    return gson.fromJson(arr, listType);
+                }
+            }
+        }
+        // fallback: 返回空列表，避免抛出解析异常
+        log.warn("未能从 JSON 解析出数组结构: {}", root);
+        return List.of();
     }
 
     static class RemoteObject {
