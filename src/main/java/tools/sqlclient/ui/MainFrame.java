@@ -7,7 +7,6 @@ import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.Note;
-import tools.sqlclient.ui.ObjectBrowserDialog;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -16,6 +15,10 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -87,10 +90,10 @@ public class MainFrame extends JFrame {
             }
         }));
         file.addSeparator();
-        file.add(new JMenuItem(new AbstractAction("打开笔记") {
+        file.add(new JMenuItem(new AbstractAction("导入笔记") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                openNoteFromDb();
+                importNoteFromFile();
             }
         }));
         file.add(new JMenuItem(new AbstractAction("保存当前") {
@@ -109,7 +112,7 @@ public class MainFrame extends JFrame {
         file.add(new JMenuItem(new AbstractAction("管理笔记") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                openNoteFromDb();
+                openManageDialog();
             }
         }));
         file.add(new JMenuItem(new AbstractAction("设置 - SQL 编辑器选项") {
@@ -200,9 +203,17 @@ public class MainFrame extends JFrame {
     }
 
     private void createNote(DatabaseType type) {
-        String title = "未命名" + untitledIndex.getAndIncrement();
-        Note note = noteRepository.create(title, type);
-        openNoteInCurrentMode(note);
+        boolean created = false;
+        while (!created) {
+            String title = "未命名" + untitledIndex.getAndIncrement();
+            try {
+                Note note = noteRepository.create(title, type);
+                openNoteInCurrentMode(note);
+                created = true;
+            } catch (IllegalArgumentException ex) {
+                // 重复则继续尝试下一个序号
+            }
+        }
     }
 
     private EditorTabPanel getOrCreatePanel(Note note) {
@@ -334,17 +345,48 @@ public class MainFrame extends JFrame {
         persistOpenFrames();
     }
 
-    private void openNoteFromDb() {
-        List<Note> notes = noteRepository.listAll();
-        if (notes.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "暂无笔记，请先新建");
+    private void openManageDialog() {
+        ManageNotesDialog dialog = new ManageNotesDialog(this, noteRepository, this::openNoteInCurrentMode);
+        dialog.setVisible(true);
+    }
+
+    private void importNoteFromFile() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("导入本地笔记 (*.sql, *.md)");
+        chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("SQL/Markdown", "sql", "md", "txt"));
+        int result = chooser.showOpenDialog(this);
+        if (result != JFileChooser.APPROVE_OPTION) {
             return;
         }
-        Note selected = (Note) JOptionPane.showInputDialog(this, "选择要打开的笔记", "打开笔记",
-                JOptionPane.PLAIN_MESSAGE, null, notes.toArray(), notes.get(0));
-        if (selected != null) {
-            openNoteInCurrentMode(selected);
+        Path path = chooser.getSelectedFile().toPath();
+        String baseName = path.getFileName().toString();
+        int dot = baseName.lastIndexOf('.') > 0 ? baseName.lastIndexOf('.') : baseName.length();
+        String title = baseName.substring(0, dot);
+        DatabaseType type = (DatabaseType) JOptionPane.showInputDialog(this, "选择数据库类型", "导入笔记",
+                JOptionPane.PLAIN_MESSAGE, null, DatabaseType.values(), DatabaseType.POSTGRESQL);
+        if (type == null) return;
+        title = askUniqueTitle(title);
+        try {
+            String content = Files.readString(path, StandardCharsets.UTF_8);
+            Note note = noteRepository.create(title, type);
+            noteRepository.updateContent(note, content);
+            openNoteInCurrentMode(note);
+        } catch (IllegalStateException ignore) {
+            // 用户取消输入
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "导入失败: " + ex.getMessage());
         }
+    }
+
+    private String askUniqueTitle(String suggested) {
+        String title = suggested;
+        while (noteRepository.titleExists(title, null)) {
+            title = JOptionPane.showInputDialog(this, "笔记标题已存在，请输入新标题", title + "_1");
+            if (title == null || title.isBlank()) {
+                throw new IllegalStateException("用户取消导入");
+            }
+        }
+        return title;
     }
 
     private void openEditorSettings() {

@@ -122,8 +122,12 @@ public class EditorTabPanel extends JPanel {
     }
 
     public void rename(String newTitle) {
-        noteRepository.rename(note, newTitle);
-        updateTitle();
+        try {
+            noteRepository.rename(note, newTitle);
+            updateTitle();
+        } catch (IllegalArgumentException ex) {
+            JOptionPane.showMessageDialog(this, ex.getMessage());
+        }
     }
 
     public void setFullWidthConversionEnabled(boolean enabled) {

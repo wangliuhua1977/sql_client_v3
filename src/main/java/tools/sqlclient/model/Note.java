@@ -5,14 +5,20 @@ public class Note {
     private String title;
     private String content;
     private DatabaseType databaseType;
+    private long createdAt;
     private long updatedAt;
+    private String tags;
+    private boolean starred;
 
-    public Note(long id, String title, String content, DatabaseType databaseType, long updatedAt) {
+    public Note(long id, String title, String content, DatabaseType databaseType, long createdAt, long updatedAt, String tags, boolean starred) {
         this.id = id;
         this.title = title;
         this.content = content;
         this.databaseType = databaseType;
+        this.createdAt = createdAt;
         this.updatedAt = updatedAt;
+        this.tags = tags == null ? "" : tags;
+        this.starred = starred;
     }
 
     public long getId() {
@@ -49,6 +55,30 @@ public class Note {
 
     public void setUpdatedAt(long updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    public long getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(long createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public String getTags() {
+        return tags;
+    }
+
+    public void setTags(String tags) {
+        this.tags = tags == null ? "" : tags;
+    }
+
+    public boolean isStarred() {
+        return starred;
+    }
+
+    public void setStarred(boolean starred) {
+        this.starred = starred;
     }
 
     @Override

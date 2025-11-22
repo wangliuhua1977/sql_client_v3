@@ -22,17 +22,23 @@ public class NoteRepository {
     }
 
     public Note create(String title, DatabaseType type) {
+        if (titleExists(title, null)) {
+            throw new IllegalArgumentException("笔记标题已存在，请更换名称");
+        }
         long now = Instant.now().toEpochMilli();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                     "INSERT INTO notes(title, content, db_type, updated_at) VALUES(?,?,?,?) RETURNING id")) {
+                     "INSERT INTO notes(title, content, db_type, created_at, updated_at, tags, starred) VALUES(?,?,?,?,?,?,?) RETURNING id")) {
             ps.setString(1, title);
             ps.setString(2, "");
             ps.setString(3, type.name());
             ps.setLong(4, now);
+            ps.setLong(5, now);
+            ps.setString(6, "");
+            ps.setInt(7, 0);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    return new Note(rs.getLong(1), title, "", type, now);
+                    return new Note(rs.getLong(1), title, "", type, now, now, "", false);
                 }
             }
         } catch (Exception e) {
@@ -59,6 +65,9 @@ public class NoteRepository {
     }
 
     public void rename(Note note, String newTitle) {
+        if (titleExists(newTitle, note.getId())) {
+            throw new IllegalArgumentException("笔记标题已存在，请更换名称");
+        }
         long now = Instant.now().toEpochMilli();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(
@@ -74,8 +83,41 @@ public class NoteRepository {
         }
     }
 
+    public void updateMetadata(Note note, String tags, boolean starred) {
+        long now = Instant.now().toEpochMilli();
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET tags=?, starred=?, updated_at=? WHERE id=?")) {
+            ps.setString(1, tags);
+            ps.setInt(2, starred ? 1 : 0);
+            ps.setLong(3, now);
+            ps.setLong(4, note.getId());
+            ps.executeUpdate();
+            note.setTags(tags);
+            note.setStarred(starred);
+            note.setUpdatedAt(now);
+        } catch (Exception e) {
+            throw new RuntimeException("更新笔记标签/星标失败", e);
+        }
+    }
+
+    public boolean titleExists(String title, Long excludeId) {
+        String sql = "SELECT 1 FROM notes WHERE title=?" + (excludeId != null ? " AND id<>?" : "") + " LIMIT 1";
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, title);
+            if (excludeId != null) {
+                ps.setLong(2, excludeId);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("检查笔记标题失败", e);
+        }
+    }
+
     public Optional<Note> find(long id) {
-        String sql = "SELECT id, title, content, db_type, updated_at FROM notes WHERE id=?";
+        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes WHERE id=?";
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);
@@ -91,7 +133,7 @@ public class NoteRepository {
     }
 
     public List<Note> listAll() {
-        String sql = "SELECT id, title, content, db_type, updated_at FROM notes ORDER BY updated_at DESC, id DESC";
+        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes ORDER BY updated_at DESC, id DESC";
         List<Note> notes = new ArrayList<>();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
@@ -108,7 +150,7 @@ public class NoteRepository {
     public List<Note> listByIds(List<Long> ids) {
         if (ids == null || ids.isEmpty()) return List.of();
         String placeholders = ids.stream().map(i -> "?").collect(java.util.stream.Collectors.joining(","));
-        String sql = "SELECT id, title, content, db_type, updated_at FROM notes WHERE id IN (" + placeholders + ") ORDER BY updated_at DESC";
+        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes WHERE id IN (" + placeholders + ") ORDER BY updated_at DESC";
         List<Note> notes = new ArrayList<>();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -127,13 +169,50 @@ public class NoteRepository {
         return notes;
     }
 
+    public List<Note> search(String keyword, String fullText) {
+        StringBuilder sql = new StringBuilder("SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes WHERE 1=1");
+        List<String> params = new ArrayList<>();
+        if (keyword != null && !keyword.isBlank()) {
+            sql.append(" AND (title LIKE ? OR tags LIKE ?)");
+            String kw = "%" + keyword.trim() + "%";
+            params.add(kw);
+            params.add(kw);
+        }
+        if (fullText != null && !fullText.isBlank()) {
+            sql.append(" AND (title LIKE ? OR content LIKE ?)");
+            String kw = "%" + fullText.trim() + "%";
+            params.add(kw);
+            params.add(kw);
+        }
+        sql.append(" ORDER BY starred DESC, updated_at DESC, id DESC");
+        List<Note> notes = new ArrayList<>();
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+            int idx = 1;
+            for (String p : params) {
+                ps.setString(idx++, p);
+            }
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    notes.add(mapRow(rs));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("搜索笔记失败", e);
+        }
+        return notes;
+    }
+
     private Note mapRow(ResultSet rs) throws Exception {
         return new Note(
                 rs.getLong("id"),
                 rs.getString("title"),
                 rs.getString("content"),
                 DatabaseType.valueOf(rs.getString("db_type")),
-                rs.getLong("updated_at")
+                rs.getLong("created_at"),
+                rs.getLong("updated_at"),
+                rs.getString("tags"),
+                rs.getInt("starred") == 1
         );
     }
 }

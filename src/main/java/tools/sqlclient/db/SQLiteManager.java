@@ -46,14 +46,31 @@ public class SQLiteManager {
                     "title TEXT NOT NULL, " +
                     "content TEXT, " +
                     "db_type TEXT NOT NULL, " +
-                    "updated_at INTEGER NOT NULL"
+                    "created_at INTEGER NOT NULL, " +
+                    "updated_at INTEGER NOT NULL, " +
+                    "tags TEXT DEFAULT '', " +
+                    "starred INTEGER DEFAULT 0"
                     + ")");
+            // 兼容旧版本：逐列补齐（已存在则忽略异常）
+            safeAlter(st, "ALTER TABLE notes ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)");
+            safeAlter(st, "ALTER TABLE notes ADD COLUMN tags TEXT DEFAULT ''");
+            safeAlter(st, "ALTER TABLE notes ADD COLUMN starred INTEGER DEFAULT 0");
+            // 对于旧表，created_at 可能为默认值，保持唯一标题约束即可
+            safeAlter(st, "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_title_unique ON notes(title)");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS app_state (" +
                     "key TEXT PRIMARY KEY, " +
                     "value TEXT"
                     + ")");
         } catch (Exception e) {
             throw new RuntimeException("初始化 SQLite 失败", e);
+        }
+    }
+
+    private void safeAlter(Statement st, String sql) {
+        try {
+            st.executeUpdate(sql);
+        } catch (SQLException ignored) {
+            // 列已存在时忽略异常
         }
     }
 }
