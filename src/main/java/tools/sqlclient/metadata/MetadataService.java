@@ -171,46 +171,48 @@ public class MetadataService {
                 synchronized (dbWriteLock) {
                     try (Connection conn = sqliteManager.getConnection()) {
                         conn.setAutoCommit(false);
-                        try (Statement st = conn.createStatement()) {
-                            st.execute("BEGIN IMMEDIATE");
-                        }
-                        if (!knownTableOrView) {
-                            try (PreparedStatement up = conn.prepareStatement(
-                                    "INSERT OR IGNORE INTO objects(schema_name, object_name, object_type, use_count, last_used_at) VALUES(?,?,?,?,?)")) {
-                                up.setString(1, columns.get(0).schema_name);
-                                up.setString(2, objectName);
-                                up.setString(3, "table");
-                                up.setInt(4, 0);
-                                up.setLong(5, System.currentTimeMillis());
-                                up.executeUpdate();
-                            }
-                        }
-                        List<String> localCols = new ArrayList<>();
-                        try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=?")) {
-                            ps.setString(1, objectName);
-                            try (ResultSet rs = ps.executeQuery()) {
-                                while (rs.next()) localCols.add(rs.getString(1));
-                            }
-                        }
-                        boolean changed = columns.size() != localCols.size() ||
-                                !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
-                        if (changed) {
-                            try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
-                                del.setString(1, objectName);
-                                del.executeUpdate();
-                            }
-                            try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
-                                int i = 0;
-                                for (RemoteColumn col : columns) {
-                                    ins.setString(1, col.schema_name);
-                                    ins.setString(2, objectName);
-                                    ins.setString(3, col.column_name);
-                                    ins.setInt(4, i++);
-                                    ins.addBatch();
+                        try {
+                            if (!knownTableOrView) {
+                                try (PreparedStatement up = conn.prepareStatement(
+                                        "INSERT OR IGNORE INTO objects(schema_name, object_name, object_type, use_count, last_used_at) VALUES(?,?,?,?,?)")) {
+                                    up.setString(1, columns.get(0).schema_name);
+                                    up.setString(2, objectName);
+                                    up.setString(3, "table");
+                                    up.setInt(4, 0);
+                                    up.setLong(5, System.currentTimeMillis());
+                                    up.executeUpdate();
                                 }
-                                ins.executeBatch();
+                            }
+                            List<String> localCols = new ArrayList<>();
+                            try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=?")) {
+                                ps.setString(1, objectName);
+                                try (ResultSet rs = ps.executeQuery()) {
+                                    while (rs.next()) localCols.add(rs.getString(1));
+                                }
+                            }
+                            boolean changed = columns.size() != localCols.size() ||
+                                    !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
+                            if (changed) {
+                                try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
+                                    del.setString(1, objectName);
+                                    del.executeUpdate();
+                                }
+                                try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
+                                    int i = 0;
+                                    for (RemoteColumn col : columns) {
+                                        ins.setString(1, col.schema_name);
+                                        ins.setString(2, objectName);
+                                        ins.setString(3, col.column_name);
+                                        ins.setInt(4, i++);
+                                        ins.addBatch();
+                                    }
+                                    ins.executeBatch();
+                                }
                             }
                             conn.commit();
+                        } catch (Exception ex) {
+                            try { conn.rollback(); } catch (Exception ignore) {}
+                            throw ex;
                         }
                     }
                 }
@@ -239,6 +241,22 @@ public class MetadataService {
             log.warn("校验对象类型失败: {}", objectName, e);
         }
         return false;
+    }
+
+    /**
+     * 仅检查本地缓存中是否存在 table/view 记录，不触发网络请求。
+     */
+    public boolean isKnownTableOrViewCached(String objectName) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM objects WHERE object_name=? AND object_type IN ('table','view')")) {
+            ps.setString(1, objectName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (Exception e) {
+            log.warn("检查缓存对象失败: {}", objectName, e);
+            return false;
+        }
     }
 
     public List<SuggestionItem> suggest(String token, SuggestionContext context, int limit) {

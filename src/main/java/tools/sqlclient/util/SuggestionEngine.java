@@ -221,8 +221,14 @@ public class SuggestionEngine {
         if (token.contains(".")) {
             String[] parts = token.split("\\.");
             if (parts.length >= 1) {
-                String table = resolveAlias(parts[0], before);
-                return new SuggestionContext(SuggestionType.COLUMN, table);
+                String aliasOrTable = parts[0];
+                String table = resolveAlias(aliasOrTable, before);
+                if (table == null && metadataService.isKnownTableOrViewCached(aliasOrTable)) {
+                    table = aliasOrTable; // 直接输入表名的场景
+                }
+                if (table != null) {
+                    return new SuggestionContext(SuggestionType.COLUMN, table);
+                }
             }
         }
 
@@ -248,14 +254,19 @@ public class SuggestionEngine {
 
     private String resolveAlias(String alias, String before) {
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
-                "(?i)(from|join)\\s+([\\w.]+)\\s+(?:as\\s+)?([\\w]+)");
+                "(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
         java.util.regex.Matcher matcher = pattern.matcher(before);
-        String resolved = alias;
+        String resolved = null;
         while (matcher.find()) {
             String tableToken = matcher.group(2);
             String aliasToken = matcher.group(3);
-            if (aliasToken.equals(alias)) {
+            if (aliasToken != null && aliasToken.equals(alias)) {
                 resolved = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
+            } else if (aliasToken == null) {
+                String base = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
+                if (base.equals(alias)) {
+                    resolved = base;
+                }
             }
         }
         return resolved;
