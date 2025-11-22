@@ -231,7 +231,7 @@ public class SuggestionEngine {
             String[] parts = token.split("\\.");
             if (parts.length >= 1) {
                 String aliasOrTable = parts[0];
-                String table = resolveAlias(aliasOrTable, content);
+                String table = resolveAlias(aliasOrTable, before, caret);
                 if (table == null && metadataService.isKnownTableOrViewCached(aliasOrTable)) {
                     table = aliasOrTable; // 直接输入表名的场景
                 }
@@ -261,23 +261,27 @@ public class SuggestionEngine {
         return false;
     }
 
-    private String resolveAlias(String alias, String sqlText) {
+    private String resolveAlias(String alias, String sqlTextUpToCaret, int caret) {
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
                 "(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
-        java.util.regex.Matcher matcher = pattern.matcher(sqlText);
+        java.util.regex.Matcher matcher = pattern.matcher(sqlTextUpToCaret);
+        String resolved = null;
         while (matcher.find()) {
             String tableToken = matcher.group(2);
             String aliasToken = matcher.group(3);
-            if (aliasToken != null && aliasToken.equals(alias)) {
-                return tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
-            }
-            if (aliasToken == null) {
-                String base = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
-                if (base.equals(alias)) {
-                    return base;
+            String base = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
+            int matchEnd = matcher.end();
+            if (aliasToken != null && alias.equalsIgnoreCase(aliasToken)) {
+                // 优先采用光标之前最近一次匹配
+                if (matchEnd <= caret || resolved == null) {
+                    resolved = base;
+                }
+            } else if (aliasToken == null && base.equalsIgnoreCase(alias)) {
+                if (matchEnd <= caret || resolved == null) {
+                    resolved = base;
                 }
             }
         }
-        return null;
+        return resolved;
     }
 }

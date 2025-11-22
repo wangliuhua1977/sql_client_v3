@@ -204,52 +204,16 @@ public class MainFrame extends JFrame {
                 @Override
                 public void mouseClicked(MouseEvent e) {
                     if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
-                        startInlineRename(frame, panel, e.getPoint());
+                        String newTitle = JOptionPane.showInputDialog(MainFrame.this, "重命名窗口", frame.getTitle());
+                        if (newTitle != null && !newTitle.trim().isEmpty()) {
+                            panel.rename(newTitle.trim());
+                            frame.setTitle(newTitle.trim());
+                        }
                         e.consume();
                     }
                 }
             });
         }
-    }
-
-    private void startInlineRename(JInternalFrame frame, EditorTabPanel panel, Point clickPoint) {
-        BasicInternalFrameUI ui = (BasicInternalFrameUI) frame.getUI();
-        JComponent north = ui != null ? (JComponent) ui.getNorthPane() : null;
-        if (north == null) return;
-        LayoutManager originalLayout = north.getLayout();
-        JTextField field = new JTextField(frame.getTitle());
-        field.setBorder(BorderFactory.createLineBorder(Color.LIGHT_GRAY));
-        Dimension size = new Dimension(Math.max(140, field.getPreferredSize().width + 20), north.getHeight() - 6);
-        field.setSize(size);
-        int x = Math.max(6, clickPoint.x - size.width / 2);
-        int y = 3;
-        field.setLocation(x, y);
-        north.add(field, 0);
-        north.setLayout(null);
-        north.revalidate();
-        north.repaint();
-        field.selectAll();
-        field.requestFocusInWindow();
-
-        Runnable commit = () -> {
-            String text = field.getText();
-            if (text != null && !text.isBlank()) {
-                panel.rename(text.trim());
-                frame.setTitle(text.trim());
-            }
-            north.remove(field);
-            north.setLayout(originalLayout);
-            north.revalidate();
-            north.repaint();
-        };
-
-        field.addActionListener(e -> commit.run());
-        field.addFocusListener(new java.awt.event.FocusAdapter() {
-            @Override
-            public void focusLost(java.awt.event.FocusEvent e) {
-                commit.run();
-            }
-        });
     }
 
     private void installMaximizeTiling(JInternalFrame frame) {
