@@ -115,15 +115,19 @@ public class MainFrame extends JFrame {
     }
 
     private void addTab(DatabaseType type) {
+        EditorTabPanel[] holder = new EditorTabPanel[1];
         EditorTabPanel panel = new EditorTabPanel(type, metadataService, this::updateAutosaveTime, this::updateTaskCount,
-                title -> renameTab(panel, title));
+                title -> renameTab(holder[0], title));
+        holder[0] = panel;
         tabbedPane.addTab(type == DatabaseType.POSTGRESQL ? "PG 笔记" : "Hive 笔记", panel);
         tabbedPane.setSelectedComponent(panel);
     }
 
     private void addTabFromFile(DatabaseType type, Path path, String content) {
+        EditorTabPanel[] holder = new EditorTabPanel[1];
         EditorTabPanel panel = new EditorTabPanel(type, metadataService, this::updateAutosaveTime, this::updateTaskCount,
-                title -> renameTab(panel, title), path, content);
+                title -> renameTab(holder[0], title), path, content);
+        holder[0] = panel;
         tabbedPane.addTab(path.getFileName().toString(), panel);
         tabbedPane.setSelectedComponent(panel);
     }
