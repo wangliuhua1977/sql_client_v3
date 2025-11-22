@@ -134,8 +134,13 @@ public class SuggestionEngine {
             return;
         }
         computeReplacementRange(token);
+        int keepIndex = list.getSelectedIndex();
         list.setListData(currentItems.toArray(new SuggestionItem[0]));
-        list.setSelectedIndex(0);
+        if (keepIndex >= 0 && keepIndex < list.getModel().getSize()) {
+            list.setSelectedIndex(keepIndex);
+        } else {
+            list.setSelectedIndex(0);
+        }
         try {
             Rectangle view = textArea.modelToView(textArea.getCaretPosition());
             popup.show(textArea, view.x, view.y + view.height);
@@ -218,22 +223,17 @@ public class SuggestionEngine {
     }
 
     private String resolveAlias(String alias, String before) {
-        String lowerBefore = before.toLowerCase();
-        String[] clauses = {" from ", " join ", " update ", " into "};
-        for (String clause : clauses) {
-            int idx = lowerBefore.lastIndexOf(clause);
-            if (idx >= 0) {
-                String snippet = before.substring(idx + clause.length());
-                String[] parts = snippet.split("[\n\r;]")[0].trim().split("\\s+");
-                if (parts.length >= 2) {
-                    String tableName = parts[0].replaceAll("[,()]", "");
-                    String aliasName = parts[1].replaceAll("[,()]", "");
-                    if (aliasName.equals(alias)) {
-                        return tableName.contains(".") ? tableName.substring(tableName.lastIndexOf('.') + 1) : tableName;
-                    }
-                }
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "(?i)(from|join)\\s+([\\w.]+)\\s+(?:as\\s+)?([\\w]+)");
+        java.util.regex.Matcher matcher = pattern.matcher(before);
+        String resolved = alias;
+        while (matcher.find()) {
+            String tableToken = matcher.group(2);
+            String aliasToken = matcher.group(3);
+            if (aliasToken.equals(alias)) {
+                resolved = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
             }
         }
-        return alias;
+        return resolved;
     }
 }
