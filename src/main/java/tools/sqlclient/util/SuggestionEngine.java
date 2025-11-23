@@ -368,17 +368,20 @@ public class SuggestionEngine {
     }
 
     private boolean onlyWhitespaceBetween(String text, int start, int end) {
-        if (text == null) return true;
-        int safeStart = Math.max(0, Math.min(start, text.length()));
-        int safeEnd = Math.max(0, Math.min(end, text.length()));
-        if (safeStart >= safeEnd) return true;
+        if (text == null || text.isEmpty()) {
+            return true;
+        }
 
-        // 防御性遍历，始终确保索引未越界，避免极端光标位置导致 charAt 抛出异常
-        int limit = Math.min(safeEnd, text.length());
-        for (int i = safeStart; i < limit; i++) {
-            if (i < 0 || i >= text.length()) {
-                break;
-            }
+        // 将输入索引限制在字符串边界内，若区间为空直接返回
+        int len = text.length();
+        int safeStart = Math.max(0, Math.min(start, len));
+        int safeEnd = Math.max(0, Math.min(end, len));
+        if (safeStart >= safeEnd) {
+            return true;
+        }
+
+        // 固定长度后遍历，完全避免 charAt 越界
+        for (int i = safeStart; i < safeEnd; i++) {
             if (!Character.isWhitespace(text.charAt(i))) {
                 return false;
             }
