@@ -24,16 +24,18 @@ public class ManageNotesDialog extends JDialog {
     private final NoteRepository repository;
     private final Consumer<Note> opener;
     private final NoteTableModel tableModel;
-    private final JTable table = new JTable(tableModel);
+    private final JTable table;
     private final JTextField keywordField = new JTextField(16);
     private final JTextField fullTextField = new JTextField(16);
-    private final TableRowSorter<NoteTableModel> sorter = new TableRowSorter<>(tableModel);
+    private final TableRowSorter<NoteTableModel> sorter;
 
     public ManageNotesDialog(Frame owner, NoteRepository repository, Consumer<Note> opener) {
         super(owner, "管理笔记", true);
         this.repository = repository;
         this.opener = opener;
         this.tableModel = new NoteTableModel(repository);
+        this.table = new JTable(tableModel);
+        this.sorter = new TableRowSorter<>(tableModel);
         setLayout(new BorderLayout());
         buildToolbar();
         buildTable();
