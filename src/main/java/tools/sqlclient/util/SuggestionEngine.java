@@ -24,11 +24,10 @@ public class SuggestionEngine {
     private final RSyntaxTextArea textArea;
     private final JPopupMenu popup = new JPopupMenu();
     private final JList<SuggestionItem> list = new JList<>();
-    private static final List<KeywordRule> KEYWORD_RULES = List.of(
-            new KeywordRule(List.of("delete from", "insert into", "from", "join", "where", "into", "update", "truncate", "table", "view"), SuggestionType.TABLE_OR_VIEW),
-            new KeywordRule(List.of("select"), SuggestionType.FUNCTION),
-            new KeywordRule(List.of("call", "exec", "execute"), SuggestionType.PROCEDURE)
-    );
+    private static final List<String> TABLE_KEYWORDS = List.of("update", "delete", "truncate", "drop table", "exists", "from", "join", "where");
+    private static final List<String> COLUMN_KEYWORDS = List.of("on");
+    private static final List<String> FUNCTION_KEYWORDS = List.of("select");
+    private static final List<String> PROCEDURE_KEYWORDS = List.of("call");
     private List<SuggestionItem> currentItems = List.of();
     private int replaceStart = -1;
     private int replaceEnd = -1;
@@ -306,48 +305,70 @@ public class SuggestionEngine {
             }
         }
 
-        KeywordMatch keyword = findLastKeyword(statementPrefix, tokenStart);
-        if (keyword != null) {
-            if (keyword.type() == SuggestionType.TABLE_OR_VIEW) {
-                return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
-            }
-            if (keyword.type() == SuggestionType.FUNCTION) {
-                return new SuggestionContext(SuggestionType.FUNCTION, null, false, null);
-            }
-            if (keyword.type() == SuggestionType.PROCEDURE) {
-                return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null);
-            }
+        KeywordMatch onMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, COLUMN_KEYWORDS);
+        if (onMatch != null) {
+            return new SuggestionContext(SuggestionType.COLUMN, null, tableCount > 1, null);
+        }
+
+        KeywordMatch tableMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, TABLE_KEYWORDS);
+        if (tableMatch != null) {
+            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
+        }
+
+        KeywordMatch fnMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, FUNCTION_KEYWORDS);
+        if (fnMatch != null) {
+            return new SuggestionContext(SuggestionType.FUNCTION, null, false, null);
+        }
+
+        KeywordMatch procMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, PROCEDURE_KEYWORDS);
+        if (procMatch != null) {
+            return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null);
         }
         return null;
     }
 
-    private KeywordMatch findLastKeyword(String prefix, int tokenStart) {
+    private KeywordMatch findKeywordWithWhitespace(String prefix, int tokenStart, List<String> keywords) {
         String lower = prefix.toLowerCase();
         KeywordMatch best = null;
-        for (KeywordRule rule : KEYWORD_RULES) {
-            for (String kw : rule.keywords()) {
-                int searchPos = Math.max(0, tokenStart);
-                while (true) {
-                    int idx = lower.lastIndexOf(kw, searchPos);
-                    if (idx < 0) break;
-                    int end = idx + kw.length();
-                    if (end > tokenStart) {
-                        searchPos = idx - 1;
-                        continue;
-                    }
-                    boolean beforeOk = idx == 0 || !Character.isLetterOrDigit(lower.charAt(idx - 1));
-                    boolean afterOk = end >= lower.length() || !Character.isLetterOrDigit(lower.charAt(end));
-                    if (beforeOk && afterOk) {
-                        if (best == null || end > best.end()) {
-                            best = new KeywordMatch(rule.type(), idx, end);
-                        }
-                        break;
-                    }
+        for (String kw : keywords) {
+            int searchPos = Math.max(0, tokenStart);
+            while (true) {
+                int idx = lower.lastIndexOf(kw, searchPos);
+                if (idx < 0) break;
+                int end = idx + kw.length();
+                if (end > tokenStart) {
                     searchPos = idx - 1;
+                    continue;
                 }
+                boolean beforeOk = idx == 0 || !Character.isLetterOrDigit(lower.charAt(idx - 1));
+                boolean afterOk = end >= lower.length() || !Character.isLetterOrDigit(lower.charAt(end));
+                if (beforeOk && afterOk && onlyWhitespaceBetween(prefix, end, tokenStart)) {
+                    if (best == null || end > best.end()) {
+                        best = new KeywordMatch(keywordTypeFor(kw), idx, end);
+                    }
+                    break;
+                }
+                searchPos = idx - 1;
             }
         }
         return best;
+    }
+
+    private SuggestionType keywordTypeFor(String keyword) {
+        if (TABLE_KEYWORDS.contains(keyword)) return SuggestionType.TABLE_OR_VIEW;
+        if (COLUMN_KEYWORDS.contains(keyword)) return SuggestionType.COLUMN;
+        if (FUNCTION_KEYWORDS.contains(keyword)) return SuggestionType.FUNCTION;
+        return SuggestionType.PROCEDURE;
+    }
+
+    private boolean onlyWhitespaceBetween(String text, int start, int end) {
+        if (start >= end) return true;
+        for (int i = start; i < end; i++) {
+            if (!Character.isWhitespace(text.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private String currentStatement(String content, int caret) {
@@ -394,6 +415,5 @@ public class SuggestionEngine {
     }
 
     private record TableBinding(String table, String alias) {}
-    private record KeywordRule(List<String> keywords, SuggestionType type) {}
     private record KeywordMatch(SuggestionType type, int start, int end) {}
 }
