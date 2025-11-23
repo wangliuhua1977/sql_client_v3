@@ -140,7 +140,7 @@ public class SuggestionEngine {
                 }
             }
             start = start + 1;
-            return text.substring(start).trim();
+            return text.substring(start, caret).trim();
         } catch (Exception e) {
             return "";
         }
