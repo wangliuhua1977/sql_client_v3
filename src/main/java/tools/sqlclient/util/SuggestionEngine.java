@@ -24,6 +24,11 @@ public class SuggestionEngine {
     private final RSyntaxTextArea textArea;
     private final JPopupMenu popup = new JPopupMenu();
     private final JList<SuggestionItem> list = new JList<>();
+    private static final List<KeywordRule> KEYWORD_RULES = List.of(
+            new KeywordRule(List.of("delete from", "insert into", "from", "join", "where", "into", "update", "truncate", "table", "view"), SuggestionType.TABLE_OR_VIEW),
+            new KeywordRule(List.of("select"), SuggestionType.FUNCTION),
+            new KeywordRule(List.of("call", "exec", "execute"), SuggestionType.PROCEDURE)
+    );
     private List<SuggestionItem> currentItems = List.of();
     private int replaceStart = -1;
     private int replaceEnd = -1;
@@ -255,6 +260,7 @@ public class SuggestionEngine {
         List<TableBinding> bindings = parseBindings(statement);
         int tableCount = (int) bindings.stream().map(TableBinding::table).distinct().count();
         String token = currentToken();
+        int tokenStart = caret - token.length();
         if (token.contains(".")) {
             String[] parts = token.split("\\.");
             if (parts.length >= 1) {
@@ -275,26 +281,48 @@ public class SuggestionEngine {
             }
         }
 
-        String lower = statementPrefix.toLowerCase();
-        if (endsWithKeyword(lower, List.of(" from ", " join ", " where ", " into ", " update ", " delete from ", " insert into ", " truncate ", " table ", " view " ))) {
-            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
-        }
-        if (endsWithKeyword(lower, List.of(" select " ))) {
-            return new SuggestionContext(SuggestionType.FUNCTION, null, false, null);
-        }
-        if (endsWithKeyword(lower, List.of(" call ", " exec ", " execute " ))) {
-            return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null);
+        KeywordMatch keyword = findLastKeyword(statementPrefix, tokenStart);
+        if (keyword != null) {
+            if (keyword.type() == SuggestionType.TABLE_OR_VIEW) {
+                return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
+            }
+            if (keyword.type() == SuggestionType.FUNCTION) {
+                return new SuggestionContext(SuggestionType.FUNCTION, null, false, null);
+            }
+            if (keyword.type() == SuggestionType.PROCEDURE) {
+                return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null);
+            }
         }
         return null;
     }
 
-    private boolean endsWithKeyword(String text, List<String> keywords) {
-        for (String kw : keywords) {
-            if (text.endsWith(kw) || text.matches(".*" + java.util.regex.Pattern.quote(kw.trim()) + "\\s+$")) {
-                return true;
+    private KeywordMatch findLastKeyword(String prefix, int tokenStart) {
+        String lower = prefix.toLowerCase();
+        KeywordMatch best = null;
+        for (KeywordRule rule : KEYWORD_RULES) {
+            for (String kw : rule.keywords()) {
+                int searchPos = Math.max(0, tokenStart);
+                while (true) {
+                    int idx = lower.lastIndexOf(kw, searchPos);
+                    if (idx < 0) break;
+                    int end = idx + kw.length();
+                    if (end > tokenStart) {
+                        searchPos = idx - 1;
+                        continue;
+                    }
+                    boolean beforeOk = idx == 0 || !Character.isLetterOrDigit(lower.charAt(idx - 1));
+                    boolean afterOk = end >= lower.length() || !Character.isLetterOrDigit(lower.charAt(end));
+                    if (beforeOk && afterOk) {
+                        if (best == null || end > best.end()) {
+                            best = new KeywordMatch(rule.type(), idx, end);
+                        }
+                        break;
+                    }
+                    searchPos = idx - 1;
+                }
             }
         }
-        return false;
+        return best;
     }
 
     private String currentStatement(String content, int caret) {
@@ -341,4 +369,6 @@ public class SuggestionEngine {
     }
 
     private record TableBinding(String table, String alias) {}
+    private record KeywordRule(List<String> keywords, SuggestionType type) {}
+    private record KeywordMatch(SuggestionType type, int start, int end) {}
 }

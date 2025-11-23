@@ -93,7 +93,7 @@ public class EditorTabPanel extends JPanel {
         area.setAutoIndentEnabled(true);
         area.setTabSize(4);
         area.setFocusable(true);
-        area.setToolTipText("自动联想已开启");
+        area.setToolTipText(null);
         return area;
     }
 
