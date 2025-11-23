@@ -68,6 +68,18 @@ public class SQLiteManager {
                     "key TEXT PRIMARY KEY, " +
                     "value TEXT"
                     + ")");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS editor_styles(" +
+                    "name TEXT PRIMARY KEY, " +
+                    "font_size INTEGER NOT NULL DEFAULT 14, " +
+                    "background TEXT DEFAULT '#FFFFFF', " +
+                    "foreground TEXT DEFAULT '#000000', " +
+                    "selection TEXT DEFAULT '#CCE8FF', " +
+                    "caret TEXT DEFAULT '#000000', " +
+                    "keyword TEXT DEFAULT '#005CC5', " +
+                    "string_color TEXT DEFAULT '#032F62', " +
+                    "comment_color TEXT DEFAULT '#6A737D'"
+                    + ")");
+            ensureDefaultStyle(conn);
         } catch (Exception e) {
             throw new RuntimeException("初始化 SQLite 失败", e);
         }
@@ -151,6 +163,29 @@ public class SQLiteManager {
             throw ex;
         } finally {
             conn.setAutoCommit(autoCommit);
+        }
+    }
+
+    private void ensureDefaultStyle(Connection conn) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM editor_styles")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next() && rs.getInt(1) == 0) {
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            "INSERT INTO editor_styles(name, font_size, background, foreground, selection, caret, keyword, string_color, comment_color) " +
+                                    "VALUES(?,?,?,?,?,?,?,?,?)")) {
+                        ins.setString(1, "默认");
+                        ins.setInt(2, 14);
+                        ins.setString(3, "#FFFFFF");
+                        ins.setString(4, "#000000");
+                        ins.setString(5, "#CCE8FF");
+                        ins.setString(6, "#000000");
+                        ins.setString(7, "#005CC5");
+                        ins.setString(8, "#032F62");
+                        ins.setString(9, "#6A737D");
+                        ins.executeUpdate();
+                    }
+                }
+            }
         }
     }
 }

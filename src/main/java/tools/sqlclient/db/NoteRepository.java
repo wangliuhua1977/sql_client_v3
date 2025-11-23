@@ -169,20 +169,21 @@ public class NoteRepository {
         return notes;
     }
 
-    public List<Note> search(String keyword, String fullText) {
+    public List<Note> search(String keyword, boolean fullText) {
         StringBuilder sql = new StringBuilder("SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes WHERE 1=1");
         List<String> params = new ArrayList<>();
         if (keyword != null && !keyword.isBlank()) {
-            sql.append(" AND (title LIKE ? OR tags LIKE ?)");
             String kw = "%" + keyword.trim() + "%";
-            params.add(kw);
-            params.add(kw);
-        }
-        if (fullText != null && !fullText.isBlank()) {
-            sql.append(" AND (title LIKE ? OR content LIKE ?)");
-            String kw = "%" + fullText.trim() + "%";
-            params.add(kw);
-            params.add(kw);
+            if (fullText) {
+                sql.append(" AND (title LIKE ? OR tags LIKE ? OR content LIKE ?)");
+                params.add(kw);
+                params.add(kw);
+                params.add(kw);
+            } else {
+                sql.append(" AND (title LIKE ? OR tags LIKE ?)");
+                params.add(kw);
+                params.add(kw);
+            }
         }
         sql.append(" ORDER BY starred DESC, updated_at DESC, id DESC");
         List<Note> notes = new ArrayList<>();

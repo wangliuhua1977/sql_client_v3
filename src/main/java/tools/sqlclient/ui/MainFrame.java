@@ -1,11 +1,13 @@
 package tools.sqlclient.ui;
 
 import tools.sqlclient.db.AppStateRepository;
+import tools.sqlclient.db.EditorStyleRepository;
 import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
+import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 
 import javax.swing.*;
@@ -37,12 +39,14 @@ public class MainFrame extends JFrame {
     private final NoteRepository noteRepository;
     private final AppStateRepository appStateRepository;
     private final MetadataService metadataService;
+    private final EditorStyleRepository styleRepository;
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private boolean windowMode = true;
     private JRadioButtonMenuItem windowModeItem;
     private JRadioButtonMenuItem panelModeItem;
     private boolean convertFullWidth = true;
+    private EditorStyle currentStyle;
 
     public MainFrame() {
         super("SQL Notebook - 多标签 PG/Hive");
@@ -51,10 +55,16 @@ public class MainFrame extends JFrame {
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
 
-        this.sqliteManager = new SQLiteManager(java.nio.file.Path.of("metadata.db"));
-        this.metadataService = new MetadataService(java.nio.file.Path.of("metadata.db"));
+        java.nio.file.Path dbPath = java.nio.file.Path.of("metadata.db");
+        this.sqliteManager = new SQLiteManager(dbPath);
+        this.metadataService = new MetadataService(dbPath);
         this.noteRepository = new NoteRepository(sqliteManager);
         this.appStateRepository = new AppStateRepository(sqliteManager);
+        this.styleRepository = new EditorStyleRepository(sqliteManager);
+        var styles = styleRepository.listAll();
+        String styleName = appStateRepository.loadCurrentStyleName(styles.isEmpty() ? "默认" : styles.get(0).getName());
+        this.currentStyle = styles.stream().filter(s -> s.getName().equals(styleName)).findFirst()
+                .orElseGet(() -> styles.isEmpty() ? new EditorStyle("默认", 14, "#FFFFFF", "#000000", "#CCE8FF", "#000000", "#005CC5", "#032F62", "#6A737D") : styles.get(0));
         this.convertFullWidth = appStateRepository.loadFullWidthOption(true);
         buildMenu();
         buildContent();
@@ -203,23 +213,31 @@ public class MainFrame extends JFrame {
     }
 
     private void createNote(DatabaseType type) {
-        boolean created = false;
-        while (!created) {
-            String title = "未命名" + untitledIndex.getAndIncrement();
-            try {
-                Note note = noteRepository.create(title, type);
-                openNoteInCurrentMode(note);
-                created = true;
-            } catch (IllegalArgumentException ex) {
-                // 重复则继续尝试下一个序号
+        while (true) {
+            String suggested = "未命名" + untitledIndex.getAndIncrement();
+            String title = JOptionPane.showInputDialog(this, "输入笔记名称", suggested);
+            if (title == null) {
+                return;
             }
+            title = title.trim();
+            if (title.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "标题不能为空");
+                continue;
+            }
+            if (noteRepository.titleExists(title, null)) {
+                JOptionPane.showMessageDialog(this, "标题已存在，请重新输入");
+                continue;
+            }
+            Note note = noteRepository.create(title, type);
+            openNoteInCurrentMode(note);
+            break;
         }
     }
 
     private EditorTabPanel getOrCreatePanel(Note note) {
         return panelCache.computeIfAbsent(note.getId(), id -> new EditorTabPanel(noteRepository, metadataService,
                 this::updateAutosaveTime, this::updateTaskCount,
-                newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth));
+                newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle));
     }
 
     private void openNoteInCurrentMode(Note note) {
@@ -300,8 +318,8 @@ public class MainFrame extends JFrame {
         if (ui != null && ui.getNorthPane() != null) {
             ui.getNorthPane().addMouseListener(new MouseAdapter() {
                 @Override
-                public void mouseClicked(MouseEvent e) {
-                    if (e.getClickCount() == 2 && SwingUtilities.isLeftMouseButton(e)) {
+                public void mousePressed(MouseEvent e) {
+                    if (SwingUtilities.isRightMouseButton(e)) {
                         String newTitle = JOptionPane.showInputDialog(MainFrame.this, "重命名窗口", frame.getTitle());
                         if (newTitle != null && !newTitle.trim().isEmpty()) {
                             panel.rename(newTitle.trim());
@@ -390,12 +408,18 @@ public class MainFrame extends JFrame {
     }
 
     private void openEditorSettings() {
-        SqlEditorSettingsDialog dialog = new SqlEditorSettingsDialog(this, convertFullWidth);
+        SqlEditorSettingsDialog dialog = new SqlEditorSettingsDialog(this, convertFullWidth, styleRepository,
+                styleRepository.listAll(), currentStyle);
         dialog.setVisible(true);
         if (dialog.isConfirmed()) {
             convertFullWidth = dialog.isConvertFullWidthEnabled();
             appStateRepository.saveFullWidthOption(convertFullWidth);
             panelCache.values().forEach(p -> p.setFullWidthConversionEnabled(convertFullWidth));
+            dialog.getSelectedStyle().ifPresent(style -> {
+                currentStyle = style;
+                appStateRepository.saveCurrentStyleName(style.getName());
+                panelCache.values().forEach(p -> p.applyStyle(style));
+            });
         }
     }
 

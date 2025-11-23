@@ -14,6 +14,7 @@ import java.util.stream.Stream;
 public class AppStateRepository {
     private static final String OPEN_NOTES_KEY = "open_notes";
     private static final String FULL_WIDTH_KEY = "convert_full_width";
+    private static final String CURRENT_STYLE_KEY = "editor_style";
     private final SQLiteManager sqliteManager;
 
     public AppStateRepository(SQLiteManager sqliteManager) {
@@ -80,6 +81,40 @@ public class AppStateRepository {
 
     public void saveFullWidthOption(boolean enabled) {
         saveBooleanOption(FULL_WIDTH_KEY, enabled);
+    }
+
+    public void saveCurrentStyleName(String styleName) {
+        saveStringOption(CURRENT_STYLE_KEY, styleName);
+    }
+
+    public String loadCurrentStyleName(String defaultName) {
+        return loadStringOption(CURRENT_STYLE_KEY, defaultName);
+    }
+
+    public void saveStringOption(String key, String value) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("INSERT INTO app_state(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")) {
+            ps.setString(1, key);
+            ps.setString(2, value == null ? "" : value);
+            ps.executeUpdate();
+        } catch (Exception e) {
+            throw new RuntimeException("保存字符串配置失败", e);
+        }
+    }
+
+    public String loadStringOption(String key, String defaultValue) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT value FROM app_state WHERE key=?")) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getString(1);
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("读取字符串配置失败", e);
+        }
+        return defaultValue;
     }
 
     private List<Long> parseIds(String value) {

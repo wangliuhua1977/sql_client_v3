@@ -10,6 +10,8 @@ import javax.swing.table.AbstractTableModel;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.TableRowSorter;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -25,8 +27,9 @@ public class ManageNotesDialog extends JDialog {
     private final Consumer<Note> opener;
     private final NoteTableModel tableModel;
     private final JTable table;
-    private final JTextField keywordField = new JTextField(16);
-    private final JTextField fullTextField = new JTextField(16);
+    private final JTextField searchField = new JTextField(18);
+    private final JCheckBox fullTextBox = new JCheckBox("全文检索");
+    private final JEditorPane preview = new JEditorPane("text/html", "");
     private final TableRowSorter<NoteTableModel> sorter;
 
     public ManageNotesDialog(Frame owner, NoteRepository repository, Consumer<Note> opener) {
@@ -46,10 +49,9 @@ public class ManageNotesDialog extends JDialog {
 
     private void buildToolbar() {
         JPanel filter = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        filter.add(new JLabel("普通检索:"));
-        filter.add(keywordField);
-        filter.add(new JLabel("全文检索:"));
-        filter.add(fullTextField);
+        filter.add(new JLabel("检索:"));
+        filter.add(searchField);
+        filter.add(fullTextBox);
         JButton search = new JButton("检索");
         search.addActionListener(e -> loadNotes());
         filter.add(search);
@@ -62,8 +64,7 @@ public class ManageNotesDialog extends JDialog {
             @Override public void removeUpdate(DocumentEvent e) { debounceSearch(); }
             @Override public void changedUpdate(DocumentEvent e) { debounceSearch(); }
         };
-        keywordField.getDocument().addDocumentListener(listener);
-        fullTextField.getDocument().addDocumentListener(listener);
+        searchField.getDocument().addDocumentListener(listener);
     }
 
     private void buildTable() {
@@ -83,9 +84,10 @@ public class ManageNotesDialog extends JDialog {
                 }
             }
         });
-        table.addMouseListener(new java.awt.event.MouseAdapter() {
+        table.getSelectionModel().addListSelectionListener(e -> updatePreview());
+        table.addMouseListener(new MouseAdapter() {
             @Override
-            public void mouseClicked(java.awt.event.MouseEvent e) {
+            public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2 && table.getSelectedRow() >= 0) {
                     int modelRow = table.convertRowIndexToModel(table.getSelectedRow());
                     opener.accept(tableModel.getNoteAt(modelRow));
@@ -93,17 +95,56 @@ public class ManageNotesDialog extends JDialog {
                 }
             }
         });
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        preview.setEditable(false);
+        preview.setBorder(BorderFactory.createTitledBorder("内容预览"));
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(table), new JScrollPane(preview));
+        split.setDividerLocation(260);
+        add(split, BorderLayout.CENTER);
     }
 
     private void loadNotes() {
-        List<Note> notes = repository.search(keywordField.getText(), fullTextField.getText());
+        List<Note> notes = repository.search(searchField.getText(), fullTextBox.isSelected());
         tableModel.setData(notes);
+        if (!notes.isEmpty()) {
+            table.setRowSelectionInterval(0, 0);
+        } else {
+            preview.setText("<html><body><i>无匹配结果</i></body></html>");
+        }
     }
 
     private void debounceSearch() {
-        // 简单立即刷新，避免重复代码
         loadNotes();
+    }
+
+    private void updatePreview() {
+        int viewRow = table.getSelectedRow();
+        if (viewRow < 0) {
+            preview.setText("<html><body><i>请选择笔记以预览内容</i></body></html>");
+            return;
+        }
+        int modelRow = table.convertRowIndexToModel(viewRow);
+        Note note = tableModel.getNoteAt(modelRow);
+        String kw = searchField.getText();
+        preview.setText(buildPreviewHtml(note.getContent(), kw));
+        preview.setCaretPosition(0);
+    }
+
+    private String buildPreviewHtml(String content, String keyword) {
+        if (content == null) content = "";
+        if (keyword == null || keyword.isBlank()) {
+            return "<html><body><pre>" + escape(content) + "</pre></body></html>";
+        }
+        String escaped = escape(content);
+        String safeKw = escape(keyword.trim());
+        try {
+            return "<html><body><pre>" + escaped.replaceAll(java.util.regex.Pattern.quote(safeKw), "<mark>" + safeKw + "</mark>") + "</pre></body></html>";
+        } catch (Exception ex) {
+            return "<html><body><pre>" + escaped + "</pre></body></html>";
+        }
+    }
+
+    private String escape(String text) {
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     private static class NoteTableModel extends AbstractTableModel {

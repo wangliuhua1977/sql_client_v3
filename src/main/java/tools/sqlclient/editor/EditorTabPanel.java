@@ -6,6 +6,7 @@ import org.fife.ui.rtextarea.RTextScrollPane;
 import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
+import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.util.AutoSaveService;
 import tools.sqlclient.util.LinkResolver;
@@ -32,18 +33,23 @@ public class EditorTabPanel extends JPanel {
     private final NoteRepository noteRepository;
     private final Note note;
     private final FullWidthFilter fullWidthFilter;
+    private EditorStyle currentStyle;
+    private int runtimeFontSize;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
                           java.util.function.IntConsumer taskCallback,
                           Consumer<String> titleUpdater,
                           Note note,
-                          boolean convertFullWidth) {
+                          boolean convertFullWidth,
+                          EditorStyle style) {
         super(new BorderLayout());
         this.noteRepository = noteRepository;
         this.note = note;
         this.databaseType = note.getDatabaseType();
         this.textArea = createEditor();
+        this.currentStyle = style;
+        this.runtimeFontSize = style.getFontSize();
         this.titleUpdater = titleUpdater;
         this.autoSaveService = new AutoSaveService(autosaveCallback, taskCallback);
         this.suggestionEngine = new SuggestionEngine(metadataService, textArea);
@@ -63,7 +69,15 @@ public class EditorTabPanel extends JPanel {
             }
         });
         this.textArea.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
+        this.textArea.addMouseWheelListener(e -> {
+            if (e.isShiftDown()) {
+                runtimeFontSize = Math.max(10, Math.min(40, runtimeFontSize + (e.getWheelRotation() < 0 ? 1 : -1)));
+                applyFontSize();
+                e.consume();
+            }
+        });
         this.textArea.setText(note.getContent());
+        applyStyle(style);
         initLayout();
         LinkResolver.install(textArea);
         autoSaveService.startAutoSave(this::autoSave);
@@ -132,6 +146,29 @@ public class EditorTabPanel extends JPanel {
 
     public void setFullWidthConversionEnabled(boolean enabled) {
         fullWidthFilter.setEnabled(enabled);
+    }
+
+    public void applyStyle(EditorStyle style) {
+        this.currentStyle = style;
+        this.runtimeFontSize = style.getFontSize();
+        applyFontSize();
+        textArea.setBackground(Color.decode(style.getBackground()));
+        textArea.setForeground(Color.decode(style.getForeground()));
+        textArea.setCaretColor(Color.decode(style.getCaret()));
+        textArea.setSelectionColor(Color.decode(style.getSelection()));
+        var scheme = textArea.getSyntaxScheme();
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.RESERVED_WORD).foreground = Color.decode(style.getKeyword());
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.DATA_TYPE).foreground = Color.decode(style.getKeyword());
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_STRING_DOUBLE_QUOTE).foreground = Color.decode(style.getStringColor());
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_CHAR).foreground = Color.decode(style.getStringColor());
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.COMMENT_EOL).foreground = Color.decode(style.getCommentColor());
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.COMMENT_MULTILINE).foreground = Color.decode(style.getCommentColor());
+        textArea.revalidate();
+        textArea.repaint();
+    }
+
+    private void applyFontSize() {
+        textArea.setFont(textArea.getFont().deriveFont((float) runtimeFontSize));
     }
 
     public Note getNote() {
