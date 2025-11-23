@@ -6,6 +6,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
@@ -51,12 +53,12 @@ public class SQLiteManager {
                     "tags TEXT DEFAULT '', " +
                     "starred INTEGER DEFAULT 0"
                     + ")");
-            // 兼容旧版本：逐列补齐（已存在则忽略异常）
-            safeAlter(st, "ALTER TABLE notes ADD COLUMN created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)");
-            safeAlter(st, "ALTER TABLE notes ADD COLUMN tags TEXT DEFAULT ''");
-            safeAlter(st, "ALTER TABLE notes ADD COLUMN starred INTEGER DEFAULT 0");
-            // 对于旧表，created_at 可能为默认值，保持唯一标题约束即可
-            safeAlter(st, "CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_title_unique ON notes(title)");
+            // 兼容旧版本：逐列补齐，避免缺失 created_at/updated_at 等字段导致查询失败
+            ensureColumn(conn, "notes", "created_at", "INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)");
+            ensureColumn(conn, "notes", "updated_at", "INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)");
+            ensureColumn(conn, "notes", "tags", "TEXT DEFAULT ''");
+            ensureColumn(conn, "notes", "starred", "INTEGER DEFAULT 0");
+            ensureUniqueIndex(conn, "idx_notes_title_unique", "notes", "title");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS app_state (" +
                     "key TEXT PRIMARY KEY, " +
                     "value TEXT"
@@ -66,11 +68,29 @@ public class SQLiteManager {
         }
     }
 
-    private void safeAlter(Statement st, String sql) {
-        try {
-            st.executeUpdate(sql);
-        } catch (SQLException ignored) {
-            // 列已存在时忽略异常
+    private void ensureColumn(Connection conn, String table, String column, String definition) throws SQLException {
+        if (!columnExists(conn, table, column)) {
+            try (Statement st = conn.createStatement()) {
+                st.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+            }
         }
+    }
+
+    private void ensureUniqueIndex(Connection conn, String indexName, String table, String column) throws SQLException {
+        try (Statement st = conn.createStatement()) {
+            st.executeUpdate("CREATE UNIQUE INDEX IF NOT EXISTS " + indexName + " ON " + table + "(" + column + ")");
+        }
+    }
+
+    private boolean columnExists(Connection conn, String table, String column) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("PRAGMA table_info(" + table + ")");
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                if (column.equalsIgnoreCase(rs.getString("name"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }
