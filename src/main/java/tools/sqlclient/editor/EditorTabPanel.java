@@ -170,7 +170,6 @@ public class EditorTabPanel extends JPanel {
         scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_STRING_DOUBLE_QUOTE).foreground = stringColor;
         scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_CHAR).foreground = stringColor;
         scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_BOOLEAN).foreground = literal;
-        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NULL).foreground = literal;
         scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NUMBER_DECIMAL_INT).foreground = numberColor;
         scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NUMBER_FLOAT).foreground = numberColor;
         scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NUMBER_HEXADECIMAL).foreground = numberColor;
