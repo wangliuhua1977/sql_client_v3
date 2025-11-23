@@ -29,7 +29,10 @@ public class ManageNotesDialog extends JDialog {
     private final JTable table;
     private final JTextField searchField = new JTextField(18);
     private final JCheckBox fullTextBox = new JCheckBox("全文检索");
+    private final JCheckBox trashBox = new JCheckBox("显示垃圾箱");
     private final JEditorPane preview = new JEditorPane("text/html", "");
+    private final DefaultListModel<MatchPreview> matchListModel = new DefaultListModel<>();
+    private final JList<MatchPreview> matchList = new JList<>(matchListModel);
     private final TableRowSorter<NoteTableModel> sorter;
 
     public ManageNotesDialog(Frame owner, NoteRepository repository, Consumer<Note> opener) {
@@ -52,12 +55,22 @@ public class ManageNotesDialog extends JDialog {
         filter.add(new JLabel("检索:"));
         filter.add(searchField);
         filter.add(fullTextBox);
+        filter.add(trashBox);
         JButton search = new JButton("检索");
         search.addActionListener(e -> loadNotes());
         filter.add(search);
         JButton refresh = new JButton("刷新全部");
         refresh.addActionListener(e -> loadNotes());
         filter.add(refresh);
+        JButton delete = new JButton("移入垃圾箱");
+        delete.addActionListener(e -> moveSelectionToTrash());
+        filter.add(delete);
+        JButton restore = new JButton("从垃圾箱恢复");
+        restore.addActionListener(e -> restoreSelection());
+        filter.add(restore);
+        JButton purge = new JButton("清空垃圾箱");
+        purge.addActionListener(e -> purgeTrash());
+        filter.add(purge);
         add(filter, BorderLayout.NORTH);
         DocumentListener listener = new DocumentListener() {
             @Override public void insertUpdate(DocumentEvent e) { debounceSearch(); }
@@ -65,6 +78,8 @@ public class ManageNotesDialog extends JDialog {
             @Override public void changedUpdate(DocumentEvent e) { debounceSearch(); }
         };
         searchField.getDocument().addDocumentListener(listener);
+        fullTextBox.addActionListener(e -> loadNotes());
+        trashBox.addActionListener(e -> loadNotes());
     }
 
     private void buildTable() {
@@ -97,19 +112,41 @@ public class ManageNotesDialog extends JDialog {
         });
         preview.setEditable(false);
         preview.setBorder(BorderFactory.createTitledBorder("内容预览"));
-        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(table), new JScrollPane(preview));
+        matchList.setBorder(BorderFactory.createTitledBorder("全文检索命中内容"));
+        matchList.setCellRenderer((list, value, index, isSelected, cellHasFocus) -> {
+            JLabel label = new JLabel("<html>" + value.label() + "</html>");
+            if (isSelected) {
+                label.setOpaque(true);
+                label.setBackground(list.getSelectionBackground());
+                label.setForeground(list.getSelectionForeground());
+            }
+            return label;
+        });
+        matchList.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2 && matchList.getSelectedValue() != null) {
+                    opener.accept(matchList.getSelectedValue().note());
+                    dispose();
+                }
+            }
+        });
+        JSplitPane bottom = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(preview), new JScrollPane(matchList));
+        bottom.setDividerLocation(220);
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(table), bottom);
         split.setDividerLocation(260);
         add(split, BorderLayout.CENTER);
     }
 
     private void loadNotes() {
-        List<Note> notes = repository.search(searchField.getText(), fullTextBox.isSelected());
+        List<Note> notes = repository.search(searchField.getText(), fullTextBox.isSelected(), trashBox.isSelected());
         tableModel.setData(notes);
         if (!notes.isEmpty()) {
             table.setRowSelectionInterval(0, 0);
         } else {
             preview.setText("<html><body><i>无匹配结果</i></body></html>");
         }
+        buildMatchPreview(notes);
     }
 
     private void debounceSearch() {
@@ -147,9 +184,77 @@ public class ManageNotesDialog extends JDialog {
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
+    private void buildMatchPreview(List<Note> notes) {
+        matchListModel.clear();
+        if (!fullTextBox.isSelected()) {
+            return;
+        }
+        String keyword = searchField.getText();
+        if (keyword == null || keyword.isBlank()) {
+            return;
+        }
+        String lowerKw = keyword.toLowerCase();
+        for (Note n : notes) {
+            String content = n.getContent() == null ? "" : n.getContent();
+            List<String> snippets = new ArrayList<>();
+            int from = 0;
+            int hits = 0;
+            String lc = content.toLowerCase();
+            while (hits < 3) {
+                int idx = lc.indexOf(lowerKw, from);
+                if (idx < 0) break;
+                int start = Math.max(0, idx - 30);
+                int end = Math.min(content.length(), idx + lowerKw.length() + 30);
+                String segment = escape(content.substring(start, end)).replaceAll(java.util.regex.Pattern.quote(escape(keyword)), "<mark>" + escape(keyword) + "</mark>");
+                snippets.add("..." + segment + "...");
+                from = idx + lowerKw.length();
+                hits++;
+            }
+            if (!snippets.isEmpty()) {
+                matchListModel.addElement(new MatchPreview(n, "<b>" + escape(n.getTitle()) + "</b><br/>" + String.join("<br/>", snippets)));
+            }
+        }
+    }
+
+    private void moveSelectionToTrash() {
+        int viewRow = table.getSelectedRow();
+        if (viewRow < 0) return;
+        int modelRow = table.convertRowIndexToModel(viewRow);
+        Note note = tableModel.getNoteAt(modelRow);
+        if (note.isTrashed()) {
+            JOptionPane.showMessageDialog(this, "当前笔记已在垃圾箱");
+            return;
+        }
+        repository.moveToTrash(note);
+        loadNotes();
+    }
+
+    private void restoreSelection() {
+        int viewRow = table.getSelectedRow();
+        if (viewRow < 0) return;
+        int modelRow = table.convertRowIndexToModel(viewRow);
+        Note note = tableModel.getNoteAt(modelRow);
+        if (!note.isTrashed()) {
+            JOptionPane.showMessageDialog(this, "当前笔记不在垃圾箱");
+            return;
+        }
+        repository.restore(note);
+        loadNotes();
+    }
+
+    private void purgeTrash() {
+        int confirm = JOptionPane.showConfirmDialog(this, "确定清空垃圾箱？", "确认", JOptionPane.YES_NO_OPTION);
+        if (confirm == JOptionPane.YES_OPTION) {
+            repository.emptyTrash();
+            loadNotes();
+        }
+    }
+
+    private record MatchPreview(Note note, String label) {}
+
     private static class NoteTableModel extends AbstractTableModel {
         private final NoteRepository repository;
-        private final String[] columns = {"★", "标题", "数据库", "标签", "创建时间", "最后修改时间"};
+        private final String[] columns = {"★", "标题", "数据库", "标签", "创建时间", "最后修改时间", "垃圾箱"};
         private List<Note> data = new ArrayList<>();
 
         NoteTableModel(NoteRepository repository) {
@@ -202,6 +307,7 @@ public class ManageNotesDialog extends JDialog {
                 case 3 -> note.getTags();
                 case 4 -> note.getCreatedAt();
                 case 5 -> note.getUpdatedAt();
+                case 6 -> note.isTrashed() ? "是" : "否";
                 default -> "";
             };
         }

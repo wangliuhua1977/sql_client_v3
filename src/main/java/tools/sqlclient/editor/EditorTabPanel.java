@@ -17,7 +17,6 @@ import java.awt.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.function.Consumer;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 单个 SQL 标签面板，包含自动保存与联想逻辑。
@@ -27,7 +26,6 @@ public class EditorTabPanel extends JPanel {
     private final RSyntaxTextArea textArea;
     private final AutoSaveService autoSaveService;
     private final SuggestionEngine suggestionEngine;
-    private final AtomicBoolean ctrlSpaceEnabled = new AtomicBoolean(true);
     private final JLabel lastSaveLabel = new JLabel("自动保存: -");
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
@@ -68,7 +66,7 @@ public class EditorTabPanel extends JPanel {
                 }
             }
         });
-        this.textArea.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
+        this.textArea.addKeyListener(suggestionEngine.createKeyListener());
         this.textArea.addMouseWheelListener(e -> {
             if (e.isShiftDown()) {
                 runtimeFontSize = Math.max(10, Math.min(40, runtimeFontSize + (e.getWheelRotation() < 0 ? 1 : -1)));
@@ -95,7 +93,7 @@ public class EditorTabPanel extends JPanel {
         area.setAutoIndentEnabled(true);
         area.setTabSize(4);
         area.setFocusable(true);
-        area.setToolTipText("Ctrl+Space 开关自动联想");
+        area.setToolTipText("自动联想已开启");
         return area;
     }
 
@@ -157,12 +155,33 @@ public class EditorTabPanel extends JPanel {
         textArea.setCaretColor(Color.decode(style.getCaret()));
         textArea.setSelectionColor(Color.decode(style.getSelection()));
         var scheme = textArea.getSyntaxScheme();
-        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.RESERVED_WORD).foreground = Color.decode(style.getKeyword());
-        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.DATA_TYPE).foreground = Color.decode(style.getKeyword());
-        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_STRING_DOUBLE_QUOTE).foreground = Color.decode(style.getStringColor());
-        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_CHAR).foreground = Color.decode(style.getStringColor());
-        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.COMMENT_EOL).foreground = Color.decode(style.getCommentColor());
-        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.COMMENT_MULTILINE).foreground = Color.decode(style.getCommentColor());
+        Color keyword = Color.decode(style.getKeyword());
+        Color stringColor = Color.decode(style.getStringColor());
+        Color commentColor = Color.decode(style.getCommentColor());
+        Color numberColor = Color.decode(style.getNumberColor());
+        Color operatorColor = Color.decode(style.getOperatorColor());
+        Color functionColor = Color.decode(style.getFunctionColor());
+        Color dataType = Color.decode(style.getDataTypeColor());
+        Color identifier = Color.decode(style.getIdentifierColor());
+        Color literal = Color.decode(style.getLiteralColor());
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.RESERVED_WORD).foreground = keyword;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.DATA_TYPE).foreground = dataType;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.FUNCTION).foreground = functionColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_STRING_DOUBLE_QUOTE).foreground = stringColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_CHAR).foreground = stringColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_BOOLEAN).foreground = literal;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NULL).foreground = literal;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NUMBER_DECIMAL_INT).foreground = numberColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NUMBER_FLOAT).foreground = numberColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.LITERAL_NUMBER_HEXADECIMAL).foreground = numberColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.OPERATOR).foreground = operatorColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.IDENTIFIER).foreground = identifier;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.COMMENT_EOL).foreground = commentColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.COMMENT_MULTILINE).foreground = commentColor;
+        scheme.getStyle(org.fife.ui.rsyntaxtextarea.Token.COMMENT_DOCUMENTATION).foreground = commentColor;
+        textArea.setCurrentLineHighlightColor(Color.decode(style.getLineHighlight()));
+        textArea.setMatchedBracketBGColor(Color.decode(style.getBracketColor()));
+        textArea.setMatchedBracketBorderColor(Color.decode(style.getBracketColor()));
         textArea.revalidate();
         textArea.repaint();
     }

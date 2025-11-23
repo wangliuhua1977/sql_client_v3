@@ -28,7 +28,7 @@ public class NoteRepository {
         long now = Instant.now().toEpochMilli();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                     "INSERT INTO notes(title, content, db_type, created_at, updated_at, tags, starred) VALUES(?,?,?,?,?,?,?) RETURNING id")) {
+                     "INSERT INTO notes(title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id")) {
             ps.setString(1, title);
             ps.setString(2, "");
             ps.setString(3, type.name());
@@ -36,9 +36,11 @@ public class NoteRepository {
             ps.setLong(5, now);
             ps.setString(6, "");
             ps.setInt(7, 0);
+            ps.setInt(8, 0);
+            ps.setLong(9, 0);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    return new Note(rs.getLong(1), title, "", type, now, now, "", false);
+                    return new Note(rs.getLong(1), title, "", type, now, now, "", false, false, 0);
                 }
             }
         } catch (Exception e) {
@@ -117,7 +119,7 @@ public class NoteRepository {
     }
 
     public Optional<Note> find(long id) {
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes WHERE id=?";
+        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE id=?";
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);
@@ -133,7 +135,7 @@ public class NoteRepository {
     }
 
     public List<Note> listAll() {
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes ORDER BY updated_at DESC, id DESC";
+        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes ORDER BY updated_at DESC, id DESC";
         List<Note> notes = new ArrayList<>();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
@@ -150,7 +152,7 @@ public class NoteRepository {
     public List<Note> listByIds(List<Long> ids) {
         if (ids == null || ids.isEmpty()) return List.of();
         String placeholders = ids.stream().map(i -> "?").collect(java.util.stream.Collectors.joining(","));
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes WHERE id IN (" + placeholders + ") ORDER BY updated_at DESC";
+        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE id IN (" + placeholders + ") ORDER BY updated_at DESC";
         List<Note> notes = new ArrayList<>();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -169,9 +171,12 @@ public class NoteRepository {
         return notes;
     }
 
-    public List<Note> search(String keyword, boolean fullText) {
-        StringBuilder sql = new StringBuilder("SELECT id, title, content, db_type, created_at, updated_at, tags, starred FROM notes WHERE 1=1");
+    public List<Note> search(String keyword, boolean fullText, boolean includeTrash) {
+        StringBuilder sql = new StringBuilder("SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE 1=1");
         List<String> params = new ArrayList<>();
+        if (!includeTrash) {
+            sql.append(" AND trashed=0");
+        }
         if (keyword != null && !keyword.isBlank()) {
             String kw = "%" + keyword.trim() + "%";
             if (fullText) {
@@ -213,7 +218,49 @@ public class NoteRepository {
                 rs.getLong("created_at"),
                 rs.getLong("updated_at"),
                 rs.getString("tags"),
-                rs.getInt("starred") == 1
+                rs.getInt("starred") == 1,
+                rs.getInt("trashed") == 1,
+                rs.getLong("deleted_at")
         );
+    }
+
+    public void moveToTrash(Note note) {
+        long now = Instant.now().toEpochMilli();
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET trashed=1, deleted_at=?, updated_at=? WHERE id=?")) {
+            ps.setLong(1, now);
+            ps.setLong(2, now);
+            ps.setLong(3, note.getId());
+            ps.executeUpdate();
+            note.setTrashed(true);
+            note.setDeletedAt(now);
+            note.setUpdatedAt(now);
+        } catch (Exception e) {
+            throw new RuntimeException("移动到垃圾箱失败", e);
+        }
+    }
+
+    public void restore(Note note) {
+        long now = Instant.now().toEpochMilli();
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET trashed=0, deleted_at=0, updated_at=? WHERE id=?")) {
+            ps.setLong(1, now);
+            ps.setLong(2, note.getId());
+            ps.executeUpdate();
+            note.setTrashed(false);
+            note.setDeletedAt(0);
+            note.setUpdatedAt(now);
+        } catch (Exception e) {
+            throw new RuntimeException("恢复笔记失败", e);
+        }
+    }
+
+    public void emptyTrash() {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("DELETE FROM notes WHERE trashed=1")) {
+            ps.executeUpdate();
+        } catch (Exception e) {
+            throw new RuntimeException("清空垃圾箱失败", e);
+        }
     }
 }

@@ -24,6 +24,14 @@ public class SqlEditorSettingsDialog extends JDialog {
     private final JTextField keywordField = new JTextField(7);
     private final JTextField stringField = new JTextField(7);
     private final JTextField commentField = new JTextField(7);
+    private final JTextField numberField = new JTextField(7);
+    private final JTextField operatorField = new JTextField(7);
+    private final JTextField functionField = new JTextField(7);
+    private final JTextField datatypeField = new JTextField(7);
+    private final JTextField identifierField = new JTextField(7);
+    private final JTextField literalField = new JTextField(7);
+    private final JTextField lineHighlightField = new JTextField(7);
+    private final JTextField bracketField = new JTextField(7);
     private final EditorStyleRepository repository;
     private boolean confirmed = false;
     private EditorStyle selectedStyle;
@@ -86,20 +94,21 @@ public class SqlEditorSettingsDialog extends JDialog {
         form.add(nameField);
         form.add(new JLabel("字体大小"));
         form.add(fontSizeSpinner);
-        form.add(new JLabel("背景色#"));
-        form.add(bgField);
-        form.add(new JLabel("前景色#"));
-        form.add(fgField);
-        form.add(new JLabel("选中色#"));
-        form.add(selField);
-        form.add(new JLabel("光标色#"));
-        form.add(caretField);
-        form.add(new JLabel("关键字色#"));
-        form.add(keywordField);
-        form.add(new JLabel("字符串色#"));
-        form.add(stringField);
-        form.add(new JLabel("注释色#"));
-        form.add(commentField);
+        addColorRow(form, "背景色#", bgField);
+        addColorRow(form, "前景色#", fgField);
+        addColorRow(form, "选中色#", selField);
+        addColorRow(form, "光标色#", caretField);
+        addColorRow(form, "关键字色#", keywordField);
+        addColorRow(form, "数据类型色#", datatypeField);
+        addColorRow(form, "函数名色#", functionField);
+        addColorRow(form, "数字色#", numberField);
+        addColorRow(form, "运算符色#", operatorField);
+        addColorRow(form, "标识符色#", identifierField);
+        addColorRow(form, "字面量色#", literalField);
+        addColorRow(form, "字符串色#", stringField);
+        addColorRow(form, "注释色#", commentField);
+        addColorRow(form, "当前行高亮#", lineHighlightField);
+        addColorRow(form, "匹配括号色#", bracketField);
 
         JPanel right = new JPanel(new BorderLayout());
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT));
@@ -149,6 +158,14 @@ public class SqlEditorSettingsDialog extends JDialog {
         keywordField.setText(stripHash(style.getKeyword()));
         stringField.setText(stripHash(style.getStringColor()));
         commentField.setText(stripHash(style.getCommentColor()));
+        numberField.setText(stripHash(style.getNumberColor()));
+        operatorField.setText(stripHash(style.getOperatorColor()));
+        functionField.setText(stripHash(style.getFunctionColor()));
+        datatypeField.setText(stripHash(style.getDataTypeColor()));
+        identifierField.setText(stripHash(style.getIdentifierColor()));
+        literalField.setText(stripHash(style.getLiteralColor()));
+        lineHighlightField.setText(stripHash(style.getLineHighlight()));
+        bracketField.setText(stripHash(style.getBracketColor()));
     }
 
     private EditorStyle captureStyleFromForm() {
@@ -161,7 +178,9 @@ public class SqlEditorSettingsDialog extends JDialog {
             int size = (Integer) fontSizeSpinner.getValue();
             return new EditorStyle(name.trim(), size,
                     color(bgField), color(fgField), color(selField), color(caretField),
-                    color(keywordField), color(stringField), color(commentField));
+                    color(keywordField), color(stringField), color(commentField),
+                    color(numberField), color(operatorField), color(functionField), color(datatypeField),
+                    color(identifierField), color(literalField), color(lineHighlightField), color(bracketField));
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "颜色请输入 6 位十六进制，例如 FFFFFF");
             return null;
@@ -213,6 +232,26 @@ public class SqlEditorSettingsDialog extends JDialog {
 
     private String stripHash(String c) {
         return c.startsWith("#") ? c.substring(1) : c;
+    }
+
+    private void addColorRow(JPanel form, String label, JTextField field) {
+        field.setColumns(7);
+        JButton picker = new JButton("选择");
+        picker.addActionListener(e -> {
+            Color init = Color.WHITE;
+            try {
+                init = Color.decode(color(field));
+            } catch (Exception ignored) { }
+            Color c = JColorChooser.showDialog(this, label, init);
+            if (c != null) {
+                field.setText(String.format("%02X%02X%02X", c.getRed(), c.getGreen(), c.getBlue()));
+            }
+        });
+        form.add(new JLabel(label));
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 0));
+        row.add(field);
+        row.add(picker);
+        form.add(row);
     }
 
     public boolean isConfirmed() {

@@ -54,7 +54,9 @@ public class SQLiteManager {
                     "created_at INTEGER NOT NULL, " +
                     "updated_at INTEGER NOT NULL, " +
                     "tags TEXT DEFAULT '', " +
-                    "starred INTEGER DEFAULT 0"
+                    "starred INTEGER DEFAULT 0, " +
+                    "trashed INTEGER DEFAULT 0, " +
+                    "deleted_at INTEGER DEFAULT 0"
                     + ")");
             // 兼容旧版本：逐列补齐，避免缺失 created_at/updated_at 等字段导致查询失败
             // SQLite 不允许使用表达式默认值在 ALTER TABLE 里添加列，这里使用常量默认值并由上层插入逻辑填充实际时间戳
@@ -62,6 +64,8 @@ public class SQLiteManager {
             ensureColumn(conn, "notes", "updated_at", "INTEGER NOT NULL DEFAULT 0");
             ensureColumn(conn, "notes", "tags", "TEXT DEFAULT ''");
             ensureColumn(conn, "notes", "starred", "INTEGER DEFAULT 0");
+            ensureColumn(conn, "notes", "trashed", "INTEGER DEFAULT 0");
+            ensureColumn(conn, "notes", "deleted_at", "INTEGER DEFAULT 0");
             normalizeNoteTitles(conn);
             ensureUniqueIndex(conn, "idx_notes_title_unique", "notes", "title");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS app_state (" +
@@ -77,8 +81,24 @@ public class SQLiteManager {
                     "caret TEXT DEFAULT '#000000', " +
                     "keyword TEXT DEFAULT '#005CC5', " +
                     "string_color TEXT DEFAULT '#032F62', " +
-                    "comment_color TEXT DEFAULT '#6A737D'"
+                    "comment_color TEXT DEFAULT '#6A737D', " +
+                    "number_color TEXT DEFAULT '#1C7C54', " +
+                    "operator_color TEXT DEFAULT '#000000', " +
+                    "function_color TEXT DEFAULT '#6F42C1', " +
+                    "datatype_color TEXT DEFAULT '#005CC5', " +
+                    "identifier_color TEXT DEFAULT '#24292E', " +
+                    "literal_color TEXT DEFAULT '#D73A49', " +
+                    "line_highlight TEXT DEFAULT '#F6F8FA', " +
+                    "bracket_color TEXT DEFAULT '#FFDD88'"
                     + ")");
+            ensureColumn(conn, "editor_styles", "number_color", "TEXT DEFAULT '#1C7C54'");
+            ensureColumn(conn, "editor_styles", "operator_color", "TEXT DEFAULT '#000000'");
+            ensureColumn(conn, "editor_styles", "function_color", "TEXT DEFAULT '#6F42C1'");
+            ensureColumn(conn, "editor_styles", "datatype_color", "TEXT DEFAULT '#005CC5'");
+            ensureColumn(conn, "editor_styles", "identifier_color", "TEXT DEFAULT '#24292E'");
+            ensureColumn(conn, "editor_styles", "literal_color", "TEXT DEFAULT '#D73A49'");
+            ensureColumn(conn, "editor_styles", "line_highlight", "TEXT DEFAULT '#F6F8FA'");
+            ensureColumn(conn, "editor_styles", "bracket_color", "TEXT DEFAULT '#FFDD88'");
             ensureDefaultStyle(conn);
         } catch (Exception e) {
             throw new RuntimeException("初始化 SQLite 失败", e);
@@ -171,8 +191,9 @@ public class SQLiteManager {
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next() && rs.getInt(1) == 0) {
                     try (PreparedStatement ins = conn.prepareStatement(
-                            "INSERT INTO editor_styles(name, font_size, background, foreground, selection, caret, keyword, string_color, comment_color) " +
-                                    "VALUES(?,?,?,?,?,?,?,?,?)")) {
+                            "INSERT INTO editor_styles(name, font_size, background, foreground, selection, caret, keyword, string_color, comment_color, " +
+                                    "number_color, operator_color, function_color, datatype_color, identifier_color, literal_color, line_highlight, bracket_color) " +
+                                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
                         ins.setString(1, "默认");
                         ins.setInt(2, 14);
                         ins.setString(3, "#FFFFFF");
@@ -182,6 +203,14 @@ public class SQLiteManager {
                         ins.setString(7, "#005CC5");
                         ins.setString(8, "#032F62");
                         ins.setString(9, "#6A737D");
+                        ins.setString(10, "#1C7C54");
+                        ins.setString(11, "#000000");
+                        ins.setString(12, "#6F42C1");
+                        ins.setString(13, "#005CC5");
+                        ins.setString(14, "#24292E");
+                        ins.setString(15, "#D73A49");
+                        ins.setString(16, "#F6F8FA");
+                        ins.setString(17, "#FFDD88");
                         ins.executeUpdate();
                     }
                 }

@@ -15,7 +15,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 基于 SQLite 元数据的模糊联想。
@@ -63,7 +62,7 @@ public class SuggestionEngine {
         });
     }
 
-    public KeyAdapter createKeyListener(AtomicBoolean ctrlSpaceEnabled) {
+    public KeyAdapter createKeyListener() {
         return new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
@@ -86,18 +85,10 @@ public class SuggestionEngine {
                         return;
                     }
                 }
-                if (e.getKeyCode() == KeyEvent.VK_SPACE && e.isControlDown()) {
-                    ctrlSpaceEnabled.set(!ctrlSpaceEnabled.get());
-                    JOptionPane.showMessageDialog(textArea, "自动联想已" + (ctrlSpaceEnabled.get() ? "开启" : "关闭"));
-                }
             }
 
             @Override
             public void keyReleased(KeyEvent e) {
-                if (!ctrlSpaceEnabled.get()) {
-                    popup.setVisible(false);
-                    return;
-                }
                 if (popup.isVisible() && (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN)) {
                     e.consume();
                     return;

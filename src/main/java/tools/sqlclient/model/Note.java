@@ -9,8 +9,12 @@ public class Note {
     private long updatedAt;
     private String tags;
     private boolean starred;
+    private boolean trashed;
+    private long deletedAt;
 
-    public Note(long id, String title, String content, DatabaseType databaseType, long createdAt, long updatedAt, String tags, boolean starred) {
+    public Note(long id, String title, String content, DatabaseType databaseType,
+                long createdAt, long updatedAt, String tags, boolean starred,
+                boolean trashed, long deletedAt) {
         this.id = id;
         this.title = title;
         this.content = content;
@@ -19,6 +23,8 @@ public class Note {
         this.updatedAt = updatedAt;
         this.tags = tags == null ? "" : tags;
         this.starred = starred;
+        this.trashed = trashed;
+        this.deletedAt = deletedAt;
     }
 
     public long getId() {
@@ -79,6 +85,22 @@ public class Note {
 
     public void setStarred(boolean starred) {
         this.starred = starred;
+    }
+
+    public boolean isTrashed() {
+        return trashed;
+    }
+
+    public void setTrashed(boolean trashed) {
+        this.trashed = trashed;
+    }
+
+    public long getDeletedAt() {
+        return deletedAt;
+    }
+
+    public void setDeletedAt(long deletedAt) {
+        this.deletedAt = deletedAt;
     }
 
     @Override
