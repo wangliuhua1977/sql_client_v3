@@ -368,8 +368,11 @@ public class SuggestionEngine {
     }
 
     private boolean onlyWhitespaceBetween(String text, int start, int end) {
-        if (start >= end) return true;
-        for (int i = start; i < end; i++) {
+        if (text == null) return true;
+        int safeStart = Math.max(0, Math.min(start, text.length()));
+        int safeEnd = Math.max(0, Math.min(end, text.length()));
+        if (safeStart >= safeEnd) return true;
+        for (int i = safeStart; i < safeEnd; i++) {
             if (!Character.isWhitespace(text.charAt(i))) {
                 return false;
             }
