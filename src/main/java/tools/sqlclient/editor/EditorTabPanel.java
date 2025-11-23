@@ -17,7 +17,6 @@ import java.awt.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.function.Consumer;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 单个 SQL 标签面板，包含自动保存与联想逻辑。
@@ -27,7 +26,6 @@ public class EditorTabPanel extends JPanel {
     private final RSyntaxTextArea textArea;
     private final AutoSaveService autoSaveService;
     private final SuggestionEngine suggestionEngine;
-    private final AtomicBoolean ctrlSpaceEnabled = new AtomicBoolean(true);
     private final JLabel lastSaveLabel = new JLabel("自动保存: -");
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
@@ -68,7 +66,7 @@ public class EditorTabPanel extends JPanel {
                 }
             }
         });
-        this.textArea.addKeyListener(suggestionEngine.createKeyListener(ctrlSpaceEnabled));
+        this.textArea.addKeyListener(suggestionEngine.createKeyListener());
         this.textArea.addMouseWheelListener(e -> {
             if (e.isShiftDown()) {
                 runtimeFontSize = Math.max(10, Math.min(40, runtimeFontSize + (e.getWheelRotation() < 0 ? 1 : -1)));
@@ -95,7 +93,7 @@ public class EditorTabPanel extends JPanel {
         area.setAutoIndentEnabled(true);
         area.setTabSize(4);
         area.setFocusable(true);
-        area.setToolTipText("Ctrl+Space 开关自动联想");
+        area.setToolTipText("自动联想已开启");
         return area;
     }
 
