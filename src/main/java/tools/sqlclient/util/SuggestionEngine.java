@@ -372,7 +372,13 @@ public class SuggestionEngine {
         int safeStart = Math.max(0, Math.min(start, text.length()));
         int safeEnd = Math.max(0, Math.min(end, text.length()));
         if (safeStart >= safeEnd) return true;
-        for (int i = safeStart; i < safeEnd; i++) {
+
+        // 防御性遍历，始终确保索引未越界，避免极端光标位置导致 charAt 抛出异常
+        int limit = Math.min(safeEnd, text.length());
+        for (int i = safeStart; i < limit; i++) {
+            if (i < 0 || i >= text.length()) {
+                break;
+            }
             if (!Character.isWhitespace(text.charAt(i))) {
                 return false;
             }
