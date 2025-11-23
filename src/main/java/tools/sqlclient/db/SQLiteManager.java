@@ -9,7 +9,10 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Savepoint;
 import java.sql.Statement;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * 初始化本地 SQLite，包含 objects 和 columns 表。
@@ -59,7 +62,7 @@ public class SQLiteManager {
             ensureColumn(conn, "notes", "updated_at", "INTEGER NOT NULL DEFAULT 0");
             ensureColumn(conn, "notes", "tags", "TEXT DEFAULT ''");
             ensureColumn(conn, "notes", "starred", "INTEGER DEFAULT 0");
-            deduplicateNoteTitles(conn);
+            normalizeNoteTitles(conn);
             ensureUniqueIndex(conn, "idx_notes_title_unique", "notes", "title");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS app_state (" +
                     "key TEXT PRIMARY KEY, " +
@@ -84,62 +87,6 @@ public class SQLiteManager {
         }
     }
 
-    /**
-     * 在补充唯一索引前处理已有重复标题，避免创建索引时抛出 UNIQUE 约束异常。
-     * 规则：保留同名笔记中的最早一条，其他追加 “(副本 n)” 后缀直到唯一。
-     */
-    private void deduplicateNoteTitles(Connection conn) throws SQLException {
-        // 查找重复标题
-        try (PreparedStatement dupStmt = conn.prepareStatement(
-                "SELECT title FROM notes GROUP BY title HAVING COUNT(*) > 1");
-             ResultSet dupRs = dupStmt.executeQuery()) {
-            while (dupRs.next()) {
-                String title = dupRs.getString("title");
-                resolveDuplicatesForTitle(conn, title);
-            }
-        }
-    }
-
-    private void resolveDuplicatesForTitle(Connection conn, String title) throws SQLException {
-        // 按创建时间和 ID 排序，保留第一条，其余重命名
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT id FROM notes WHERE title = ? ORDER BY created_at ASC, id ASC")) {
-            ps.setString(1, title);
-            try (ResultSet rs = ps.executeQuery()) {
-                boolean first = true;
-                int copyIndex = 1;
-                while (rs.next()) {
-                    long id = rs.getLong("id");
-                    if (first) {
-                        first = false;
-                        continue; // 保留第一条
-                    }
-                    String newTitle;
-                    do {
-                        newTitle = title + " (副本 " + copyIndex + ")";
-                        copyIndex++;
-                    } while (titleExists(conn, newTitle));
-                    try (PreparedStatement upd = conn.prepareStatement(
-                            "UPDATE notes SET title = ?, updated_at = ? WHERE id = ?")) {
-                        upd.setString(1, newTitle);
-                        upd.setLong(2, System.currentTimeMillis());
-                        upd.setLong(3, id);
-                        upd.executeUpdate();
-                    }
-                }
-            }
-        }
-    }
-
-    private boolean titleExists(Connection conn, String title) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement("SELECT 1 FROM notes WHERE title = ? LIMIT 1")) {
-            ps.setString(1, title);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next();
-            }
-        }
-    }
-
     private boolean columnExists(Connection conn, String table, String column) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement("PRAGMA table_info(" + table + ")");
              ResultSet rs = ps.executeQuery()) {
@@ -150,5 +97,60 @@ public class SQLiteManager {
             }
         }
         return false;
+    }
+
+    /**
+     * 全量扫描 notes，确保标题全局唯一：
+     * 1) 按 title、created_at、id 排序，第一次出现的标题保留；后续同名自动追加 “(副本 n)”
+     * 2) 通过内存 Set 判断是否重复，始终生成未使用的新标题，避免 UNIQUE 约束创建失败
+     */
+    private void normalizeNoteTitles(Connection conn) throws SQLException {
+        boolean autoCommit = conn.getAutoCommit();
+        Savepoint sp = null;
+        try {
+            conn.setAutoCommit(false);
+            sp = conn.setSavepoint("normalize_notes");
+            Set<String> seenTitles = new HashSet<>();
+            try (PreparedStatement ps = conn.prepareStatement(
+                    "SELECT id, title FROM notes ORDER BY title ASC, created_at ASC, id ASC");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    long id = rs.getLong("id");
+                    String title = rs.getString("title");
+                    if (title == null) {
+                        title = "(未命名)";
+                    }
+                    if (seenTitles.add(title)) {
+                        continue; // 首次出现
+                    }
+                    int copyIndex = 1;
+                    String candidate;
+                    do {
+                        candidate = title + " (副本 " + copyIndex + ")";
+                        copyIndex++;
+                    } while (seenTitles.contains(candidate));
+                    seenTitles.add(candidate);
+                    try (PreparedStatement upd = conn.prepareStatement(
+                            "UPDATE notes SET title = ?, updated_at = ? WHERE id = ?")) {
+                        upd.setString(1, candidate);
+                        upd.setLong(2, System.currentTimeMillis());
+                        upd.setLong(3, id);
+                        upd.executeUpdate();
+                    }
+                }
+            }
+            conn.commit();
+        } catch (SQLException ex) {
+            if (sp != null) {
+                try {
+                    conn.rollback(sp);
+                } catch (SQLException ignore) {
+                    // ignore rollback failure
+                }
+            }
+            throw ex;
+        } finally {
+            conn.setAutoCommit(autoCommit);
+        }
     }
 }
