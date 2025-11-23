@@ -64,7 +64,30 @@ public class MainFrame extends JFrame {
         var styles = styleRepository.listAll();
         String styleName = appStateRepository.loadCurrentStyleName(styles.isEmpty() ? "默认" : styles.get(0).getName());
         this.currentStyle = styles.stream().filter(s -> s.getName().equals(styleName)).findFirst()
-                .orElseGet(() -> styles.isEmpty() ? new EditorStyle("默认", 14, "#FFFFFF", "#000000", "#CCE8FF", "#000000", "#005CC5", "#032F62", "#6A737D") : styles.get(0));
+                .orElseGet(() -> {
+                    if (!styles.isEmpty()) {
+                        return styles.get(0);
+                    }
+                    return new EditorStyle(
+                            "默认",
+                            14,
+                            "#FFFFFF", // background
+                            "#000000", // foreground
+                            "#CCE8FF", // selection
+                            "#000000", // caret
+                            "#005CC5", // keyword
+                            "#032F62", // string
+                            "#6A737D", // comment
+                            "#1C7C54", // number
+                            "#000000", // operator
+                            "#6F42C1", // function
+                            "#005CC5", // data type
+                            "#24292E", // identifier
+                            "#D73A49", // literal
+                            "#F6F8FA", // line highlight
+                            "#FFDD88"  // bracket
+                    );
+                });
         this.convertFullWidth = appStateRepository.loadFullWidthOption(true);
         buildMenu();
         buildContent();
