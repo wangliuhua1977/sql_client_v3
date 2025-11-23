@@ -100,24 +100,30 @@ public class SuggestionEngine {
                     return;
                 }
                 SuggestionContext ctx = analyzeContext();
-                if (ctx != null && (shouldTrigger(e) || popup.isVisible())) {
+                boolean activationKey = isActivationKey(e);
+                boolean filterKey = isFilterKey(e);
+                if (ctx != null && (activationKey || (popup.isVisible() && filterKey))) {
                     String prefix = currentToken();
                     if (prefix.contains(".")) {
                         prefix = prefix.substring(prefix.lastIndexOf('.') + 1);
                     }
                     showSuggestions(prefix, ctx);
-                } else {
+                } else if (activationKey) {
                     popup.setVisible(false);
                 }
             }
         };
     }
 
-    private boolean shouldTrigger(KeyEvent e) {
-        char ch = e.getKeyChar();
+    private boolean isActivationKey(KeyEvent e) {
         int code = e.getKeyCode();
-        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '.' || ch == '_' ||
-                code == KeyEvent.VK_PERIOD || code == KeyEvent.VK_DECIMAL || code == KeyEvent.VK_SPACE;
+        char ch = e.getKeyChar();
+        return code == KeyEvent.VK_SPACE || code == KeyEvent.VK_PERIOD || code == KeyEvent.VK_DECIMAL || ch == '.';
+    }
+
+    private boolean isFilterKey(KeyEvent e) {
+        char ch = e.getKeyChar();
+        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '_' || ch == '.';
     }
 
     private String currentToken() {
