@@ -34,6 +34,8 @@ public class SuggestionEngine {
     private int replaceEnd = -1;
     private boolean showTableHintForColumns = true;
     private SuggestionContext lastContext;
+    private volatile boolean objectsRefreshInFlight = false;
+    private long lastObjectsRefreshAt = 0L;
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -152,6 +154,10 @@ public class SuggestionEngine {
                     () -> SwingUtilities.invokeLater(() -> showSuggestions(token, context, true)));
         }
         currentItems = metadataService.suggest(token, context, 15);
+        if (currentItems.isEmpty() && !skipFetch && context.type() == SuggestionType.TABLE_OR_VIEW) {
+            triggerObjectRefresh(token, context);
+            return;
+        }
         if (context.type() == SuggestionType.COLUMN && context.tableHint() != null && !currentItems.isEmpty()) {
             List<SuggestionItem> withAll = new ArrayList<>();
             withAll.add(new SuggestionItem("所有字段", "all_columns", context.tableHint(), 0));
@@ -218,6 +224,25 @@ public class SuggestionEngine {
         }
         metadataService.recordUsage(item);
         popup.setVisible(false);
+    }
+
+    private void triggerObjectRefresh(String token, SuggestionContext context) {
+        long now = System.currentTimeMillis();
+        if (objectsRefreshInFlight || now - lastObjectsRefreshAt < 2000L) {
+            list.setListData(new SuggestionItem[]{new SuggestionItem("加载中...", "loading", null, 0)});
+            list.setSelectedIndex(0);
+            showPopup();
+            return;
+        }
+        objectsRefreshInFlight = true;
+        lastObjectsRefreshAt = now;
+        list.setListData(new SuggestionItem[]{new SuggestionItem("加载中...", "loading", null, 0)});
+        list.setSelectedIndex(0);
+        showPopup();
+        metadataService.refreshMetadataAsync(() -> SwingUtilities.invokeLater(() -> {
+            objectsRefreshInFlight = false;
+            showSuggestions(token, context, true);
+        }));
     }
 
     private void insertText(String text) {
