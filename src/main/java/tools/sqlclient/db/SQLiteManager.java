@@ -54,8 +54,9 @@ public class SQLiteManager {
                     "starred INTEGER DEFAULT 0"
                     + ")");
             // 兼容旧版本：逐列补齐，避免缺失 created_at/updated_at 等字段导致查询失败
-            ensureColumn(conn, "notes", "created_at", "INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)");
-            ensureColumn(conn, "notes", "updated_at", "INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000)");
+            // SQLite 不允许使用表达式默认值在 ALTER TABLE 里添加列，这里使用常量默认值并由上层插入逻辑填充实际时间戳
+            ensureColumn(conn, "notes", "created_at", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(conn, "notes", "updated_at", "INTEGER NOT NULL DEFAULT 0");
             ensureColumn(conn, "notes", "tags", "TEXT DEFAULT ''");
             ensureColumn(conn, "notes", "starred", "INTEGER DEFAULT 0");
             ensureUniqueIndex(conn, "idx_notes_title_unique", "notes", "title");
