@@ -246,13 +246,13 @@ public class MainFrame extends JFrame {
         centerPanel.add(tabbedPane, "panel");
         sharedResultsContainer.setLayout(new BoxLayout(sharedResultsContainer, BoxLayout.Y_AXIS));
         sharedResultsScroll = new JScrollPane(sharedResultsContainer);
-        sharedResultsToggle = new JToggleButton("结果面板 (点击展开)");
+        sharedResultsToggle = new JToggleButton("▼");
         sharedResultsToggle.setSelected(false);
+        sharedResultsToggle.setMargin(new Insets(2, 6, 2, 6));
         sharedResultsToggle.addActionListener(e -> toggleSharedResults());
         JPanel sharedHeader = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
         sharedHeader.add(sharedResultsToggle);
         sharedResultsWrapper.add(sharedHeader, BorderLayout.NORTH);
-        sharedResultsScroll.setVisible(false);
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
         toggleSharedResults();
         desktopPane.addPropertyChangeListener("selectedFrame", evt -> updateExecutionButtons());
@@ -542,6 +542,7 @@ public class MainFrame extends JFrame {
         if (sharedResultsScroll != null) {
             sharedResultsScroll.setVisible(show);
         }
+        sharedResultsToggle.setText(show ? "▲" : "▼");
         sharedResultsWrapper.revalidate();
         sharedResultsWrapper.repaint();
     }
@@ -596,7 +597,7 @@ public class MainFrame extends JFrame {
         private void updateVisibility() {
             boolean show = toggle.isSelected();
             scroll.setVisible(show);
-            toggle.setText(show ? "结果 ▲▼" : "结果 ▼▲");
+            toggle.setText(show ? "▲" : "▼");
             wrapper.revalidate();
             wrapper.repaint();
         }

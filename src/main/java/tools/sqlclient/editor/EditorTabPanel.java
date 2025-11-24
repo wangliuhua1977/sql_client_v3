@@ -138,15 +138,15 @@ public class EditorTabPanel extends JPanel {
 
         JPanel togglePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
         resultToggle.setSelected(false);
+        resultToggle.setMargin(new Insets(2, 6, 2, 6));
         resultToggle.addActionListener(e -> updateResultVisibility());
         togglePanel.add(resultToggle);
-        resultTabs.setVisible(false);
         resultTabs.setBorder(BorderFactory.createEmptyBorder());
         JScrollPane resultScroll = new JScrollPane(resultTabs);
-        resultScroll.setVisible(false);
         resultScroll.setPreferredSize(new Dimension(100, 220));
         resultWrapper.add(togglePanel, BorderLayout.NORTH);
         resultWrapper.add(resultScroll, BorderLayout.CENTER);
+        resultWrapper.setMinimumSize(new Dimension(100, 120));
 
         splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
         splitPane.setResizeWeight(1.0);
@@ -155,8 +155,16 @@ public class EditorTabPanel extends JPanel {
         splitPane.setContinuousLayout(true);
         splitPane.setBorder(BorderFactory.createEmptyBorder());
         splitPane.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
+            int height = splitPane.getHeight();
+            int location = splitPane.getDividerLocation();
+            int toggleHeight = resultToggle.getPreferredSize().height + 12;
+            boolean open = location < height - toggleHeight;
+            if (open != resultToggle.isSelected()) {
+                resultToggle.setSelected(open);
+                updateToggleLabel();
+            }
             if (resultToggle.isSelected()) {
-                lastDividerLocation = splitPane.getDividerLocation();
+                lastDividerLocation = location;
             }
         });
         add(splitPane, BorderLayout.CENTER);
@@ -354,11 +362,7 @@ public class EditorTabPanel extends JPanel {
     }
 
     private void updateResultVisibility() {
-        Component view = ((BorderLayout) resultWrapper.getLayout()).getLayoutComponent(BorderLayout.CENTER);
         boolean show = resultToggle.isSelected();
-        if (view != null) {
-            view.setVisible(show);
-        }
         updateToggleLabel();
         adjustDividerForVisibility(show);
         resultWrapper.revalidate();
@@ -386,7 +390,7 @@ public class EditorTabPanel extends JPanel {
     }
 
     private void updateToggleLabel() {
-        resultToggle.setText(resultToggle.isSelected() ? "结果面板 ▲▼" : "结果面板 ▼▲");
+        resultToggle.setText(resultToggle.isSelected() ? "▲" : "▼");
     }
 
     public void setExecutionRunning(boolean running) {
