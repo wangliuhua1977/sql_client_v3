@@ -471,7 +471,7 @@ public class MainFrame extends JFrame {
         if (windowMode) {
             panel.clearLocalResults();
         } else {
-            SharedResultView target = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+            SharedResultView target = ensureSharedView();
             target.clear();
             expandSharedResults();
         }
