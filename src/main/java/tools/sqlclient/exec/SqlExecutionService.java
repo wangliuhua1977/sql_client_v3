@@ -34,7 +34,9 @@ public class SqlExecutionService {
         if (trimmed.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        String encoded = URLEncoder.encode(trimmed, StandardCharsets.UTF_8);
+        // 按接口要求，将单引号替换为双引号再进行 URL 编码，避免服务器对单引号报错
+        String sanitized = trimmed.replace("'", "\"");
+        String encoded = URLEncoder.encode(sanitized, StandardCharsets.UTF_8);
         HttpRequest request = HttpRequest.newBuilder(URI.create(EXEC_API + encoded)).GET().build();
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenApplyAsync(resp -> parseResponse(trimmed, resp.body()), ThreadPools.NETWORK_POOL)
@@ -52,9 +54,19 @@ public class SqlExecutionService {
     }
 
     private SqlExecResult parseResponse(String sql, String body) {
-        JsonObject obj = gson.fromJson(body, JsonObject.class);
-        int rowsCount = obj.has("rows_count") && !obj.get("rows_count").isJsonNull()
-                ? Integer.parseInt(obj.get("rows_count").getAsString()) : 0;
+        JsonElement parsed = gson.fromJson(body, JsonElement.class);
+        if (parsed == null || !parsed.isJsonObject()) {
+            throw new RuntimeException("执行响应不是合法的 JSON 对象: " + body);
+        }
+        JsonObject obj = parsed.getAsJsonObject();
+        int rowsCount = 0;
+        if (obj.has("rows_count") && !obj.get("rows_count").isJsonNull()) {
+            try {
+                rowsCount = Integer.parseInt(obj.get("rows_count").getAsString());
+            } catch (NumberFormatException ignore) {
+                rowsCount = 0;
+            }
+        }
         JsonArray data = extractDataArray(obj);
         List<String> columns = new ArrayList<>();
         List<List<String>> rows = new ArrayList<>();

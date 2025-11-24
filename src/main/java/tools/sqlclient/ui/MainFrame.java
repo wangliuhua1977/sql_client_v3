@@ -63,7 +63,8 @@ public class MainFrame extends JFrame {
     private EditorStyle currentStyle;
     private JButton executeButton;
     private JButton stopButton;
-    private JToggleButton sharedResultsToggle;
+    private JSplitPane mainSplitPane;
+    private int sharedDividerLocation = -1;
     private JScrollPane sharedResultsScroll;
 
     public MainFrame() {
@@ -242,25 +243,31 @@ public class MainFrame extends JFrame {
     }
 
     private void buildContent() {
+        centerPanel.setMinimumSize(new Dimension(200, 240));
         centerPanel.add(desktopPane, "window");
         centerPanel.add(tabbedPane, "panel");
         sharedResultsContainer.setLayout(new BoxLayout(sharedResultsContainer, BoxLayout.Y_AXIS));
         sharedResultsScroll = new JScrollPane(sharedResultsContainer);
-        sharedResultsToggle = new JToggleButton("▼");
-        sharedResultsToggle.setSelected(false);
-        sharedResultsToggle.setMargin(new Insets(2, 6, 2, 6));
-        sharedResultsToggle.addActionListener(e -> toggleSharedResults());
-        JPanel sharedHeader = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
-        sharedHeader.add(sharedResultsToggle);
-        sharedResultsWrapper.add(sharedHeader, BorderLayout.NORTH);
+        sharedResultsScroll.setVisible(false);
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
-        toggleSharedResults();
+        sharedResultsWrapper.setMinimumSize(new Dimension(100, 180));
         desktopPane.addPropertyChangeListener("selectedFrame", evt -> updateExecutionButtons());
         tabbedPane.addChangeListener(e -> updateExecutionButtons());
-        JPanel contentWrapper = new JPanel(new BorderLayout());
-        contentWrapper.add(centerPanel, BorderLayout.CENTER);
-        contentWrapper.add(sharedResultsWrapper, BorderLayout.SOUTH);
-        add(contentWrapper, BorderLayout.CENTER);
+        mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, sharedResultsWrapper);
+        mainSplitPane.setResizeWeight(1.0);
+        mainSplitPane.setDividerSize(10);
+        mainSplitPane.setOneTouchExpandable(false);
+        mainSplitPane.setContinuousLayout(true);
+        mainSplitPane.setBorder(BorderFactory.createEmptyBorder());
+        mainSplitPane.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
+            if (mainSplitPane.getHeight() <= 0) return;
+            int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
+            int minBottom = sharedResultsWrapper.getMinimumSize().height;
+            int location = Math.max(minTop, Math.min(mainSplitPane.getDividerLocation(), mainSplitPane.getHeight() - minBottom));
+            sharedDividerLocation = location;
+        });
+        add(mainSplitPane, BorderLayout.CENTER);
+        SwingUtilities.invokeLater(this::collapseSharedResults);
         centerLayout.show(centerPanel, "window");
         restoreSession();
     }
@@ -537,40 +544,42 @@ public class MainFrame extends JFrame {
         return view;
     }
 
-    private void toggleSharedResults() {
-        boolean show = sharedResultsToggle.isSelected();
+    private void expandSharedResults() {
         if (sharedResultsScroll != null) {
-            sharedResultsScroll.setVisible(show);
+            sharedResultsScroll.setVisible(true);
         }
-        sharedResultsToggle.setText(show ? "▲" : "▼");
-        sharedResultsWrapper.revalidate();
-        sharedResultsWrapper.repaint();
+        if (mainSplitPane == null) return;
+        int height = mainSplitPane.getHeight();
+        int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
+        int minBottom = sharedResultsWrapper.getMinimumSize().height;
+        int target = sharedDividerLocation > 0 ? sharedDividerLocation : (int) (height * 0.7);
+        int maxLocation = Math.max(minTop, height - minBottom);
+        int clamped = Math.max(minTop, Math.min(target, maxLocation));
+        SwingUtilities.invokeLater(() -> mainSplitPane.setDividerLocation(clamped));
     }
 
-    private void expandSharedResults() {
-        if (sharedResultsToggle != null && !sharedResultsToggle.isSelected()) {
-            sharedResultsToggle.setSelected(true);
-            toggleSharedResults();
+    private void collapseSharedResults() {
+        if (mainSplitPane == null) return;
+        if (sharedResultsScroll != null) {
+            sharedResultsScroll.setVisible(false);
         }
+        int height = mainSplitPane.getHeight();
+        int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
+        int minBottom = sharedResultsWrapper.getMinimumSize().height;
+        int collapsePos = Math.max(minTop, height - minBottom);
+        SwingUtilities.invokeLater(() -> mainSplitPane.setDividerLocation(collapsePos));
     }
 
     private static class SharedResultView {
         final JPanel wrapper = new JPanel(new BorderLayout());
         final JTabbedPane tabs = new JTabbedPane();
-        final JToggleButton toggle;
         final JScrollPane scroll;
 
         SharedResultView(String title) {
-            toggle = new JToggleButton();
-            toggle.setSelected(false);
             tabs.setBorder(BorderFactory.createEmptyBorder());
             scroll = new JScrollPane(tabs);
-            scroll.setVisible(false);
-            toggle.addActionListener(e -> updateVisibility());
             wrapper.setBorder(BorderFactory.createTitledBorder(title));
-            wrapper.add(toggle, BorderLayout.NORTH);
             wrapper.add(scroll, BorderLayout.CENTER);
-            updateVisibility();
         }
 
         void addResultTab(String title, JComponent comp, String hint) {
@@ -581,25 +590,11 @@ public class MainFrame extends JFrame {
             }
             tabs.setVisible(true);
             tabs.setSelectedComponent(comp);
-            if (!toggle.isSelected()) {
-                toggle.setSelected(true);
-            }
-            updateVisibility();
         }
 
         void clear() {
             tabs.removeAll();
             tabs.setVisible(false);
-            toggle.setSelected(false);
-            updateVisibility();
-        }
-
-        private void updateVisibility() {
-            boolean show = toggle.isSelected();
-            scroll.setVisible(show);
-            toggle.setText(show ? "▲" : "▼");
-            wrapper.revalidate();
-            wrapper.repaint();
         }
     }
 

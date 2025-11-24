@@ -38,7 +38,6 @@ public class EditorTabPanel extends JPanel {
     private final FullWidthFilter fullWidthFilter;
     private final JTabbedPane resultTabs = new JTabbedPane();
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
-    private final JToggleButton resultToggle = new JToggleButton();
     private JSplitPane splitPane;
     private int lastDividerLocation = -1;
     private javax.swing.Timer execTimer;
@@ -136,40 +135,29 @@ public class EditorTabPanel extends JPanel {
         status.add(execStatusLabel);
         editorPanel.add(status, BorderLayout.SOUTH);
 
-        JPanel togglePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
-        resultToggle.setSelected(false);
-        resultToggle.setMargin(new Insets(2, 6, 2, 6));
-        resultToggle.addActionListener(e -> updateResultVisibility());
-        togglePanel.add(resultToggle);
         resultTabs.setBorder(BorderFactory.createEmptyBorder());
         JScrollPane resultScroll = new JScrollPane(resultTabs);
         resultScroll.setPreferredSize(new Dimension(100, 220));
-        resultWrapper.add(togglePanel, BorderLayout.NORTH);
         resultWrapper.add(resultScroll, BorderLayout.CENTER);
-        resultWrapper.setMinimumSize(new Dimension(100, 120));
+        resultWrapper.setMinimumSize(new Dimension(100, 160));
+
+        editorPanel.setMinimumSize(new Dimension(120, 200));
 
         splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
         splitPane.setResizeWeight(1.0);
-        splitPane.setDividerSize(8);
-        splitPane.setOneTouchExpandable(true);
+        splitPane.setDividerSize(10);
+        splitPane.setOneTouchExpandable(false);
         splitPane.setContinuousLayout(true);
         splitPane.setBorder(BorderFactory.createEmptyBorder());
         splitPane.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
-            int height = splitPane.getHeight();
-            int location = splitPane.getDividerLocation();
-            int toggleHeight = resultToggle.getPreferredSize().height + 12;
-            boolean open = location < height - toggleHeight;
-            if (open != resultToggle.isSelected()) {
-                resultToggle.setSelected(open);
-                updateToggleLabel();
-            }
-            if (resultToggle.isSelected()) {
-                lastDividerLocation = location;
-            }
+            if (splitPane.getHeight() <= 0) return;
+            int minTop = editorPanel.getMinimumSize().height;
+            int minBottom = resultWrapper.getMinimumSize().height;
+            int location = Math.max(minTop, Math.min(splitPane.getDividerLocation(), splitPane.getHeight() - minBottom));
+            lastDividerLocation = location;
         });
         add(splitPane, BorderLayout.CENTER);
         SwingUtilities.invokeLater(this::collapseResultArea);
-        updateToggleLabel();
     }
 
     public void saveNow() {
@@ -345,8 +333,7 @@ public class EditorTabPanel extends JPanel {
     public void clearLocalResults() {
         resultTabs.removeAll();
         resultTabs.setVisible(false);
-        resultToggle.setSelected(false);
-        updateResultVisibility();
+        collapseResultArea();
     }
 
     public void addLocalResultPanel(String title, JComponent panel, String hint) {
@@ -357,40 +344,27 @@ public class EditorTabPanel extends JPanel {
         }
         resultTabs.setVisible(true);
         resultTabs.setSelectedComponent(panel);
-        resultToggle.setSelected(true);
-        updateResultVisibility();
+        expandResultArea();
     }
 
-    private void updateResultVisibility() {
-        boolean show = resultToggle.isSelected();
-        updateToggleLabel();
-        adjustDividerForVisibility(show);
-        resultWrapper.revalidate();
-        resultWrapper.repaint();
-    }
-
-    private void adjustDividerForVisibility(boolean show) {
+    private void expandResultArea() {
         if (splitPane == null) return;
-        int minHeight = Math.max(resultToggle.getPreferredSize().height + 12, 32);
-        if (show) {
-            if (lastDividerLocation <= 0 || lastDividerLocation >= splitPane.getHeight()) {
-                lastDividerLocation = (int) (splitPane.getHeight() * 0.7);
-            }
-            int target = Math.max(minHeight, Math.min(lastDividerLocation, splitPane.getHeight() - minHeight));
-            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(target));
-        } else {
-            lastDividerLocation = splitPane.getDividerLocation();
-            int collapsePos = Math.max(0, splitPane.getHeight() - minHeight);
-            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(collapsePos));
-        }
+        int height = splitPane.getHeight();
+        int minTop = editorPanel.getMinimumSize().height;
+        int minBottom = resultWrapper.getMinimumSize().height;
+        int target = lastDividerLocation > 0 ? lastDividerLocation : (int) (height * 0.65);
+        int maxLocation = Math.max(minTop, height - minBottom);
+        int clamped = Math.max(minTop, Math.min(target, maxLocation));
+        SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(clamped));
     }
 
     private void collapseResultArea() {
-        adjustDividerForVisibility(false);
-    }
-
-    private void updateToggleLabel() {
-        resultToggle.setText(resultToggle.isSelected() ? "▲" : "▼");
+        if (splitPane == null) return;
+        int height = splitPane.getHeight();
+        int minTop = editorPanel.getMinimumSize().height;
+        int minBottom = resultWrapper.getMinimumSize().height;
+        int collapsePos = Math.max(minTop, height - minBottom);
+        SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(collapsePos));
     }
 
     public void setExecutionRunning(boolean running) {
