@@ -102,7 +102,7 @@ public class SuggestionEngine {
                 SuggestionContext ctx = analyzeContext();
                 boolean activationKey = isActivationKey(e);
                 boolean filterKey = isFilterKey(e);
-                if (ctx != null && (activationKey || (popup.isVisible() && filterKey))) {
+                if (ctx != null && (activationKey || filterKey || (popup.isVisible() && filterKey))) {
                     String prefix = currentToken();
                     if (prefix.contains(".")) {
                         prefix = prefix.substring(prefix.lastIndexOf('.') + 1);

@@ -210,15 +210,26 @@ public class MetadataService {
                                     up.executeUpdate();
                                 }
                             }
-                            List<String> localCols = new ArrayList<>();
-                            try (PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=?")) {
+                            Map<String, Integer> localCols = new HashMap<>();
+                            try (PreparedStatement ps = conn.prepareStatement("SELECT column_name, sort_no FROM columns WHERE object_name=?")) {
                                 ps.setString(1, objectName);
                                 try (ResultSet rs = ps.executeQuery()) {
-                                    while (rs.next()) localCols.add(rs.getString(1));
+                                    while (rs.next()) {
+                                        localCols.put(rs.getString("column_name"), rs.getInt("sort_no"));
+                                    }
                                 }
                             }
-                            boolean changed = forceRefresh || columns.size() != localCols.size() ||
-                                    !new HashSet<>(localCols).containsAll(columns.stream().map(c -> c.column_name).toList());
+                            boolean changed = forceRefresh || columns.size() != localCols.size();
+                            if (!changed) {
+                                for (RemoteColumn col : columns) {
+                                    Integer localSort = localCols.get(col.column_name);
+                                    int remoteSort = parseSortNo(col.sort_no, -1);
+                                    if (localSort == null || (remoteSort >= 0 && localSort != remoteSort)) {
+                                        changed = true;
+                                        break;
+                                    }
+                                }
+                            }
                             if (changed) {
                                 try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
                                     del.setString(1, objectName);
@@ -230,7 +241,8 @@ public class MetadataService {
                                         ins.setString(1, col.schema_name);
                                         ins.setString(2, objectName);
                                         ins.setString(3, col.column_name);
-                                        ins.setInt(4, i++);
+                                        int sort = parseSortNo(col.sort_no, i++);
+                                        ins.setInt(4, sort);
                                         ins.addBatch();
                                     }
                                     ins.executeBatch();
@@ -338,7 +350,7 @@ public class MetadataService {
         if (tableHint != null && !tableHint.isBlank()) {
             sql.append(" AND object_name = ?");
         }
-        sql.append(" ORDER BY use_count DESC, sort_no ASC, column_name ASC LIMIT ?");
+        sql.append(" ORDER BY sort_no ASC, use_count DESC, column_name ASC LIMIT ?");
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql.toString())) {
             int idx = 1;
@@ -480,5 +492,15 @@ public class MetadataService {
         String schema_name;
         String object_name;
         String column_name;
+        String sort_no;
+    }
+
+    private int parseSortNo(String value, int fallback) {
+        if (value == null) return fallback;
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 }
