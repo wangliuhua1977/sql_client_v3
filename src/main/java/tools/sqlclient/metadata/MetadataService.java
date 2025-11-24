@@ -56,6 +56,23 @@ public class MetadataService {
         CompletableFuture.runAsync(this::refreshMetadata, metadataPool).thenRunAsync(done);
     }
 
+    /**
+     * 清空本地对象/字段缓存并重新拉取一次对象列表。
+     */
+    public void resetMetadataAsync(Runnable done) {
+        CompletableFuture.runAsync(() -> {
+            clearLocalMetadata();
+            refreshMetadata();
+        }, metadataPool).whenComplete((v, ex) -> {
+            if (ex != null) {
+                log.error("重置元数据失败", ex);
+            }
+            if (done != null) {
+                SwingUtilities.invokeLater(done);
+            }
+        });
+    }
+
     private void refreshMetadata() {
         try {
             List<RemoteObject> remoteObjects = fetchObjects();
@@ -99,6 +116,21 @@ public class MetadataService {
             // 更新列信息
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
+        }
+    }
+
+    private void clearLocalMetadata() {
+        synchronized (dbWriteLock) {
+            try (Connection conn = sqliteManager.getConnection(); Statement st = conn.createStatement()) {
+                boolean auto = conn.getAutoCommit();
+                if (auto) conn.setAutoCommit(false);
+                st.executeUpdate("DELETE FROM columns");
+                st.executeUpdate("DELETE FROM objects");
+                conn.commit();
+                if (auto) conn.setAutoCommit(true);
+            } catch (Exception e) {
+                log.error("清空本地元数据失败", e);
+            }
         }
     }
 

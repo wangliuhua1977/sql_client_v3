@@ -183,10 +183,20 @@ public class MainFrame extends JFrame {
             }
         }));
 
-        tools.add(new JMenuItem(new AbstractAction("刷新元数据") {
+        tools.add(new JMenuItem(new AbstractAction("重置元数据") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                metadataService.refreshMetadataAsync(() -> {});
+                int option = JOptionPane.showConfirmDialog(MainFrame.this,
+                        "重置将清空本地表/函数/存储过程/字段元数据，使用频次也会被清空。是否继续？",
+                        "重置元数据",
+                        JOptionPane.YES_NO_OPTION,
+                        JOptionPane.WARNING_MESSAGE);
+                if (option == JOptionPane.YES_OPTION) {
+                    metadataService.resetMetadataAsync(() -> JOptionPane.showMessageDialog(MainFrame.this,
+                            "已重置并重新获取元数据。",
+                            "完成",
+                            JOptionPane.INFORMATION_MESSAGE));
+                }
             }
         }));
 
