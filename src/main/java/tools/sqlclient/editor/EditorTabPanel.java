@@ -141,6 +141,7 @@ public class EditorTabPanel extends JPanel {
         resultScroll.setPreferredSize(new Dimension(100, 220));
         resultWrapper.add(resultScroll, BorderLayout.CENTER);
         resultWrapper.setMinimumSize(new Dimension(100, 160));
+        resultWrapper.setVisible(false);
 
         editorPanel.setMinimumSize(new Dimension(120, 200));
 
@@ -334,6 +335,7 @@ public class EditorTabPanel extends JPanel {
     public void clearLocalResults() {
         resultTabs.removeAll();
         resultTabs.setVisible(false);
+        resultWrapper.setVisible(false);
         collapseResultArea();
     }
 
@@ -345,6 +347,7 @@ public class EditorTabPanel extends JPanel {
         }
         resultTabs.setVisible(true);
         resultTabs.setSelectedComponent(panel);
+        resultWrapper.setVisible(true);
         expandResultArea();
     }
 
@@ -364,7 +367,7 @@ public class EditorTabPanel extends JPanel {
         int height = splitPane.getHeight();
         int minTop = editorPanel.getMinimumSize().height;
         int minBottom = resultWrapper.getMinimumSize().height;
-        int collapsePos = Math.max(minTop, height - minBottom);
+        int collapsePos = resultWrapper.isVisible() ? Math.max(minTop, height - minBottom) : height;
         SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(collapsePos));
     }
 

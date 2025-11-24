@@ -246,6 +246,8 @@ public class MainFrame extends JFrame {
         stopButton.setEnabled(false);
         executeButton.addActionListener(e -> executeCurrentSql());
         stopButton.addActionListener(e -> stopCurrentExecution());
+        styleToolbarButton(executeButton);
+        styleToolbarButton(stopButton);
         toolBar.add(executeButton);
         toolBar.add(stopButton);
         add(toolBar, BorderLayout.NORTH);
@@ -259,6 +261,7 @@ public class MainFrame extends JFrame {
         sharedResultsScroll.setVisible(false);
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
         sharedResultsWrapper.setMinimumSize(new Dimension(100, 180));
+        sharedResultsWrapper.setVisible(false);
         desktopPane.addPropertyChangeListener("selectedFrame", evt -> updateExecutionButtons());
         tabbedPane.addChangeListener(e -> updateExecutionButtons());
         mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, sharedResultsWrapper);
@@ -483,7 +486,7 @@ public class MainFrame extends JFrame {
         } else {
             SharedResultView target = ensureSharedView();
             target.clear();
-            expandSharedResults();
+            collapseSharedResults();
         }
         resultTabCounters.put(noteId, new AtomicInteger(1));
         statusLabel.setText("执行中...");
@@ -551,6 +554,7 @@ public class MainFrame extends JFrame {
         if (sharedResultsScroll != null) {
             sharedResultsScroll.setVisible(true);
         }
+        sharedResultsWrapper.setVisible(true);
         if (mainSplitPane == null) return;
         int height = mainSplitPane.getHeight();
         int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
@@ -566,10 +570,11 @@ public class MainFrame extends JFrame {
         if (sharedResultsScroll != null) {
             sharedResultsScroll.setVisible(false);
         }
+        sharedResultsWrapper.setVisible(false);
         int height = mainSplitPane.getHeight();
         int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
         int minBottom = sharedResultsWrapper.getMinimumSize().height;
-        int collapsePos = Math.max(minTop, height - minBottom);
+        int collapsePos = sharedResultsWrapper.isVisible() ? Math.max(minTop, height - minBottom) : height;
         SwingUtilities.invokeLater(() -> mainSplitPane.setDividerLocation(collapsePos));
     }
 
@@ -626,7 +631,8 @@ public class MainFrame extends JFrame {
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
                 int[] xs = {x, x, x + size};
                 int[] ys = {y, y + size, y + size / 2};
-                g2.setColor(new Color(46, 170, 220));
+                Color color = c.isEnabled() ? new Color(46, 170, 220) : Color.GRAY;
+                g2.setColor(color);
                 g2.fillPolygon(xs, ys, 3);
                 g2.dispose();
             }
@@ -646,7 +652,8 @@ public class MainFrame extends JFrame {
             @Override
             public void paintIcon(Component c, Graphics g, int x, int y) {
                 Graphics2D g2 = (Graphics2D) g.create();
-                g2.setColor(Color.BLACK);
+                Color color = c.isEnabled() ? new Color(46, 170, 220) : Color.GRAY;
+                g2.setColor(color);
                 g2.fillRect(x, y, size, size);
                 g2.dispose();
             }
@@ -664,12 +671,30 @@ public class MainFrame extends JFrame {
         if (panel == null) {
             executeButton.setEnabled(false);
             stopButton.setEnabled(false);
+            refreshToolbarButtonStyles();
             return;
         }
         long noteId = panel.getNote().getId();
         boolean running = runningExecutions.getOrDefault(noteId, java.util.List.of()).size() > 0;
         executeButton.setEnabled(!running);
         stopButton.setEnabled(running);
+        refreshToolbarButtonStyles();
+    }
+
+    private void styleToolbarButton(JButton button) {
+        button.setFocusPainted(false);
+        button.setContentAreaFilled(false);
+        button.setBorder(new javax.swing.border.LineBorder(new Color(46, 170, 220)));
+    }
+
+    private void refreshToolbarButtonStyles() {
+        Color active = new Color(46, 170, 220);
+        if (executeButton != null) {
+            executeButton.setBorder(new javax.swing.border.LineBorder(executeButton.isEnabled() ? active : Color.BLACK));
+        }
+        if (stopButton != null) {
+            stopButton.setBorder(new javax.swing.border.LineBorder(stopButton.isEnabled() ? active : Color.BLACK));
+        }
     }
 
     private void openManageDialog() {
