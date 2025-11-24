@@ -54,7 +54,8 @@ public class MainFrame extends JFrame {
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private final Map<Long, java.util.List<CompletableFuture<?>>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
-    private final Map<Long, JPanel> sharedNoteResultPanels = new java.util.HashMap<>();
+    private final Map<Long, SharedResultView> sharedNoteResultPanels = new java.util.HashMap<>();
+    private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
     private boolean windowMode = true;
     private JRadioButtonMenuItem windowModeItem;
     private JRadioButtonMenuItem panelModeItem;
@@ -62,6 +63,8 @@ public class MainFrame extends JFrame {
     private EditorStyle currentStyle;
     private JButton executeButton;
     private JButton stopButton;
+    private JToggleButton sharedResultsToggle;
+    private JScrollPane sharedResultsScroll;
 
     public MainFrame() {
         super("SQL Notebook - 多标签 PG/Hive");
@@ -226,8 +229,10 @@ public class MainFrame extends JFrame {
     private void buildToolbar() {
         JToolBar toolBar = new JToolBar();
         toolBar.setFloatable(false);
-        executeButton = new JButton("执行");
-        stopButton = new JButton("停止");
+        executeButton = new JButton(createRunIcon());
+        executeButton.setToolTipText("执行 (Ctrl+Enter)");
+        stopButton = new JButton(createStopIcon());
+        stopButton.setToolTipText("停止执行");
         stopButton.setEnabled(false);
         executeButton.addActionListener(e -> executeCurrentSql());
         stopButton.addActionListener(e -> stopCurrentExecution());
@@ -240,8 +245,16 @@ public class MainFrame extends JFrame {
         centerPanel.add(desktopPane, "window");
         centerPanel.add(tabbedPane, "panel");
         sharedResultsContainer.setLayout(new BoxLayout(sharedResultsContainer, BoxLayout.Y_AXIS));
-        sharedResultsWrapper.add(new JScrollPane(sharedResultsContainer), BorderLayout.CENTER);
-        sharedResultsWrapper.setVisible(false);
+        sharedResultsScroll = new JScrollPane(sharedResultsContainer);
+        sharedResultsToggle = new JToggleButton("结果面板 (点击展开)");
+        sharedResultsToggle.setSelected(false);
+        sharedResultsToggle.addActionListener(e -> toggleSharedResults());
+        JPanel sharedHeader = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
+        sharedHeader.add(sharedResultsToggle);
+        sharedResultsWrapper.add(sharedHeader, BorderLayout.NORTH);
+        sharedResultsScroll.setVisible(false);
+        sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
+        toggleSharedResults();
         desktopPane.addPropertyChangeListener("selectedFrame", evt -> updateExecutionButtons());
         tabbedPane.addChangeListener(e -> updateExecutionButtons());
         JPanel contentWrapper = new JPanel(new BorderLayout());
@@ -296,9 +309,13 @@ public class MainFrame extends JFrame {
     }
 
     private EditorTabPanel getOrCreatePanel(Note note) {
-        return panelCache.computeIfAbsent(note.getId(), id -> new EditorTabPanel(noteRepository, metadataService,
-                this::updateAutosaveTime, this::updateTaskCount,
-                newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle));
+        return panelCache.computeIfAbsent(note.getId(), id -> {
+            EditorTabPanel p = new EditorTabPanel(noteRepository, metadataService,
+                    this::updateAutosaveTime, this::updateTaskCount,
+                    newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle);
+            p.setExecuteHandler(() -> executeCurrentSql(true));
+            return p;
+        });
     }
 
     private void openNoteInCurrentMode(Note note) {
@@ -427,6 +444,10 @@ public class MainFrame extends JFrame {
     }
 
     private void executeCurrentSql() {
+        executeCurrentSql(false);
+    }
+
+    private void executeCurrentSql(boolean blockMode) {
         EditorTabPanel panel = getCurrentPanel();
         if (panel == null) {
             JOptionPane.showMessageDialog(this, "请先打开一个笔记窗口");
@@ -437,7 +458,7 @@ public class MainFrame extends JFrame {
             JOptionPane.showMessageDialog(this, "当前窗口正在执行，请先停止或等待结束");
             return;
         }
-        java.util.List<String> statements = panel.getExecutableStatements();
+        java.util.List<String> statements = panel.getExecutableStatements(blockMode);
         if (statements.isEmpty()) {
             JOptionPane.showMessageDialog(this, "请选择要执行的 SQL 语句");
             return;
@@ -445,12 +466,11 @@ public class MainFrame extends JFrame {
         if (windowMode) {
             panel.clearLocalResults();
         } else {
-            JPanel target = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
-            target.removeAll();
-            target.revalidate();
-            target.repaint();
-            sharedResultsWrapper.setVisible(true);
+            SharedResultView target = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+            target.clear();
+            expandSharedResults();
         }
+        resultTabCounters.put(noteId, new AtomicInteger(1));
         statusLabel.setText("执行中...");
         runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
         for (String stmt : statements) {
@@ -474,35 +494,109 @@ public class MainFrame extends JFrame {
     }
 
     private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result) {
-        JPanel container = windowMode ? panel.getResultContainer() : ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+        String tabTitle = "结果" + nextResultIndex(noteId) + " (" + result.getRowsCount() + "行)";
         QueryResultPanel qp = new QueryResultPanel(result, result.getSql());
-        container.add(qp);
-        container.revalidate();
-        container.repaint();
+        if (windowMode) {
+            panel.addLocalResultPanel(tabTitle, qp, result.getSql());
+        } else {
+            SharedResultView view = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+            view.addResultTab(tabTitle, qp, result.getSql());
+            expandSharedResults();
+        }
+    }
+
+    private int nextResultIndex(long noteId) {
+        return resultTabCounters.computeIfAbsent(noteId, k -> new AtomicInteger(1)).getAndIncrement();
     }
 
     private void renderError(long noteId, EditorTabPanel panel, String sql, String message) {
-        JPanel container = windowMode ? panel.getResultContainer() : ensureSharedNotePanel(noteId, panel.getNote().getTitle());
         JPanel error = new JPanel(new BorderLayout());
         error.setBorder(javax.swing.BorderFactory.createTitledBorder("执行失败"));
         error.setToolTipText(sql);
         error.add(new JLabel(message), BorderLayout.CENTER);
-        container.add(error);
-        container.revalidate();
-        container.repaint();
+        String tabTitle = "错误" + nextResultIndex(noteId);
+        if (windowMode) {
+            panel.addLocalResultPanel(tabTitle, error, sql);
+        } else {
+            SharedResultView view = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+            view.addResultTab(tabTitle, error, sql);
+            expandSharedResults();
+        }
     }
 
-    private JPanel ensureSharedNotePanel(Long noteId, String title) {
-        JPanel panel = sharedNoteResultPanels.computeIfAbsent(noteId, k -> {
-            JPanel p = new JPanel();
-            p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
-            p.setBorder(BorderFactory.createTitledBorder(title));
-            sharedResultsContainer.add(p);
+    private SharedResultView ensureSharedNotePanel(Long noteId, String title) {
+        SharedResultView view = sharedNoteResultPanels.computeIfAbsent(noteId, k -> {
+            SharedResultView v = new SharedResultView(title);
+            sharedResultsContainer.add(v.wrapper);
             sharedResultsContainer.revalidate();
-            return p;
+            sharedResultsContainer.repaint();
+            return v;
         });
-        sharedResultsWrapper.setVisible(true);
-        return panel;
+        return view;
+    }
+
+    private void toggleSharedResults() {
+        boolean show = sharedResultsToggle.isSelected();
+        if (sharedResultsScroll != null) {
+            sharedResultsScroll.setVisible(show);
+        }
+        sharedResultsWrapper.revalidate();
+        sharedResultsWrapper.repaint();
+    }
+
+    private void expandSharedResults() {
+        if (sharedResultsToggle != null && !sharedResultsToggle.isSelected()) {
+            sharedResultsToggle.setSelected(true);
+            toggleSharedResults();
+        }
+    }
+
+    private static class SharedResultView {
+        final JPanel wrapper = new JPanel(new BorderLayout());
+        final JTabbedPane tabs = new JTabbedPane();
+        final JToggleButton toggle;
+        final JScrollPane scroll;
+
+        SharedResultView(String title) {
+            toggle = new JToggleButton("结果 - " + title + " (点击展开)");
+            toggle.setSelected(false);
+            tabs.setBorder(BorderFactory.createEmptyBorder());
+            scroll = new JScrollPane(tabs);
+            scroll.setVisible(false);
+            toggle.addActionListener(e -> updateVisibility());
+            wrapper.setBorder(BorderFactory.createTitledBorder(title));
+            wrapper.add(toggle, BorderLayout.NORTH);
+            wrapper.add(scroll, BorderLayout.CENTER);
+            updateVisibility();
+        }
+
+        void addResultTab(String title, JComponent comp, String hint) {
+            tabs.addTab(title, comp);
+            int idx = tabs.indexOfComponent(comp);
+            if (idx >= 0) {
+                tabs.setToolTipTextAt(idx, hint);
+            }
+            tabs.setVisible(true);
+            tabs.setSelectedComponent(comp);
+            if (!toggle.isSelected()) {
+                toggle.setSelected(true);
+            }
+            updateVisibility();
+        }
+
+        void clear() {
+            tabs.removeAll();
+            tabs.setVisible(false);
+            toggle.setSelected(false);
+            updateVisibility();
+        }
+
+        private void updateVisibility() {
+            boolean show = toggle.isSelected();
+            scroll.setVisible(show);
+            wrapper.revalidate();
+            wrapper.repaint();
+        }
     }
 
     private void stopCurrentExecution() {
@@ -517,6 +611,49 @@ public class MainFrame extends JFrame {
         }
         updateExecutionButtons();
         statusLabel.setText("就绪");
+    }
+
+    private Icon createRunIcon() {
+        return new Icon() {
+            private final int size = 14;
+
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                int[] xs = {x, x, x + size};
+                int[] ys = {y, y + size, y + size / 2};
+                g2.setColor(new Color(46, 170, 220));
+                g2.fillPolygon(xs, ys, 3);
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth() { return size + 2; }
+
+            @Override
+            public int getIconHeight() { return size + 2; }
+        };
+    }
+
+    private Icon createStopIcon() {
+        return new Icon() {
+            private final int size = 12;
+
+            @Override
+            public void paintIcon(Component c, Graphics g, int x, int y) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setColor(Color.BLACK);
+                g2.fillRect(x, y, size, size);
+                g2.dispose();
+            }
+
+            @Override
+            public int getIconWidth() { return size + 2; }
+
+            @Override
+            public int getIconHeight() { return size + 2; }
+        };
     }
 
     private void updateExecutionButtons() {

@@ -4,6 +4,7 @@ import tools.sqlclient.exec.SqlExecResult;
 
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
+import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 
@@ -23,6 +24,36 @@ public class QueryResultPanel extends JPanel {
         }
         JTable table = new JTable(model);
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        table.setShowGrid(true);
+        table.setGridColor(new Color(210, 214, 222));
+        table.setRowHeight(24);
+        table.setFillsViewportHeight(true);
+        table.setBorder(BorderFactory.createLineBorder(new Color(200, 204, 212)));
+
+        Color headerBg = new Color(242, 246, 252);
+        table.getTableHeader().setBackground(headerBg);
+        table.getTableHeader().setOpaque(true);
+        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(200, 204, 212)));
+
+        DefaultTableCellRenderer renderer = new DefaultTableCellRenderer() {
+            private final Color even = new Color(250, 252, 255);
+            private final Color odd = Color.WHITE;
+
+            @Override
+            public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+                Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+                if (!isSelected) {
+                    c.setBackground(row % 2 == 0 ? even : odd);
+                }
+                return c;
+            }
+        };
+        for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
+            table.getColumnModel().getColumn(i).setCellRenderer(renderer);
+        }
+
+        JScrollPane scrollPane = new JScrollPane(table);
+        scrollPane.getViewport().setBackground(Color.WHITE);
+        add(scrollPane, BorderLayout.CENTER);
     }
 }

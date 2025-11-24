@@ -14,6 +14,8 @@ import tools.sqlclient.util.SuggestionEngine;
 
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -33,7 +35,10 @@ public class EditorTabPanel extends JPanel {
     private final NoteRepository noteRepository;
     private final Note note;
     private final FullWidthFilter fullWidthFilter;
-    private final JPanel resultContainer = new JPanel();
+    private final JTabbedPane resultTabs = new JTabbedPane();
+    private final JPanel resultWrapper = new JPanel(new BorderLayout());
+    private final JToggleButton resultToggle = new JToggleButton("结果面板 (点击展开)");
+    private Runnable executeHandler;
     private EditorStyle currentStyle;
     private int runtimeFontSize;
 
@@ -78,11 +83,26 @@ public class EditorTabPanel extends JPanel {
             }
         });
         this.textArea.setText(note.getContent());
+        installExecuteShortcut();
         applyStyle(style);
         initLayout();
         LinkResolver.install(textArea);
         autoSaveService.startAutoSave(this::autoSave);
         updateTitle();
+    }
+
+    private void installExecuteShortcut() {
+        InputMap inputMap = textArea.getInputMap(JComponent.WHEN_FOCUSED);
+        ActionMap actionMap = textArea.getActionMap();
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK), "exec-block");
+        actionMap.put("exec-block", new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                if (executeHandler != null) {
+                    executeHandler.run();
+                }
+            }
+        });
     }
 
     private RSyntaxTextArea createEditor() {
@@ -109,10 +129,18 @@ public class EditorTabPanel extends JPanel {
         status.add(new JLabel("数据库: " + (databaseType == DatabaseType.POSTGRESQL ? "PostgreSQL" : "Hive")));
         status.add(lastSaveLabel);
         bottom.add(status, BorderLayout.NORTH);
-        resultContainer.setLayout(new BoxLayout(resultContainer, BoxLayout.Y_AXIS));
-        JScrollPane resultScroll = new JScrollPane(resultContainer);
-        resultScroll.setPreferredSize(new Dimension(100, 200));
-        bottom.add(resultScroll, BorderLayout.CENTER);
+        JPanel togglePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
+        resultToggle.setSelected(false);
+        resultToggle.addActionListener(e -> updateResultVisibility());
+        togglePanel.add(resultToggle);
+        resultTabs.setVisible(false);
+        resultTabs.setBorder(BorderFactory.createEmptyBorder());
+        JScrollPane resultScroll = new JScrollPane(resultTabs);
+        resultScroll.setVisible(false);
+        resultScroll.setPreferredSize(new Dimension(100, 220));
+        resultWrapper.add(togglePanel, BorderLayout.NORTH);
+        resultWrapper.add(resultScroll, BorderLayout.CENTER);
+        bottom.add(resultWrapper, BorderLayout.CENTER);
         add(bottom, BorderLayout.SOUTH);
     }
 
@@ -202,9 +230,20 @@ public class EditorTabPanel extends JPanel {
         return note;
     }
 
-    public java.util.List<String> getExecutableStatements() {
+    public void setExecuteHandler(Runnable executeHandler) {
+        this.executeHandler = executeHandler;
+    }
+
+    public java.util.List<String> getExecutableStatements(boolean blockMode) {
         String selected = textArea.getSelectedText();
-        String target = selected != null && !selected.isBlank() ? selected : extractStatementAtCaret();
+        String target;
+        if (selected != null && !selected.isBlank()) {
+            target = selected;
+        } else if (blockMode) {
+            target = extractBlockAroundCaret();
+        } else {
+            target = extractStatementAtCaret();
+        }
         java.util.List<String> list = new java.util.ArrayList<>();
         for (String part : target.split(";")) {
             if (!part.trim().isEmpty()) {
@@ -212,6 +251,10 @@ public class EditorTabPanel extends JPanel {
             }
         }
         return list;
+    }
+
+    public java.util.List<String> getExecutableStatements() {
+        return getExecutableStatements(false);
     }
 
     private String extractStatementAtCaret() {
@@ -224,20 +267,79 @@ public class EditorTabPanel extends JPanel {
         return full.substring(start, Math.min(end, full.length()));
     }
 
-    public JPanel getResultContainer() {
-        return resultContainer;
+    private String extractBlockAroundCaret() {
+        String full = textArea.getText();
+        int caret = Math.max(0, Math.min(full.length(), textArea.getCaretPosition()));
+        int startBoundary = 0;
+        int scan = caret;
+        while (scan > 0) {
+            int lineStart = full.lastIndexOf('\n', scan - 1) + 1;
+            int lineEnd = full.indexOf('\n', lineStart);
+            if (lineEnd < 0) lineEnd = full.length();
+            String line = full.substring(lineStart, Math.min(lineEnd, full.length()));
+            if (line.trim().isEmpty() && lineStart < caret) {
+                startBoundary = Math.min(full.length(), lineEnd + 1);
+                break;
+            }
+            if (lineStart == 0) {
+                startBoundary = 0;
+                break;
+            }
+            scan = Math.max(0, lineStart - 1);
+        }
+
+        int endBoundary = full.length();
+        int scanDown = caret;
+        while (scanDown < full.length()) {
+            int lineEnd = full.indexOf('\n', scanDown);
+            if (lineEnd < 0) lineEnd = full.length();
+            String line = full.substring(scanDown, Math.min(lineEnd, full.length()));
+            if (line.trim().isEmpty()) {
+                endBoundary = Math.max(startBoundary, scanDown);
+                break;
+            }
+            if (lineEnd >= full.length()) {
+                endBoundary = full.length();
+                break;
+            }
+            scanDown = lineEnd + 1;
+        }
+        if (endBoundary < startBoundary) {
+            endBoundary = startBoundary;
+        }
+        return full.substring(startBoundary, endBoundary);
+    }
+
+    public JTabbedPane getResultTabs() {
+        return resultTabs;
     }
 
     public void clearLocalResults() {
-        resultContainer.removeAll();
-        resultContainer.revalidate();
-        resultContainer.repaint();
+        resultTabs.removeAll();
+        resultTabs.setVisible(false);
+        resultToggle.setSelected(false);
+        updateResultVisibility();
     }
 
-    public void addLocalResultPanel(JPanel panel) {
-        resultContainer.add(panel);
-        resultContainer.revalidate();
-        resultContainer.repaint();
+    public void addLocalResultPanel(String title, JComponent panel, String hint) {
+        resultTabs.addTab(title, panel);
+        int idx = resultTabs.indexOfComponent(panel);
+        if (idx >= 0) {
+            resultTabs.setToolTipTextAt(idx, hint);
+        }
+        resultTabs.setVisible(true);
+        resultTabs.setSelectedComponent(panel);
+        resultToggle.setSelected(true);
+        updateResultVisibility();
+    }
+
+    private void updateResultVisibility() {
+        Component view = ((BorderLayout) resultWrapper.getLayout()).getLayoutComponent(BorderLayout.CENTER);
+        if (view != null) {
+            view.setVisible(resultToggle.isSelected());
+        }
+        resultWrapper.revalidate();
+        resultWrapper.repaint();
     }
 
     /**
