@@ -54,9 +54,14 @@ public class SqlExecutionService {
     }
 
     private SqlExecResult parseResponse(String sql, String body) {
-        JsonElement parsed = gson.fromJson(body, JsonElement.class);
+        JsonElement parsed;
+        try {
+            parsed = gson.fromJson(body, JsonElement.class);
+        } catch (Exception parseEx) {
+            return messageResult(sql, "执行响应解析失败: " + safeSnippet(body));
+        }
         if (parsed == null || !parsed.isJsonObject()) {
-            throw new RuntimeException("执行响应不是合法的 JSON 对象: " + body);
+            return messageResult(sql, "执行响应不是合法的 JSON 对象: " + safeSnippet(body));
         }
         JsonObject obj = parsed.getAsJsonObject();
         int rowsCount = 0;
@@ -88,7 +93,26 @@ public class SqlExecutionService {
                 rows.add(row);
             }
         }
+        if (columns.isEmpty() && obj.has("msg")) {
+            return messageResult(sql, obj.get("msg").getAsString());
+        }
         return new SqlExecResult(sql, columns, rows, rowsCount);
+    }
+
+    private SqlExecResult messageResult(String sql, String message) {
+        List<String> columns = new ArrayList<>();
+        columns.add("消息");
+        List<List<String>> rows = new ArrayList<>();
+        rows.add(List.of(message));
+        return new SqlExecResult(sql, columns, rows, 1);
+    }
+
+    private String safeSnippet(String body) {
+        if (body == null) {
+            return "<空响应>";
+        }
+        String trimmed = body.strip();
+        return trimmed.length() > 240 ? trimmed.substring(0, 240) + "..." : trimmed;
     }
 
     private JsonArray extractDataArray(JsonObject obj) {
