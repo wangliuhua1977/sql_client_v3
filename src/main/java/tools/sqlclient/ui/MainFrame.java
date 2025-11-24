@@ -44,7 +44,7 @@ public class MainFrame extends JFrame {
     private final JLabel autosaveLabel = new JLabel("自动保存: -");
     private final JLabel taskLabel = new JLabel("后台任务: 0");
     private final JPanel sharedResultsWrapper = new JPanel(new BorderLayout());
-    private final JPanel sharedResultsContainer = new JPanel();
+    private final SharedResultView sharedResultView = new SharedResultView();
     private final SQLiteManager sqliteManager;
     private final NoteRepository noteRepository;
     private final AppStateRepository appStateRepository;
@@ -54,7 +54,6 @@ public class MainFrame extends JFrame {
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private final Map<Long, java.util.List<CompletableFuture<?>>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
-    private final Map<Long, SharedResultView> sharedNoteResultPanels = new java.util.HashMap<>();
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
     private boolean windowMode = true;
     private JRadioButtonMenuItem windowModeItem;
@@ -246,8 +245,7 @@ public class MainFrame extends JFrame {
         centerPanel.setMinimumSize(new Dimension(200, 240));
         centerPanel.add(desktopPane, "window");
         centerPanel.add(tabbedPane, "panel");
-        sharedResultsContainer.setLayout(new BoxLayout(sharedResultsContainer, BoxLayout.Y_AXIS));
-        sharedResultsScroll = new JScrollPane(sharedResultsContainer);
+        sharedResultsScroll = new JScrollPane(sharedResultView.wrapper);
         sharedResultsScroll.setVisible(false);
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
         sharedResultsWrapper.setMinimumSize(new Dimension(100, 180));
@@ -503,12 +501,13 @@ public class MainFrame extends JFrame {
     }
 
     private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result) {
-        String tabTitle = "结果" + nextResultIndex(noteId) + " (" + result.getRowsCount() + "行)";
+        int idx = nextResultIndex(noteId);
+        String tabTitle = windowMode ? "结果" + idx : panel.getNote().getTitle() + "-结果" + idx;
         QueryResultPanel qp = new QueryResultPanel(result, result.getSql());
         if (windowMode) {
             panel.addLocalResultPanel(tabTitle, qp, result.getSql());
         } else {
-            SharedResultView view = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+            SharedResultView view = ensureSharedView();
             view.addResultTab(tabTitle, qp, result.getSql());
             expandSharedResults();
         }
@@ -523,25 +522,19 @@ public class MainFrame extends JFrame {
         error.setBorder(javax.swing.BorderFactory.createTitledBorder("执行失败"));
         error.setToolTipText(sql);
         error.add(new JLabel(message), BorderLayout.CENTER);
-        String tabTitle = "错误" + nextResultIndex(noteId);
+        String tabTitle = windowMode ? "错误" + nextResultIndex(noteId)
+                : panel.getNote().getTitle() + "-错误" + nextResultIndex(noteId);
         if (windowMode) {
             panel.addLocalResultPanel(tabTitle, error, sql);
         } else {
-            SharedResultView view = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+            SharedResultView view = ensureSharedView();
             view.addResultTab(tabTitle, error, sql);
             expandSharedResults();
         }
     }
 
-    private SharedResultView ensureSharedNotePanel(Long noteId, String title) {
-        SharedResultView view = sharedNoteResultPanels.computeIfAbsent(noteId, k -> {
-            SharedResultView v = new SharedResultView(title);
-            sharedResultsContainer.add(v.wrapper);
-            sharedResultsContainer.revalidate();
-            sharedResultsContainer.repaint();
-            return v;
-        });
-        return view;
+    private SharedResultView ensureSharedView() {
+        return sharedResultView;
     }
 
     private void expandSharedResults() {
@@ -575,10 +568,10 @@ public class MainFrame extends JFrame {
         final JTabbedPane tabs = new JTabbedPane();
         final JScrollPane scroll;
 
-        SharedResultView(String title) {
+        SharedResultView() {
             tabs.setBorder(BorderFactory.createEmptyBorder());
             scroll = new JScrollPane(tabs);
-            wrapper.setBorder(BorderFactory.createTitledBorder(title));
+            wrapper.setBorder(BorderFactory.createTitledBorder("结果集"));
             wrapper.add(scroll, BorderLayout.CENTER);
         }
 

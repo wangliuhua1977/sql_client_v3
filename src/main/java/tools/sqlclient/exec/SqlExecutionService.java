@@ -34,8 +34,8 @@ public class SqlExecutionService {
         if (trimmed.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        // 按接口要求，将单引号替换为双引号再进行 URL 编码，避免服务器对单引号报错
-        String sanitized = trimmed.replace("'", "\"");
+        // 按接口要求，将单引号替换为两个单引号再进行 URL 编码，避免服务器对单引号报错
+        String sanitized = trimmed.replace("'", "''");
         String encoded = URLEncoder.encode(sanitized, StandardCharsets.UTF_8);
         HttpRequest request = HttpRequest.newBuilder(URI.create(EXEC_API + encoded)).GET().build();
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())

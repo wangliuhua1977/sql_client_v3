@@ -14,9 +14,14 @@ import java.awt.*;
 public class QueryResultPanel extends JPanel {
     public QueryResultPanel(SqlExecResult result, String titleHint) {
         super(new BorderLayout());
-        String title = "结果 (" + result.getRowsCount() + " 行)";
-        setBorder(new TitledBorder(title));
+        setBorder(new TitledBorder("结果集"));
         setToolTipText(titleHint);
+
+        JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        JLabel countLabel = new JLabel("记录数 " + result.getRowsCount() + " 条");
+        header.add(countLabel);
+        add(header, BorderLayout.NORTH);
+
         DefaultTableModel model = new DefaultTableModel();
         result.getColumns().forEach(model::addColumn);
         for (var row : result.getRows()) {
