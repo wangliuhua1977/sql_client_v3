@@ -16,6 +16,8 @@ import javax.swing.*;
 import java.awt.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
@@ -31,6 +33,7 @@ public class EditorTabPanel extends JPanel {
     private final NoteRepository noteRepository;
     private final Note note;
     private final FullWidthFilter fullWidthFilter;
+    private final JPanel resultContainer = new JPanel();
     private EditorStyle currentStyle;
     private int runtimeFontSize;
 
@@ -101,9 +104,15 @@ public class EditorTabPanel extends JPanel {
         RTextScrollPane scrollPane = new RTextScrollPane(textArea);
         scrollPane.setFoldIndicatorEnabled(true);
         add(scrollPane, BorderLayout.CENTER);
-        JPanel bottom = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        bottom.add(new JLabel("数据库: " + (databaseType == DatabaseType.POSTGRESQL ? "PostgreSQL" : "Hive")));
-        bottom.add(lastSaveLabel);
+        JPanel bottom = new JPanel(new BorderLayout());
+        JPanel status = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        status.add(new JLabel("数据库: " + (databaseType == DatabaseType.POSTGRESQL ? "PostgreSQL" : "Hive")));
+        status.add(lastSaveLabel);
+        bottom.add(status, BorderLayout.NORTH);
+        resultContainer.setLayout(new BoxLayout(resultContainer, BoxLayout.Y_AXIS));
+        JScrollPane resultScroll = new JScrollPane(resultContainer);
+        resultScroll.setPreferredSize(new Dimension(100, 200));
+        bottom.add(resultScroll, BorderLayout.CENTER);
         add(bottom, BorderLayout.SOUTH);
     }
 
@@ -191,6 +200,44 @@ public class EditorTabPanel extends JPanel {
 
     public Note getNote() {
         return note;
+    }
+
+    public java.util.List<String> getExecutableStatements() {
+        String selected = textArea.getSelectedText();
+        String target = selected != null && !selected.isBlank() ? selected : extractStatementAtCaret();
+        java.util.List<String> list = new java.util.ArrayList<>();
+        for (String part : target.split(";")) {
+            if (!part.trim().isEmpty()) {
+                list.add(part.trim());
+            }
+        }
+        return list;
+    }
+
+    private String extractStatementAtCaret() {
+        String full = textArea.getText();
+        int caret = textArea.getCaretPosition();
+        int start = full.lastIndexOf(';', Math.max(0, caret - 1));
+        start = start < 0 ? 0 : start + 1;
+        int end = full.indexOf(';', caret);
+        if (end < 0) end = full.length();
+        return full.substring(start, Math.min(end, full.length()));
+    }
+
+    public JPanel getResultContainer() {
+        return resultContainer;
+    }
+
+    public void clearLocalResults() {
+        resultContainer.removeAll();
+        resultContainer.revalidate();
+        resultContainer.repaint();
+    }
+
+    public void addLocalResultPanel(JPanel panel) {
+        resultContainer.add(panel);
+        resultContainer.revalidate();
+        resultContainer.repaint();
     }
 
     /**

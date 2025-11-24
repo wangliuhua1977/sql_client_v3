@@ -5,12 +5,16 @@ import tools.sqlclient.db.EditorStyleRepository;
 import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.editor.EditorTabPanel;
+import tools.sqlclient.exec.SqlExecResult;
+import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.ui.QueryResultPanel;
 
 import javax.swing.*;
+import javax.swing.BorderFactory;
 import javax.swing.border.EmptyBorder;
 import javax.swing.plaf.basic.BasicInternalFrameUI;
 import java.awt.*;
@@ -22,6 +26,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -35,6 +43,8 @@ public class MainFrame extends JFrame {
     private final JLabel statusLabel = new JLabel("就绪");
     private final JLabel autosaveLabel = new JLabel("自动保存: -");
     private final JLabel taskLabel = new JLabel("后台任务: 0");
+    private final JPanel sharedResultsWrapper = new JPanel(new BorderLayout());
+    private final JPanel sharedResultsContainer = new JPanel();
     private final SQLiteManager sqliteManager;
     private final NoteRepository noteRepository;
     private final AppStateRepository appStateRepository;
@@ -42,11 +52,16 @@ public class MainFrame extends JFrame {
     private final EditorStyleRepository styleRepository;
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
+    private final Map<Long, java.util.List<CompletableFuture<?>>> runningExecutions = new ConcurrentHashMap<>();
+    private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
+    private final Map<Long, JPanel> sharedNoteResultPanels = new java.util.HashMap<>();
     private boolean windowMode = true;
     private JRadioButtonMenuItem windowModeItem;
     private JRadioButtonMenuItem panelModeItem;
     private boolean convertFullWidth = true;
     private EditorStyle currentStyle;
+    private JButton executeButton;
+    private JButton stopButton;
 
     public MainFrame() {
         super("SQL Notebook - 多标签 PG/Hive");
@@ -90,6 +105,7 @@ public class MainFrame extends JFrame {
                 });
         this.convertFullWidth = appStateRepository.loadFullWidthOption(true);
         buildMenu();
+        buildToolbar();
         buildContent();
         buildStatusBar();
         metadataService.refreshMetadataAsync(() -> {});
@@ -99,6 +115,7 @@ public class MainFrame extends JFrame {
                 persistOpenFrames();
             }
         });
+        updateExecutionButtons();
     }
 
     private void buildMenu() {
@@ -206,10 +223,31 @@ public class MainFrame extends JFrame {
         setJMenuBar(menuBar);
     }
 
+    private void buildToolbar() {
+        JToolBar toolBar = new JToolBar();
+        toolBar.setFloatable(false);
+        executeButton = new JButton("执行");
+        stopButton = new JButton("停止");
+        stopButton.setEnabled(false);
+        executeButton.addActionListener(e -> executeCurrentSql());
+        stopButton.addActionListener(e -> stopCurrentExecution());
+        toolBar.add(executeButton);
+        toolBar.add(stopButton);
+        add(toolBar, BorderLayout.NORTH);
+    }
+
     private void buildContent() {
         centerPanel.add(desktopPane, "window");
         centerPanel.add(tabbedPane, "panel");
-        add(centerPanel, BorderLayout.CENTER);
+        sharedResultsContainer.setLayout(new BoxLayout(sharedResultsContainer, BoxLayout.Y_AXIS));
+        sharedResultsWrapper.add(new JScrollPane(sharedResultsContainer), BorderLayout.CENTER);
+        sharedResultsWrapper.setVisible(false);
+        desktopPane.addPropertyChangeListener("selectedFrame", evt -> updateExecutionButtons());
+        tabbedPane.addChangeListener(e -> updateExecutionButtons());
+        JPanel contentWrapper = new JPanel(new BorderLayout());
+        contentWrapper.add(centerPanel, BorderLayout.CENTER);
+        contentWrapper.add(sharedResultsWrapper, BorderLayout.SOUTH);
+        add(contentWrapper, BorderLayout.CENTER);
         centerLayout.show(centerPanel, "window");
         restoreSession();
     }
@@ -317,6 +355,7 @@ public class MainFrame extends JFrame {
             frame.setSelected(true);
         } catch (java.beans.PropertyVetoException ignored) { }
         persistOpenFrames();
+        updateExecutionButtons();
     }
 
     private void addTab(EditorTabPanel panel) {
@@ -325,6 +364,7 @@ public class MainFrame extends JFrame {
         int idx = tabbedPane.indexOfComponent(panel);
         tabbedPane.setSelectedIndex(idx);
         persistOpenFrames();
+        updateExecutionButtons();
     }
 
     private void detachFromParent(EditorTabPanel panel) {
@@ -384,6 +424,112 @@ public class MainFrame extends JFrame {
             }
         }
         persistOpenFrames();
+    }
+
+    private void executeCurrentSql() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel == null) {
+            JOptionPane.showMessageDialog(this, "请先打开一个笔记窗口");
+            return;
+        }
+        long noteId = panel.getNote().getId();
+        if (runningExecutions.getOrDefault(noteId, java.util.List.of()).size() > 0) {
+            JOptionPane.showMessageDialog(this, "当前窗口正在执行，请先停止或等待结束");
+            return;
+        }
+        java.util.List<String> statements = panel.getExecutableStatements();
+        if (statements.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "请选择要执行的 SQL 语句");
+            return;
+        }
+        if (windowMode) {
+            panel.clearLocalResults();
+        } else {
+            JPanel target = ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+            target.removeAll();
+            target.revalidate();
+            target.repaint();
+            sharedResultsWrapper.setVisible(true);
+        }
+        statusLabel.setText("执行中...");
+        runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
+        for (String stmt : statements) {
+            CompletableFuture<Void> future = sqlExecutionService.execute(stmt,
+                    res -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res)),
+                    ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, stmt, ex.getMessage())));
+            runningExecutions.get(noteId).add(future);
+            future.whenComplete((v, ex) -> SwingUtilities.invokeLater(() -> {
+                java.util.List<CompletableFuture<?>> list = runningExecutions.get(noteId);
+                if (list != null) {
+                    list.remove(future);
+                    if (list.isEmpty()) {
+                        runningExecutions.remove(noteId);
+                    }
+                }
+                updateExecutionButtons();
+                statusLabel.setText("就绪");
+            }));
+        }
+        updateExecutionButtons();
+    }
+
+    private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result) {
+        JPanel container = windowMode ? panel.getResultContainer() : ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+        QueryResultPanel qp = new QueryResultPanel(result, result.getSql());
+        container.add(qp);
+        container.revalidate();
+        container.repaint();
+    }
+
+    private void renderError(long noteId, EditorTabPanel panel, String sql, String message) {
+        JPanel container = windowMode ? panel.getResultContainer() : ensureSharedNotePanel(noteId, panel.getNote().getTitle());
+        JPanel error = new JPanel(new BorderLayout());
+        error.setBorder(javax.swing.BorderFactory.createTitledBorder("执行失败"));
+        error.setToolTipText(sql);
+        error.add(new JLabel(message), BorderLayout.CENTER);
+        container.add(error);
+        container.revalidate();
+        container.repaint();
+    }
+
+    private JPanel ensureSharedNotePanel(Long noteId, String title) {
+        JPanel panel = sharedNoteResultPanels.computeIfAbsent(noteId, k -> {
+            JPanel p = new JPanel();
+            p.setLayout(new BoxLayout(p, BoxLayout.Y_AXIS));
+            p.setBorder(BorderFactory.createTitledBorder(title));
+            sharedResultsContainer.add(p);
+            sharedResultsContainer.revalidate();
+            return p;
+        });
+        sharedResultsWrapper.setVisible(true);
+        return panel;
+    }
+
+    private void stopCurrentExecution() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel == null) return;
+        long noteId = panel.getNote().getId();
+        java.util.List<CompletableFuture<?>> list = runningExecutions.remove(noteId);
+        if (list != null) {
+            for (CompletableFuture<?> f : list) {
+                f.cancel(true);
+            }
+        }
+        updateExecutionButtons();
+        statusLabel.setText("就绪");
+    }
+
+    private void updateExecutionButtons() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel == null) {
+            executeButton.setEnabled(false);
+            stopButton.setEnabled(false);
+            return;
+        }
+        long noteId = panel.getNote().getId();
+        boolean running = runningExecutions.getOrDefault(noteId, java.util.List.of()).size() > 0;
+        executeButton.setEnabled(!running);
+        stopButton.setEnabled(running);
     }
 
     private void openManageDialog() {
@@ -539,7 +685,9 @@ public class MainFrame extends JFrame {
             frame.dispose();
         }
         centerLayout.show(centerPanel, "panel");
+        sharedResultsWrapper.setVisible(true);
         persistOpenFrames();
+        updateExecutionButtons();
     }
 
     private void switchToWindowMode() {
@@ -569,6 +717,8 @@ public class MainFrame extends JFrame {
             try { frame.setSelected(true); } catch (java.beans.PropertyVetoException ignored) {}
         }
         centerLayout.show(centerPanel, "window");
+        sharedResultsWrapper.setVisible(false);
         persistOpenFrames();
+        updateExecutionButtons();
     }
 }
