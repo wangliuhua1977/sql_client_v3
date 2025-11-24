@@ -38,6 +38,7 @@ public class EditorTabPanel extends JPanel {
     private final FullWidthFilter fullWidthFilter;
     private final JTabbedPane resultTabs = new JTabbedPane();
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
+    private JPanel editorPanel;
     private JSplitPane splitPane;
     private int lastDividerLocation = -1;
     private javax.swing.Timer execTimer;
@@ -126,7 +127,7 @@ public class EditorTabPanel extends JPanel {
     private void initLayout() {
         RTextScrollPane scrollPane = new RTextScrollPane(textArea);
         scrollPane.setFoldIndicatorEnabled(true);
-        JPanel editorPanel = new JPanel(new BorderLayout());
+        editorPanel = new JPanel(new BorderLayout());
         editorPanel.add(scrollPane, BorderLayout.CENTER);
 
         JPanel status = new JPanel(new FlowLayout(FlowLayout.LEFT));
