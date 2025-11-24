@@ -31,13 +31,17 @@ public class EditorTabPanel extends JPanel {
     private final AutoSaveService autoSaveService;
     private final SuggestionEngine suggestionEngine;
     private final JLabel lastSaveLabel = new JLabel("自动保存: -");
+    private final JLabel execStatusLabel = new JLabel("空闲");
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
     private final FullWidthFilter fullWidthFilter;
     private final JTabbedPane resultTabs = new JTabbedPane();
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
-    private final JToggleButton resultToggle = new JToggleButton("结果面板 (点击展开)");
+    private final JToggleButton resultToggle = new JToggleButton();
+    private JSplitPane splitPane;
+    private int lastDividerLocation = -1;
+    private javax.swing.Timer execTimer;
     private Runnable executeHandler;
     private EditorStyle currentStyle;
     private int runtimeFontSize;
@@ -123,12 +127,15 @@ public class EditorTabPanel extends JPanel {
     private void initLayout() {
         RTextScrollPane scrollPane = new RTextScrollPane(textArea);
         scrollPane.setFoldIndicatorEnabled(true);
-        add(scrollPane, BorderLayout.CENTER);
-        JPanel bottom = new JPanel(new BorderLayout());
+        JPanel editorPanel = new JPanel(new BorderLayout());
+        editorPanel.add(scrollPane, BorderLayout.CENTER);
+
         JPanel status = new JPanel(new FlowLayout(FlowLayout.LEFT));
         status.add(new JLabel("数据库: " + (databaseType == DatabaseType.POSTGRESQL ? "PostgreSQL" : "Hive")));
         status.add(lastSaveLabel);
-        bottom.add(status, BorderLayout.NORTH);
+        status.add(execStatusLabel);
+        editorPanel.add(status, BorderLayout.SOUTH);
+
         JPanel togglePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
         resultToggle.setSelected(false);
         resultToggle.addActionListener(e -> updateResultVisibility());
@@ -140,8 +147,21 @@ public class EditorTabPanel extends JPanel {
         resultScroll.setPreferredSize(new Dimension(100, 220));
         resultWrapper.add(togglePanel, BorderLayout.NORTH);
         resultWrapper.add(resultScroll, BorderLayout.CENTER);
-        bottom.add(resultWrapper, BorderLayout.CENTER);
-        add(bottom, BorderLayout.SOUTH);
+
+        splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
+        splitPane.setResizeWeight(1.0);
+        splitPane.setDividerSize(8);
+        splitPane.setOneTouchExpandable(true);
+        splitPane.setContinuousLayout(true);
+        splitPane.setBorder(BorderFactory.createEmptyBorder());
+        splitPane.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
+            if (resultToggle.isSelected()) {
+                lastDividerLocation = splitPane.getDividerLocation();
+            }
+        });
+        add(splitPane, BorderLayout.CENTER);
+        SwingUtilities.invokeLater(this::collapseResultArea);
+        updateToggleLabel();
     }
 
     public void saveNow() {
@@ -335,11 +355,70 @@ public class EditorTabPanel extends JPanel {
 
     private void updateResultVisibility() {
         Component view = ((BorderLayout) resultWrapper.getLayout()).getLayoutComponent(BorderLayout.CENTER);
+        boolean show = resultToggle.isSelected();
         if (view != null) {
-            view.setVisible(resultToggle.isSelected());
+            view.setVisible(show);
         }
+        updateToggleLabel();
+        adjustDividerForVisibility(show);
         resultWrapper.revalidate();
         resultWrapper.repaint();
+    }
+
+    private void adjustDividerForVisibility(boolean show) {
+        if (splitPane == null) return;
+        int minHeight = Math.max(resultToggle.getPreferredSize().height + 12, 32);
+        if (show) {
+            if (lastDividerLocation <= 0 || lastDividerLocation >= splitPane.getHeight()) {
+                lastDividerLocation = (int) (splitPane.getHeight() * 0.7);
+            }
+            int target = Math.max(minHeight, Math.min(lastDividerLocation, splitPane.getHeight() - minHeight));
+            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(target));
+        } else {
+            lastDividerLocation = splitPane.getDividerLocation();
+            int collapsePos = Math.max(0, splitPane.getHeight() - minHeight);
+            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(collapsePos));
+        }
+    }
+
+    private void collapseResultArea() {
+        adjustDividerForVisibility(false);
+    }
+
+    private void updateToggleLabel() {
+        resultToggle.setText(resultToggle.isSelected() ? "结果面板 ▲▼" : "结果面板 ▼▲");
+    }
+
+    public void setExecutionRunning(boolean running) {
+        if (running) {
+            execStatusLabel.setText("执行中...");
+            if (execTimer == null) {
+                execTimer = new javax.swing.Timer(250, null);
+                execTimer.addActionListener(new java.awt.event.ActionListener() {
+                    private int step = 0;
+
+                    @Override
+                    public void actionPerformed(java.awt.event.ActionEvent e) {
+                        String dots = switch (step % 4) {
+                            case 0 -> "·  ";
+                            case 1 -> "·· ";
+                            case 2 -> "···";
+                            default -> " ··";
+                        };
+                        execStatusLabel.setText("执行中 " + dots);
+                        step++;
+                    }
+                });
+            }
+            if (!execTimer.isRunning()) {
+                execTimer.start();
+            }
+        } else {
+            execStatusLabel.setText("空闲");
+            if (execTimer != null && execTimer.isRunning()) {
+                execTimer.stop();
+            }
+        }
     }
 
     /**

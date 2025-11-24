@@ -472,6 +472,7 @@ public class MainFrame extends JFrame {
         }
         resultTabCounters.put(noteId, new AtomicInteger(1));
         statusLabel.setText("执行中...");
+        panel.setExecutionRunning(true);
         runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
         for (String stmt : statements) {
             CompletableFuture<Void> future = sqlExecutionService.execute(stmt,
@@ -484,6 +485,7 @@ public class MainFrame extends JFrame {
                     list.remove(future);
                     if (list.isEmpty()) {
                         runningExecutions.remove(noteId);
+                        panel.setExecutionRunning(false);
                     }
                 }
                 updateExecutionButtons();
@@ -558,7 +560,7 @@ public class MainFrame extends JFrame {
         final JScrollPane scroll;
 
         SharedResultView(String title) {
-            toggle = new JToggleButton("结果 - " + title + " (点击展开)");
+            toggle = new JToggleButton();
             toggle.setSelected(false);
             tabs.setBorder(BorderFactory.createEmptyBorder());
             scroll = new JScrollPane(tabs);
@@ -594,6 +596,7 @@ public class MainFrame extends JFrame {
         private void updateVisibility() {
             boolean show = toggle.isSelected();
             scroll.setVisible(show);
+            toggle.setText(show ? "结果 ▲▼" : "结果 ▼▲");
             wrapper.revalidate();
             wrapper.repaint();
         }
@@ -609,6 +612,7 @@ public class MainFrame extends JFrame {
                 f.cancel(true);
             }
         }
+        panel.setExecutionRunning(false);
         updateExecutionButtons();
         statusLabel.setText("就绪");
     }

@@ -25,15 +25,18 @@ public class QueryResultPanel extends JPanel {
         JTable table = new JTable(model);
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         table.setShowGrid(true);
-        table.setGridColor(new Color(210, 214, 222));
+        table.setShowHorizontalLines(true);
+        table.setShowVerticalLines(true);
+        table.setGridColor(new Color(180, 186, 198));
+        table.setIntercellSpacing(new Dimension(1, 1));
         table.setRowHeight(24);
         table.setFillsViewportHeight(true);
-        table.setBorder(BorderFactory.createLineBorder(new Color(200, 204, 212)));
+        table.setBorder(BorderFactory.createLineBorder(new Color(180, 186, 198)));
 
-        Color headerBg = new Color(242, 246, 252);
+        Color headerBg = new Color(240, 244, 250);
         table.getTableHeader().setBackground(headerBg);
         table.getTableHeader().setOpaque(true);
-        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(200, 204, 212)));
+        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(180, 186, 198)));
 
         DefaultTableCellRenderer renderer = new DefaultTableCellRenderer() {
             private final Color even = new Color(250, 252, 255);
