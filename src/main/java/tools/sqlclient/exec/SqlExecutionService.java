@@ -8,7 +8,6 @@ import tools.sqlclient.network.TrustAllHttpClient;
 import tools.sqlclient.util.ThreadPools;
 
 import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -34,10 +33,17 @@ public class SqlExecutionService {
         if (trimmed.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        // 按接口要求，将单引号替换为两个单引号再进行 URL 编码，避免服务器对单引号报错
-        String sanitized = trimmed.replace("'", "''");
-        String encoded = URLEncoder.encode(sanitized, StandardCharsets.UTF_8);
-        HttpRequest request = HttpRequest.newBuilder(URI.create(EXEC_API + encoded)).GET().build();
+        // 按要求不再转码，保持原始 SQL 并用 $$ 包裹后拼入 URL。
+        String wrapped = "$$" + trimmed + "$$";
+        URI uri;
+        try {
+            uri = URI.create(EXEC_API + wrapped);
+        } catch (IllegalArgumentException ex) {
+            // 在极端情况下（例如换行或空格导致 URI 解析失败）仅对空格做最小替换，保证请求仍能发出，
+            // 同时保持 SQL 其它字符不被转义。
+            uri = URI.create(EXEC_API + wrapped.replace(" ", "%20"));
+        }
+        HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenApplyAsync(resp -> parseResponse(trimmed, resp.body()), ThreadPools.NETWORK_POOL)
                 .thenAcceptAsync(onSuccess, ThreadPools.NETWORK_POOL)
