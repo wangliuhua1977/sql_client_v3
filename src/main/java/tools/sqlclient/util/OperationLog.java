@@ -20,6 +20,14 @@ public final class OperationLog {
         OperationLog.appender = appender;
     }
 
+    /**
+     * 当前是否已经有 UI 端注册了日志追加器。用来在非 UI 线程快速判断是否需要尝试记录，
+     * 也避免在类缺失或未初始化时出现空指针，确保编译与运行时的健壮性。
+     */
+    public static boolean isReady() {
+        return appender != null;
+    }
+
     public static void log(String message) {
         Consumer<String> target = appender;
         if (target == null || message == null) {

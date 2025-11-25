@@ -5,8 +5,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import tools.sqlclient.network.TrustAllHttpClient;
-import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
+import tools.sqlclient.util.OperationLog;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -45,10 +45,10 @@ public class SqlExecutionService {
             uri = URI.create(EXEC_API + wrapped.replace(" ", "%20"));
         }
         HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
-        OperationLog.log("SQL 执行请求: " + uri);
+        log("SQL 执行请求: " + uri);
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenApplyAsync(resp -> {
-                    OperationLog.log("SQL 执行响应: " + OperationLog.abbreviate(resp.body(), 400));
+                    log("SQL 执行响应: " + OperationLog.abbreviate(resp.body(), 400));
                     return parseResponse(trimmed, resp.body());
                 }, ThreadPools.NETWORK_POOL)
                 .thenAcceptAsync(onSuccess, ThreadPools.NETWORK_POOL)
@@ -141,5 +141,11 @@ public class SqlExecutionService {
 
     private boolean shouldSkip(String key) {
         return "sn_".equalsIgnoreCase(key);
+    }
+
+    private void log(String message) {
+        if (OperationLog.isReady()) {
+            OperationLog.log(message);
+        }
     }
 }
