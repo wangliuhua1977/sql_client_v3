@@ -34,16 +34,10 @@ public class SqlExecutionService {
         if (trimmed.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        // 按要求不再转码，保持原始 SQL 并用 $$ 包裹后拼入 URL。
+        // 按要求保持原始 SQL 文本并用 $$ 包裹，但为确保 URI 合法性仍需对 query param 进行编码。
         String wrapped = "$$" + trimmed + "$$";
-        URI uri;
-        try {
-            uri = URI.create(EXEC_API + wrapped);
-        } catch (IllegalArgumentException ex) {
-            // 在极端情况下（例如换行或空格导致 URI 解析失败）仅对空格做最小替换，保证请求仍能发出，
-            // 同时保持 SQL 其它字符不被转义。
-            uri = URI.create(EXEC_API + wrapped.replace(" ", "%20"));
-        }
+        String encoded = java.net.URLEncoder.encode(wrapped, StandardCharsets.UTF_8);
+        URI uri = URI.create(EXEC_API + encoded);
         HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
         log("SQL 执行请求: " + uri);
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
