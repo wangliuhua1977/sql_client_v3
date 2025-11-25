@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import tools.sqlclient.network.TrustAllHttpClient;
+import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
 
 import java.net.URI;
@@ -44,8 +45,12 @@ public class SqlExecutionService {
             uri = URI.create(EXEC_API + wrapped.replace(" ", "%20"));
         }
         HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
+        OperationLog.log("SQL 执行请求: " + uri);
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .thenApplyAsync(resp -> parseResponse(trimmed, resp.body()), ThreadPools.NETWORK_POOL)
+                .thenApplyAsync(resp -> {
+                    OperationLog.log("SQL 执行响应: " + OperationLog.abbreviate(resp.body(), 400));
+                    return parseResponse(trimmed, resp.body());
+                }, ThreadPools.NETWORK_POOL)
                 .thenAcceptAsync(onSuccess, ThreadPools.NETWORK_POOL)
                 .exceptionally(ex -> {
                     if (onError != null) {

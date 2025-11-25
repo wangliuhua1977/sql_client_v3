@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.network.TrustAllHttpClient;
+import tools.sqlclient.util.OperationLog;
 
 import javax.swing.*;
 import java.io.InputStreamReader;
@@ -75,6 +76,7 @@ public class MetadataService {
 
     private void refreshMetadata() {
         try {
+            OperationLog.log("开始刷新对象元数据");
             List<RemoteObject> remoteObjects = fetchObjects();
             Set<String> remoteNames = remoteObjects.stream().map(o -> o.object_name).collect(Collectors.toSet());
 
@@ -114,8 +116,10 @@ public class MetadataService {
             }
 
             // 更新列信息
+            OperationLog.log("对象同步完成，共 " + remoteObjects.size() + " 个");
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
+            OperationLog.log("刷新元数据失败: " + e.getMessage());
         }
     }
 
@@ -128,8 +132,10 @@ public class MetadataService {
                 st.executeUpdate("DELETE FROM objects");
                 conn.commit();
                 if (auto) conn.setAutoCommit(true);
+                OperationLog.log("已清空本地元数据");
             } catch (Exception e) {
                 log.error("清空本地元数据失败", e);
+                OperationLog.log("清空本地元数据失败: " + e.getMessage());
             }
         }
     }
@@ -200,9 +206,11 @@ public class MetadataService {
     private List<RemoteObject> fetchObjects() throws Exception {
         HttpRequest request = HttpRequest.newBuilder(URI.create(OBJ_API)).GET().build();
         HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+        OperationLog.log("对象列表请求: " + request.uri());
         Type listType = new TypeToken<List<RemoteObject>>(){}.getType();
         try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
             JsonElement root = gson.fromJson(reader, JsonElement.class);
+            OperationLog.log("对象列表响应: " + OperationLog.abbreviate(String.valueOf(root), 300));
             return parseListFromJson(root, listType);
         }
     }
@@ -215,11 +223,13 @@ public class MetadataService {
                 attempts++;
                 String encodedName = URLEncoder.encode(objectName, StandardCharsets.UTF_8);
                 HttpRequest request = HttpRequest.newBuilder(URI.create(COL_API_TEMPLATE.formatted(encodedName))).GET().build();
+                OperationLog.log("字段列表请求: " + request.uri());
                 HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
                 Type listType = new TypeToken<List<RemoteColumn>>(){}.getType();
                 List<RemoteColumn> columns;
                 try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
                     JsonElement root = gson.fromJson(reader, JsonElement.class);
+                    OperationLog.log("字段列表响应: " + OperationLog.abbreviate(String.valueOf(root), 300));
                     columns = parseListFromJson(root, listType);
                 }
                 if (columns == null || columns.isEmpty()) return;
@@ -294,6 +304,7 @@ public class MetadataService {
             } catch (Exception e) {
                 if (attempts >= 3) {
                     log.error("更新字段失败: {}", objectName, e);
+                    OperationLog.log("更新字段失败: " + objectName + " | " + e.getMessage());
                 } else {
                     try { Thread.sleep(300L * attempts); } catch (InterruptedException ignored) {}
                 }

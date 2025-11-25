@@ -12,6 +12,7 @@ import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.ui.QueryResultPanel;
+import tools.sqlclient.util.OperationLog;
 
 import javax.swing.*;
 import javax.swing.BorderFactory;
@@ -63,8 +64,10 @@ public class MainFrame extends JFrame {
     private JButton executeButton;
     private JButton stopButton;
     private JSplitPane mainSplitPane;
+    private JSplitPane horizontalSplit;
     private int sharedDividerLocation = -1;
     private JScrollPane sharedResultsScroll;
+    private OperationLogPanel logPanel;
 
     public MainFrame() {
         super("SQL Notebook - 多标签 PG/Hive");
@@ -111,6 +114,7 @@ public class MainFrame extends JFrame {
         buildToolbar();
         buildContent();
         buildStatusBar();
+        OperationLog.setAppender(line -> logPanel.appendLine(line));
         metadataService.refreshMetadataAsync(() -> {});
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
@@ -192,6 +196,7 @@ public class MainFrame extends JFrame {
                         JOptionPane.YES_NO_OPTION,
                         JOptionPane.WARNING_MESSAGE);
                 if (option == JOptionPane.YES_OPTION) {
+                    OperationLog.log("确认重置元数据并重新拉取");
                     metadataService.resetMetadataAsync(() -> JOptionPane.showMessageDialog(MainFrame.this,
                             "已重置并重新获取元数据。",
                             "完成",
@@ -277,7 +282,12 @@ public class MainFrame extends JFrame {
             int location = Math.max(minTop, Math.min(mainSplitPane.getDividerLocation(), mainSplitPane.getHeight() - minBottom));
             sharedDividerLocation = location;
         });
-        add(mainSplitPane, BorderLayout.CENTER);
+        logPanel = new OperationLogPanel();
+        horizontalSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, mainSplitPane, logPanel);
+        horizontalSplit.setResizeWeight(0.78);
+        horizontalSplit.setDividerSize(8);
+        horizontalSplit.setContinuousLayout(true);
+        add(horizontalSplit, BorderLayout.CENTER);
         SwingUtilities.invokeLater(this::collapseSharedResults);
         centerLayout.show(centerPanel, "window");
         restoreSession();
@@ -321,6 +331,7 @@ public class MainFrame extends JFrame {
                 continue;
             }
             Note note = noteRepository.create(title, type);
+            OperationLog.log("新建笔记: " + title + " [" + type + "]");
             openNoteInCurrentMode(note);
             break;
         }
@@ -491,6 +502,7 @@ public class MainFrame extends JFrame {
         resultTabCounters.put(noteId, new AtomicInteger(1));
         statusLabel.setText("执行中...");
         panel.setExecutionRunning(true);
+        OperationLog.log("开始执行 SQL，共 " + statements.size() + " 条 | " + panel.getNote().getTitle());
         runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
         for (String stmt : statements) {
             CompletableFuture<Void> future = sqlExecutionService.execute(stmt,
@@ -544,6 +556,7 @@ public class MainFrame extends JFrame {
             view.addResultTab(tabTitle, error, sql);
             expandSharedResults();
         }
+        OperationLog.log("SQL 执行失败: " + OperationLog.abbreviate(sql, 120) + " | " + message);
     }
 
     private SharedResultView ensureSharedView() {
@@ -619,6 +632,7 @@ public class MainFrame extends JFrame {
         panel.setExecutionRunning(false);
         updateExecutionButtons();
         statusLabel.setText("就绪");
+        OperationLog.log("停止执行: " + panel.getNote().getTitle());
     }
 
     private Icon createRunIcon() {
@@ -843,6 +857,7 @@ public class MainFrame extends JFrame {
         windowMode = false;
         windowModeItem.setSelected(false);
         panelModeItem.setSelected(true);
+        OperationLog.log("切换到面板模式");
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
             if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
                 addTab(panel);
@@ -860,6 +875,7 @@ public class MainFrame extends JFrame {
         windowMode = true;
         windowModeItem.setSelected(true);
         panelModeItem.setSelected(false);
+        OperationLog.log("切换到独立窗口模式");
         java.util.List<EditorTabPanel> panels = new java.util.ArrayList<>();
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
             Component comp = tabbedPane.getComponentAt(i);
