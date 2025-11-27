@@ -48,9 +48,10 @@ public class SqlExecutionService {
                 .replace("\n", " ")
                 .replace("\r", " ");
 
-        // URL 安全编码，避免特殊字符（包括引号）导致请求被拦截
+        // URL 安全编码，但保留单引号，避免后端对引号的特殊处理导致响应异常
         String encoded = URLEncoder.encode(normalized, StandardCharsets.UTF_8)
-                .replace("+", "%20");
+                .replace("+", "%20")
+                .replace("%27", "'");
         String wrapped = "$$" + encoded + "$$";
 
         URI uri;
