@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -47,8 +48,11 @@ public class SqlExecutionService {
                 .replace("\n", " ")
                 .replace("\r", " ");
 
-        // 按原有约定，用 $$ 包裹，不做额外转码
-        String wrapped = "$$" + normalized + "$$";
+        // URL 安全编码，但保留单引号，避免后端对引号的特殊处理导致响应异常
+        String encoded = URLEncoder.encode(normalized, StandardCharsets.UTF_8)
+                .replace("+", "%20")
+                .replace("%27", "'");
+        String wrapped = "$$" + encoded + "$$";
 
         URI uri;
         try {
