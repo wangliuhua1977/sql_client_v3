@@ -60,7 +60,23 @@ public class QueryResultPanel extends JPanel {
             table.getColumnModel().getColumn(i).setCellRenderer(renderer);
         }
 
+        // 计算列宽，确保内容不被压缩，并触发横向滚动条
+        FontMetrics fm = table.getFontMetrics(table.getFont());
+        int padding = 16; // 避免文字贴边
+        for (int col = 0; col < table.getColumnCount(); col++) {
+            int headerWidth = fm.stringWidth(table.getColumnName(col)) + padding;
+            int cellWidth = headerWidth;
+            for (int row = 0; row < Math.min(table.getRowCount(), 50); row++) {
+                Object value = table.getValueAt(row, col);
+                if (value != null) {
+                    cellWidth = Math.max(cellWidth, fm.stringWidth(value.toString()) + padding);
+                }
+            }
+            table.getColumnModel().getColumn(col).setPreferredWidth(cellWidth);
+        }
+
         JScrollPane scrollPane = new JScrollPane(table);
+        scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
         scrollPane.getViewport().setBackground(Color.WHITE);
         add(scrollPane, BorderLayout.CENTER);
     }
