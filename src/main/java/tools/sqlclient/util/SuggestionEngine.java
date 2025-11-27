@@ -103,6 +103,9 @@ public class SuggestionEngine {
                 }
 
                 SuggestionContext ctx = analyzeContext();
+                if (ctx == null && popup.isVisible() && lastContext != null) {
+                    ctx = lastContext; // 继续使用上一次的上下文以便过滤已有列表
+                }
                 boolean activationKey = isActivationKey(e);
                 boolean filterKey = isFilterKey(e);
 
