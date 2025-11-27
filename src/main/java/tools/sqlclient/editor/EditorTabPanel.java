@@ -145,6 +145,7 @@ public class EditorTabPanel extends JPanel {
 
         editorPanel.setMinimumSize(new Dimension(120, 200));
 
+
         splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
         splitPane.setResizeWeight(1.0);
         splitPane.setDividerSize(10);
@@ -278,6 +279,7 @@ public class EditorTabPanel extends JPanel {
     private String extractStatementAtCaret() {
         String full = textArea.getText();
         int caret = textArea.getCaretPosition();
+        caret = Math.max(0, Math.min(full.length(), caret));
         int start = full.lastIndexOf(';', Math.max(0, caret - 1));
         start = start < 0 ? 0 : start + 1;
         int end = full.indexOf(';', caret);
@@ -285,47 +287,61 @@ public class EditorTabPanel extends JPanel {
         return full.substring(start, Math.min(end, full.length()));
     }
 
+    /**
+     * 以“当前行”为种子，向上/向下扩散，遇到空白行或文件边界停止，
+     * 返回中间所有非空行组成的整块文本。
+     */
     private String extractBlockAroundCaret() {
         String full = textArea.getText();
-        int caret = Math.max(0, Math.min(full.length(), textArea.getCaretPosition()));
-        int startBoundary = 0;
-        int scan = caret;
-        while (scan > 0) {
-            int lineStart = full.lastIndexOf('\n', scan - 1) + 1;
-            int lineEnd = full.indexOf('\n', lineStart);
-            if (lineEnd < 0) lineEnd = full.length();
-            String line = full.substring(lineStart, Math.min(lineEnd, full.length()));
-            if (line.trim().isEmpty() && lineStart < caret) {
-                startBoundary = Math.min(full.length(), lineEnd + 1);
-                break;
-            }
-            if (lineStart == 0) {
-                startBoundary = 0;
-                break;
-            }
-            scan = Math.max(0, lineStart - 1);
+        if (full == null || full.isEmpty()) {
+            return "";
         }
 
-        int endBoundary = full.length();
-        int scanDown = caret;
-        while (scanDown < full.length()) {
-            int lineEnd = full.indexOf('\n', scanDown);
-            if (lineEnd < 0) lineEnd = full.length();
-            String line = full.substring(scanDown, Math.min(lineEnd, full.length()));
-            if (line.trim().isEmpty()) {
-                endBoundary = Math.max(startBoundary, scanDown);
-                break;
-            }
-            if (lineEnd >= full.length()) {
-                endBoundary = full.length();
-                break;
-            }
-            scanDown = lineEnd + 1;
+        int caret = textArea.getCaretPosition();
+        // caret 可能在文本末尾（等于 length），需要回退一格才能安全取行号
+        if (caret > 0 && caret >= full.length()) {
+            caret = full.length() - 1;
         }
-        if (endBoundary < startBoundary) {
-            endBoundary = startBoundary;
+
+        try {
+            int currentLine = textArea.getLineOfOffset(caret);
+            int startLine = currentLine;
+            int endLine = currentLine;
+
+            // 向上扩散：遇到空白行就停
+            for (int line = currentLine - 1; line >= 0; line--) {
+                int lineStart = textArea.getLineStartOffset(line);
+                int lineEnd = textArea.getLineEndOffset(line);
+                String lineText = full.substring(lineStart, Math.min(lineEnd, full.length()));
+                if (lineText.trim().isEmpty()) {
+                    break;
+                }
+                startLine = line;
+            }
+
+            // 向下扩散：遇到空白行就停
+            int totalLines = textArea.getLineCount();
+            for (int line = currentLine + 1; line < totalLines; line++) {
+                int lineStart = textArea.getLineStartOffset(line);
+                int lineEnd = textArea.getLineEndOffset(line);
+                String lineText = full.substring(lineStart, Math.min(lineEnd, full.length()));
+                if (lineText.trim().isEmpty()) {
+                    break;
+                }
+                endLine = line;
+            }
+
+            int startOffset = textArea.getLineStartOffset(startLine);
+            int endOffset = textArea.getLineEndOffset(endLine);
+            endOffset = Math.min(endOffset, full.length());
+            if (endOffset < startOffset) {
+                endOffset = startOffset;
+            }
+            return full.substring(startOffset, endOffset);
+        } catch (javax.swing.text.BadLocationException e) {
+            // 出现异常时退化为整篇文本，保证不会崩
+            return full;
         }
-        return full.substring(startBoundary, endBoundary);
     }
 
     public JTabbedPane getResultTabs() {

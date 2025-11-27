@@ -487,11 +487,14 @@ public class MainFrame extends JFrame {
             JOptionPane.showMessageDialog(this, "当前窗口正在执行，请先停止或等待结束");
             return;
         }
+
         java.util.List<String> statements = panel.getExecutableStatements(blockMode);
         if (statements.isEmpty()) {
             JOptionPane.showMessageDialog(this, "请选择要执行的 SQL 语句");
             return;
         }
+
+        // 清理旧结果
         if (windowMode) {
             panel.clearLocalResults();
         } else {
@@ -499,31 +502,55 @@ public class MainFrame extends JFrame {
             target.clear();
             collapseSharedResults();
         }
-        resultTabCounters.put(noteId, new AtomicInteger(1));
+
+        // 重置结果计数 & 状态
+        resultTabCounters.put(noteId, new java.util.concurrent.atomic.AtomicInteger(1));
         statusLabel.setText("执行中...");
         panel.setExecutionRunning(true);
         OperationLog.log("开始执行 SQL，共 " + statements.size() + " 条 | " + panel.getNote().getTitle());
-        runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
+
+        // 按笔记 ID 记录运行中的 Future
+        runningExecutions.putIfAbsent(noteId, new java.util.concurrent.CopyOnWriteArrayList<>());
+        java.util.List<java.util.concurrent.CompletableFuture<?>> execList = runningExecutions.get(noteId);
+
+        // 关键：构造一个“串行链”
+        java.util.concurrent.CompletableFuture<Void> chain =
+                java.util.concurrent.CompletableFuture.completedFuture(null);
+
         for (String stmt : statements) {
-            CompletableFuture<Void> future = sqlExecutionService.execute(stmt,
-                    res -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res)),
-                    ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, stmt, ex.getMessage())));
-            runningExecutions.get(noteId).add(future);
-            future.whenComplete((v, ex) -> SwingUtilities.invokeLater(() -> {
-                java.util.List<CompletableFuture<?>> list = runningExecutions.get(noteId);
-                if (list != null) {
-                    list.remove(future);
-                    if (list.isEmpty()) {
-                        runningExecutions.remove(noteId);
-                        panel.setExecutionRunning(false);
+            final String sqlStmt = stmt;
+            chain = chain.thenCompose(v -> {
+                // 每次只在上一条执行完之后才真正发请求
+                java.util.concurrent.CompletableFuture<Void> future = sqlExecutionService.execute(
+                        sqlStmt,
+                        res -> javax.swing.SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res)),
+                        ex  -> javax.swing.SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage()))
+                );
+
+                execList.add(future);
+
+                future.whenComplete((vv, ex) -> javax.swing.SwingUtilities.invokeLater(() -> {
+                    java.util.List<java.util.concurrent.CompletableFuture<?>> list = runningExecutions.get(noteId);
+                    if (list != null) {
+                        list.remove(future);
+                        if (list.isEmpty()) {
+                            // 所有语句都执行完（或失败完）之后，才真正收尾
+                            runningExecutions.remove(noteId);
+                            panel.setExecutionRunning(false);
+                            statusLabel.setText("就绪");
+                        }
                     }
-                }
-                updateExecutionButtons();
-                statusLabel.setText("就绪");
-            }));
+                    updateExecutionButtons();
+                }));
+
+                // 返回这一条的 Future，使后续 thenCompose 串在它后面
+                return future;
+            });
         }
+
         updateExecutionButtons();
     }
+
 
     private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result) {
         int idx = nextResultIndex(noteId);

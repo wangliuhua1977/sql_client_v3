@@ -95,14 +95,19 @@ public class SuggestionEngine {
 
             @Override
             public void keyReleased(KeyEvent e) {
-                if (popup.isVisible() && (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN)) {
+                // 弹窗打开时，用上下键只移动选中项，不触发重新检索
+                if (popup.isVisible()
+                        && (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN)) {
                     e.consume();
                     return;
                 }
+
                 SuggestionContext ctx = analyzeContext();
                 boolean activationKey = isActivationKey(e);
                 boolean filterKey = isFilterKey(e);
-                if (ctx != null && (activationKey || filterKey || (popup.isVisible() && filterKey))) {
+
+                // 只在「激活键」或「弹窗已打开且是过滤键」时刷新联想列表
+                if (ctx != null && (activationKey || (popup.isVisible() && filterKey))) {
                     String prefix = currentToken();
                     if (prefix.contains(".")) {
                         prefix = prefix.substring(prefix.lastIndexOf('.') + 1);
@@ -115,6 +120,7 @@ public class SuggestionEngine {
         };
     }
 
+
     private boolean isActivationKey(KeyEvent e) {
         int code = e.getKeyCode();
         char ch = e.getKeyChar();
@@ -122,9 +128,35 @@ public class SuggestionEngine {
     }
 
     private boolean isFilterKey(KeyEvent e) {
+        int code = e.getKeyCode();
+
+        // 退格 / 删除：也视为需要刷新联想
+        if (code == KeyEvent.VK_BACK_SPACE || code == KeyEvent.VK_DELETE) {
+            return true;
+        }
+
+        // 带 Ctrl / Alt / Meta 的快捷键不算输入字符
+        if (e.isControlDown() || e.isAltDown() || e.isMetaDown()) {
+            return false;
+        }
+
         char ch = e.getKeyChar();
-        return Character.isAlphabetic(ch) || Character.isDigit(ch) || ch == '%' || ch == '_' || ch == '.';
+        // KEY_TYPED 时优先用字符本身
+        if (Character.isLetterOrDigit(ch) || ch == '%' || ch == '_' || ch == '.') {
+            return true;
+        }
+
+        // KEY_RELEASED 下很多键 getKeyChar() 是 CHAR_UNDEFINED，用 keyCode 兜底
+        if (code >= KeyEvent.VK_A && code <= KeyEvent.VK_Z) {
+            return true;
+        }
+        if (code >= KeyEvent.VK_0 && code <= KeyEvent.VK_9) {
+            return true;
+        }
+
+        return false;
     }
+
 
     private String currentToken() {
         int caret = textArea.getCaretPosition();

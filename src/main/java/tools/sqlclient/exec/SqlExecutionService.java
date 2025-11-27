@@ -5,8 +5,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import tools.sqlclient.network.TrustAllHttpClient;
-import tools.sqlclient.util.ThreadPools;
 import tools.sqlclient.util.OperationLog;
+import tools.sqlclient.util.ThreadPools;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -23,26 +23,52 @@ import java.util.function.Consumer;
  * SQL 远程执行服务：调用 HTTPS 接口获取结果集。
  */
 public class SqlExecutionService {
-    private static final String EXEC_API = "https://leshan.paas.sc.ctc.com/waf-dev/api?api_id=sql_exec&api_token=xxfs&sql_memo=";
+    // 一定要用你真实的域名，不要写成带 ... 的鬼畜版本
+    private static final String EXEC_API =
+            "https://leshan.paas.sc.ctc.com/waf-dev/api?api_id=sql_exec&api_token=xxfs&sql_memo=";
+
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
 
     public CompletableFuture<Void> execute(String sql,
                                            Consumer<SqlExecResult> onSuccess,
                                            Consumer<Exception> onError) {
-        String trimmed = sql.trim();
+        String trimmed = (sql == null) ? "" : sql.trim();
         if (trimmed.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
-        // 按要求保持原始 SQL 文本并用 $$ 包裹，但为确保 URI 合法性仍需对 query param 进行编码。
-        String wrapped = "$$" + trimmed + "$$";
-        String encoded = java.net.URLEncoder.encode(wrapped, StandardCharsets.UTF_8);
-        URI uri = URI.create(EXEC_API + encoded);
+
+        // 先输出本次将要执行的完整 SQL（可能是一整块，多行）
+        OperationLog.log("即将执行 SQL（本次 Ctrl+Enter 文本，未拆分）:\n" + trimmed);
+
+        // 关键修复：把所有换行符压成空格，避免 URI 中出现非法字符
+        String normalized = trimmed
+                .replace("\r\n", " ")
+                .replace("\n", " ")
+                .replace("\r", " ");
+
+        // 按原有约定，用 $$ 包裹，不做额外转码
+        String wrapped = "$$" + normalized + "$$";
+
+        URI uri;
+        try {
+            // 先尝试直接拼接
+            uri = URI.create(EXEC_API + wrapped);
+        } catch (IllegalArgumentException ex) {
+            // 极端兜底：仅把空格转成 %20，其它字符保持原状，依然不碰引号之类
+            String fallback = wrapped.replace(" ", "%20");
+            uri = URI.create(EXEC_API + fallback);
+        }
+
         HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
-        log("SQL 执行请求: " + uri);
+
+        // 输出请求 URL
+        OperationLog.log("SQL 执行请求: " + uri);
+
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .thenApplyAsync(resp -> {
-                    log("SQL 执行响应: " + OperationLog.abbreviate(resp.body(), 400));
+                    OperationLog.log("SQL 执行响应: " + OperationLog.abbreviate(resp.body(), 400));
+                    // 这里仍然用原始 trimmed 作为“本条 SQL 文本”，方便结果面板展示
                     return parseResponse(trimmed, resp.body());
                 }, ThreadPools.NETWORK_POOL)
                 .thenAcceptAsync(onSuccess, ThreadPools.NETWORK_POOL)
@@ -116,8 +142,8 @@ public class SqlExecutionService {
         if (body == null) {
             return "<空响应>";
         }
-        String trimmed = body.strip();
-        return trimmed.length() > 240 ? trimmed.substring(0, 240) + "..." : trimmed;
+        String t = body.strip();
+        return t.length() > 240 ? t.substring(0, 240) + "..." : t;
     }
 
     private JsonArray extractDataArray(JsonObject obj) {
@@ -135,11 +161,5 @@ public class SqlExecutionService {
 
     private boolean shouldSkip(String key) {
         return "sn_".equalsIgnoreCase(key);
-    }
-
-    private void log(String message) {
-        if (OperationLog.isReady()) {
-            OperationLog.log(message);
-        }
     }
 }
