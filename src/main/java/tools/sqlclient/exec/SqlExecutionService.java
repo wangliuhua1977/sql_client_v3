@@ -15,6 +15,7 @@ import java.net.http.HttpResponse;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -42,25 +43,28 @@ public class SqlExecutionService {
         // 先输出本次将要执行的完整 SQL（可能是一整块，多行）
         OperationLog.log("即将执行 SQL（本次 Ctrl+Enter 文本，未拆分）:\n" + trimmed);
 
-        // 关键修复：把所有换行符压成空格，避免 URI 中出现非法字符
-        String normalized = trimmed
-                .replace("\r\n", " ")
-                .replace("\n", " ")
-                .replace("\r", " ");
+        // === 使用 base64 编码 SQL，避免引号 / 换行 / $$ 等一切妖魔鬼怪 ===
+        // 原始 SQL：用户在编辑器里写的内容
+        String rawSql = trimmed;
 
-        // URL 安全编码，但保留单引号，避免后端对引号的特殊处理导致响应异常
-        String encoded = URLEncoder.encode(normalized, StandardCharsets.UTF_8)
-                .replace("+", "%20")
-                .replace("%27", "'");
-        String wrapped = "$$" + encoded + "$$";
+        // 1) 按 UTF-8 转字节再做 base64
+        String sqlBase64 = Base64.getEncoder()
+                .encodeToString(rawSql.getBytes(StandardCharsets.UTF_8));
+
+        // 2) 带一个前缀，方便后端识别
+        String payload = "base64:" + sqlBase64;
+
+        // 3) 再做一次 URL 编码，只是为了合法拼到 query 参数里
+        String encoded = URLEncoder.encode(payload, StandardCharsets.UTF_8);
 
         URI uri;
         try {
-            // 先尝试直接拼接
-            uri = URI.create(EXEC_API + wrapped);
+            // 最终 URL：EXEC_API 已经包含前半截 &sql_memo=
+            // 形如：https://.../api?api_id=sql_exec&api_token=xxfs&sql_memo=<encoded>
+            uri = URI.create(EXEC_API + encoded);
         } catch (IllegalArgumentException ex) {
-            // 极端兜底：仅把空格转成 %20，其它字符保持原状，依然不碰引号之类
-            String fallback = wrapped.replace(" ", "%20");
+            // 理论上 base64 + URLEncoder 不会再出 URI 问题，这里只是兜底
+            String fallback = URLEncoder.encode(payload, StandardCharsets.UTF_8);
             uri = URI.create(EXEC_API + fallback);
         }
 
@@ -258,8 +262,6 @@ public class SqlExecutionService {
         return new SqlExecResult(sql, columns, rows, rowsCount);
     }
 
-
-
     private SqlExecResult messageResult(String sql, String message) {
         List<String> columns = new ArrayList<>();
         columns.add("消息");
@@ -275,7 +277,6 @@ public class SqlExecutionService {
         String t = body.strip();
         return t.length() > 240 ? t.substring(0, 240) + "..." : t;
     }
-
 
     private JsonArray extractDataArray(JsonObject obj) {
         if (obj == null) return new JsonArray();

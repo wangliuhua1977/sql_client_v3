@@ -87,6 +87,12 @@ public class SqlEditorSettingsDialog extends JDialog {
     private JPanel buildStyleEditor() {
         JPanel editor = new JPanel(new BorderLayout());
         editor.setBorder(BorderFactory.createTitledBorder("主题设置"));
+
+        JScrollPane listScroll = new JScrollPane(styleList);
+        // 随便给个你觉得顺眼的宽度，比如 160 或 200
+        listScroll.setPreferredSize(new Dimension(280, 0));
+        editor.add(listScroll, BorderLayout.WEST);
+
         editor.add(new JScrollPane(styleList), BorderLayout.WEST);
 
         JPanel form = new JPanel(new GridLayout(0, 2, 6, 6));
