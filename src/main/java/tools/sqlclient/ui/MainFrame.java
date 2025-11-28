@@ -1008,8 +1008,11 @@ public class MainFrame extends JFrame {
 
     private String stripLinkMarkers(String sql) {
         if (sql == null) return "";
-        return sql.replaceAll("(?s)\\[\\[(.+?)\\]\\]", "$1");
+        // 删除所有 [[...]] 双向链接标签（包含内容本身），仅保留其余 SQL
+        String cleaned = sql.replaceAll("(?s)\\[\\[(.+?)\\]\\]", "");
+        return cleaned.trim();
     }
+
 
     private void showUsageGuide() {
         String guide = """
