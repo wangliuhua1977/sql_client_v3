@@ -32,6 +32,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.awt.event.KeyEvent;
 
 /**
  * 主窗口，符合 Windows 11 扁平化风格，全部中文。
