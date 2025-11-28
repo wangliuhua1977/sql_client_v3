@@ -105,6 +105,10 @@ public class SuggestionEngine {
                         commitSelection();
                         e.consume();
                         return;
+                    } else if (e.getKeyCode() == KeyEvent.VK_ESCAPE) {
+                        popup.setVisible(false);
+                        e.consume();
+                        return;
                     }
                 }
             }
@@ -115,6 +119,7 @@ public class SuggestionEngine {
                     popup.setVisible(false);
                     return;
                 }
+
                 // 弹窗打开时，用上下键只移动选中项，不触发重新检索
                 if (popup.isVisible()
                         && (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN)) {
@@ -122,31 +127,45 @@ public class SuggestionEngine {
                     return;
                 }
 
+                // 分号：结束语句并关闭联想
                 if (e.getKeyChar() == ';') {
                     popup.setVisible(false);
                     return;
                 }
 
-                SuggestionContext ctx = analyzeContext();
-                if (ctx == null && popup.isVisible() && lastContext != null) {
-                    ctx = lastContext; // 继续使用上一次的上下文以便过滤已有列表
-                }
-                boolean activationKey = isActivationKey(e);
-                boolean filterKey = isFilterKey(e);
+                boolean activationKey = isActivationKey(e); // 空格 / 点
+                boolean filterKey = isFilterKey(e);         // 字母、数字、退格等
 
-                // 只在「激活键」或「弹窗已打开且是过滤键」时刷新联想列表
-                if (ctx != null && (activationKey || (popup.isVisible() && filterKey))) {
-                    String prefix = currentToken();
-                    if (prefix.contains(".")) {
-                        prefix = prefix.substring(prefix.lastIndexOf('.') + 1);
-                    }
-                    showSuggestions(prefix, ctx);
-                } else if (activationKey) {
-                    popup.setVisible(false);
+                if (!activationKey && !filterKey) {
+                    // 其它键（Ctrl 组合、Home、End 等）不动联想状态
+                    return;
                 }
+
+                // 根据当前光标重新分析上下文
+                SuggestionContext ctx = analyzeContext();
+
+                // 如果这次没分析出来，但弹窗已开且是在输入过滤字符，就沿用上一次上下文
+                if (ctx == null && popup.isVisible() && filterKey && lastContext != null) {
+                    ctx = lastContext;
+                }
+
+                // 仍然没有上下文，说明光标不在 from/join 后等位置，直接关掉弹窗
+                if (ctx == null) {
+                    popup.setVisible(false);
+                    return;
+                }
+
+                // 关键：只要有上下文，激活键或过滤键都触发联想，不再依赖“弹窗是否已打开”
+                String prefix = currentToken();
+                if (prefix.contains(".")) {
+                    prefix = prefix.substring(prefix.lastIndexOf('.') + 1);
+                }
+                showSuggestions(prefix, ctx);
             }
         };
     }
+
+
 
 
     private boolean isActivationKey(KeyEvent e) {
@@ -345,16 +364,25 @@ public class SuggestionEngine {
         int caret = textArea.getCaretPosition();
         String content = textArea.getText();
         if (caret <= 0 || content == null) return null;
+
         String statement = currentStatement(content, caret);
         String statementPrefix = currentStatementPrefix(content, caret);
+
         String line = statementPrefix.substring(statementPrefix.lastIndexOf('\n') + 1);
         if (line.trim().startsWith("--")) {
             return null; // 注释行不联想
         }
+
         List<TableBinding> bindings = parseBindings(statement);
         int tableCount = (int) bindings.stream().map(TableBinding::table).distinct().count();
+
         String token = currentToken();
-        int tokenStart = caret - token.length();
+        // ★ 关键修正：token 起始位置要按「当前语句前缀」来算，而不是整篇文档
+        int tokenStartInPrefix = statementPrefix.length() - token.length();
+        if (tokenStartInPrefix < 0) {
+            tokenStartInPrefix = 0;
+        }
+
         if (token.contains(".")) {
             String[] parts = token.split("\\.");
             if (parts.length >= 1) {
@@ -375,27 +403,28 @@ public class SuggestionEngine {
             }
         }
 
-        KeywordMatch onMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, COLUMN_KEYWORDS);
+        KeywordMatch onMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, COLUMN_KEYWORDS);
         if (onMatch != null) {
             return new SuggestionContext(SuggestionType.COLUMN, null, tableCount > 1, null);
         }
 
-        KeywordMatch tableMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, TABLE_KEYWORDS);
+        KeywordMatch tableMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, TABLE_KEYWORDS);
         if (tableMatch != null) {
             return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
         }
 
-        KeywordMatch fnMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, FUNCTION_KEYWORDS);
+        KeywordMatch fnMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, FUNCTION_KEYWORDS);
         if (fnMatch != null) {
             return new SuggestionContext(SuggestionType.FUNCTION, null, false, null);
         }
 
-        KeywordMatch procMatch = findKeywordWithWhitespace(statementPrefix, tokenStart, PROCEDURE_KEYWORDS);
+        KeywordMatch procMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, PROCEDURE_KEYWORDS);
         if (procMatch != null) {
             return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null);
         }
         return null;
     }
+
 
     private KeywordMatch findKeywordWithWhitespace(String prefix, int tokenStart, List<String> keywords) {
         String lower = prefix.toLowerCase();
