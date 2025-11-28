@@ -44,6 +44,8 @@ public class MainFrame extends JFrame {
     private final JLabel statusLabel = new JLabel("就绪");
     private final JLabel autosaveLabel = new JLabel("自动保存: -");
     private final JLabel taskLabel = new JLabel("后台任务: 0");
+    private final JLabel suggestionStateLabel = new JLabel("联想: 开启");
+    private final JLabel metadataLabel = new JLabel("元数据: -");
     private final JPanel sharedResultsWrapper = new JPanel(new BorderLayout());
     private final SharedResultView sharedResultView = new SharedResultView();
     private final SQLiteManager sqliteManager;
@@ -61,6 +63,8 @@ public class MainFrame extends JFrame {
     private JRadioButtonMenuItem panelModeItem;
     private boolean convertFullWidth = true;
     private EditorStyle currentStyle;
+    private boolean suggestionEnabled = true;
+    private EditorTabPanel activePanel;
     private JButton executeButton;
     private JButton stopButton;
     private JSplitPane mainSplitPane;
@@ -115,7 +119,9 @@ public class MainFrame extends JFrame {
         buildContent();
         buildStatusBar();
         OperationLog.setAppender(line -> logPanel.appendLine(line));
-        metadataService.refreshMetadataAsync(() -> {});
+        metadataLabel.setText("元数据: " + metadataService.countCachedObjects());
+        metadataService.refreshMetadataAsync(this::handleMetadataRefreshResult);
+        installGlobalShortcuts();
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
@@ -197,10 +203,13 @@ public class MainFrame extends JFrame {
                         JOptionPane.WARNING_MESSAGE);
                 if (option == JOptionPane.YES_OPTION) {
                     OperationLog.log("确认重置元数据并重新拉取");
-                    metadataService.resetMetadataAsync(() -> JOptionPane.showMessageDialog(MainFrame.this,
-                            "已重置并重新获取元数据。",
-                            "完成",
-                            JOptionPane.INFORMATION_MESSAGE));
+                    metadataService.resetMetadataAsync(result -> {
+                        handleMetadataRefreshResult(result);
+                        JOptionPane.showMessageDialog(MainFrame.this,
+                                "已重置并重新获取元数据。",
+                                "完成",
+                                JOptionPane.INFORMATION_MESSAGE);
+                    });
                 }
             }
         }));
@@ -229,6 +238,13 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 tileFrames();
+            }
+        }));
+
+        help.add(new JMenuItem(new AbstractAction("使用说明") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showUsageGuide();
             }
         }));
 
@@ -267,8 +283,14 @@ public class MainFrame extends JFrame {
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
         sharedResultsWrapper.setMinimumSize(new Dimension(100, 180));
         sharedResultsWrapper.setVisible(false);
-        desktopPane.addPropertyChangeListener("selectedFrame", evt -> updateExecutionButtons());
-        tabbedPane.addChangeListener(e -> updateExecutionButtons());
+        desktopPane.addPropertyChangeListener("selectedFrame", evt -> {
+            syncActivePanelWithSelection();
+            updateExecutionButtons();
+        });
+        tabbedPane.addChangeListener(e -> {
+            syncActivePanelWithSelection();
+            updateExecutionButtons();
+        });
         mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, sharedResultsWrapper);
         mainSplitPane.setResizeWeight(1.0);
         mainSplitPane.setDividerSize(10);
@@ -287,8 +309,10 @@ public class MainFrame extends JFrame {
         horizontalSplit.setResizeWeight(0.78);
         horizontalSplit.setDividerSize(8);
         horizontalSplit.setContinuousLayout(true);
+        horizontalSplit.setOneTouchExpandable(true);
         add(horizontalSplit, BorderLayout.CENTER);
         SwingUtilities.invokeLater(this::collapseSharedResults);
+        SwingUtilities.invokeLater(() -> horizontalSplit.setDividerLocation(1.0));
         centerLayout.show(centerPanel, "window");
         restoreSession();
     }
@@ -297,6 +321,7 @@ public class MainFrame extends JFrame {
         java.util.List<Long> openIds = appStateRepository.loadOpenNotes();
         if (!openIds.isEmpty()) {
             noteRepository.listByIds(openIds).forEach(this::openNoteInCurrentMode);
+            focusByNoteId(openIds.get(openIds.size() - 1));
         }
         if (panelCache.isEmpty()) {
             createNote(DatabaseType.POSTGRESQL);
@@ -310,6 +335,8 @@ public class MainFrame extends JFrame {
         left.add(statusLabel);
         left.add(autosaveLabel);
         left.add(taskLabel);
+        left.add(suggestionStateLabel);
+        left.add(metadataLabel);
         status.add(left, BorderLayout.WEST);
         add(status, BorderLayout.SOUTH);
     }
@@ -341,8 +368,9 @@ public class MainFrame extends JFrame {
         return panelCache.computeIfAbsent(note.getId(), id -> {
             EditorTabPanel p = new EditorTabPanel(noteRepository, metadataService,
                     this::updateAutosaveTime, this::updateTaskCount,
-                    newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle);
+                    newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle, this::onPanelFocused);
             p.setExecuteHandler(() -> executeCurrentSql(true));
+            p.setSuggestionEnabled(suggestionEnabled);
             return p;
         });
     }
@@ -401,6 +429,7 @@ public class MainFrame extends JFrame {
             frame.setSelected(true);
         } catch (java.beans.PropertyVetoException ignored) { }
         persistOpenFrames();
+        onPanelFocused(panel);
         updateExecutionButtons();
     }
 
@@ -410,6 +439,7 @@ public class MainFrame extends JFrame {
         int idx = tabbedPane.indexOfComponent(panel);
         tabbedPane.setSelectedIndex(idx);
         persistOpenFrames();
+        onPanelFocused(panel);
         updateExecutionButtons();
     }
 
@@ -443,6 +473,13 @@ public class MainFrame extends JFrame {
     }
 
     private EditorTabPanel getCurrentPanel() {
+        if (activePanel != null && activePanel.isShowing()) {
+            return activePanel;
+        }
+        return selectedPanel();
+    }
+
+    private EditorTabPanel selectedPanel() {
         if (windowMode) {
             JInternalFrame frame = desktopPane.getSelectedFrame();
             if (frame != null && frame.getContentPane().getComponentCount() > 0) {
@@ -453,6 +490,48 @@ public class MainFrame extends JFrame {
             return extractPanel(comp);
         }
         return null;
+    }
+
+    private void syncActivePanelWithSelection() {
+        EditorTabPanel selected = selectedPanel();
+        if (selected != null) {
+            activePanel = selected;
+        }
+    }
+
+    private void onPanelFocused(EditorTabPanel panel) {
+        if (panel == null) return;
+        activePanel = panel;
+        selectContainerForPanel(panel);
+        updateExecutionButtons();
+    }
+
+    private void selectContainerForPanel(EditorTabPanel panel) {
+        if (panel == null) return;
+        if (windowMode) {
+            for (JInternalFrame frame : desktopPane.getAllFrames()) {
+                if (extractPanelFromFrame(frame) == panel) {
+                    try { frame.setSelected(true); } catch (java.beans.PropertyVetoException ignored) {}
+                    frame.toFront();
+                    break;
+                }
+            }
+        } else {
+            int idx = tabbedPane.indexOfComponent(panel);
+            if (idx >= 0) {
+                tabbedPane.setSelectedIndex(idx);
+            }
+        }
+    }
+
+    private void focusByNoteId(Long noteId) {
+        if (noteId == null) return;
+        for (EditorTabPanel panel : panelCache.values()) {
+            if (panel.getNote().getId() == noteId) {
+                onPanelFocused(panel);
+                break;
+            }
+        }
     }
 
     private void saveAll() {
@@ -488,7 +567,10 @@ public class MainFrame extends JFrame {
             return;
         }
 
-        java.util.List<String> statements = panel.getExecutableStatements(blockMode);
+        java.util.List<String> statements = panel.getExecutableStatements(blockMode).stream()
+                .map(this::stripLinkMarkers)
+                .filter(s -> s != null && !s.isBlank())
+                .toList();
         if (statements.isEmpty()) {
             JOptionPane.showMessageDialog(this, "请选择要执行的 SQL 语句");
             return;
@@ -877,6 +959,85 @@ public class MainFrame extends JFrame {
 
     private void updateTaskCount(int count) {
         SwingUtilities.invokeLater(() -> taskLabel.setText("后台任务: " + count));
+    }
+
+    private void installGlobalShortcuts() {
+        KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(e -> {
+            if (e.getID() == KeyEvent.KEY_PRESSED && e.isAltDown() && e.getKeyCode() == KeyEvent.VK_E) {
+                toggleSuggestionMode();
+                return true;
+            }
+            return false;
+        });
+    }
+
+    private void toggleSuggestionMode() {
+        suggestionEnabled = !suggestionEnabled;
+        suggestionStateLabel.setText("联想: " + (suggestionEnabled ? "开启" : "关闭"));
+        statusLabel.setText(suggestionEnabled ? "联想已开启" : "联想已关闭");
+        panelCache.values().forEach(p -> {
+            p.setSuggestionEnabled(suggestionEnabled);
+            if (!suggestionEnabled) {
+                p.hideSuggestionPopup();
+            }
+        });
+    }
+
+    private void handleMetadataRefreshResult(MetadataService.MetadataRefreshResult result) {
+        if (result == null) return;
+        if (result.success()) {
+            String text = "元数据: " + result.totalObjects();
+            if (result.changedObjects() > 0) {
+                text += " (变动 " + result.changedObjects() + ")";
+            }
+            metadataLabel.setText(text);
+            if (!hasRunningExecutions()) {
+                statusLabel.setText("元数据已更新");
+            }
+        } else {
+            String reason = result.message() == null ? "获取失败" : result.message();
+            metadataLabel.setText("元数据: 使用本地缓存 (" + reason + ")");
+            statusLabel.setText("元数据加载失败，使用本地库元数据");
+        }
+    }
+
+    private boolean hasRunningExecutions() {
+        return runningExecutions.values().stream().anyMatch(list -> list != null && !list.isEmpty());
+    }
+
+    private String stripLinkMarkers(String sql) {
+        if (sql == null) return "";
+        return sql.replaceAll("(?s)\\[\\[(.+?)\\]\\]", "$1");
+    }
+
+    private void showUsageGuide() {
+        String guide = """
+# SQL Notebook 使用说明
+
+## 联想模式
+- Alt+E 可随时切换联想开关，状态栏实时显示“联想: 开启/关闭”，关闭后不再弹出列表且不会打断输入。
+- 在输入表/视图、列、函数或存储过程位置时自动弹窗，输入连续字符、上下键与回车选择都会保持在当前位置过滤，只有回车确认或语句以分号结束时才收起。
+
+## 双向链接
+- 在 SQL 或笔记中插入 `[[标签]]` 以建立关联，执行 SQL 时系统会自动忽略方括号仅保留标签内容，避免影响 SQL 语义。
+- 标签可以出现在任意位置，不限制输入顺序与行号。
+
+## SQL 块执行
+- Ctrl+Enter 会按照选择或光标所在语句块（或连续非空行块）执行，多个语句以分号拆分后串行提交。
+- 执行/停止工具栏始终对应当前焦点窗口，可快速切换子窗口并控制 HTTPS 请求的开始或中止。
+
+## 元数据与状态提示
+- 启动后自动刷新对象元数据，状态栏会显示当前元数据量与本次变动数量；若刷新失败，将提示正在使用本地缓存。
+- 右侧“操作日志”默认收拢，可展开查看元数据抓取、SQL 执行等详细轨迹。
+""";
+        JTextArea area = new JTextArea(guide);
+        area.setEditable(false);
+        area.setLineWrap(true);
+        area.setWrapStyleWord(true);
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
+        JScrollPane scroll = new JScrollPane(area);
+        scroll.setPreferredSize(new Dimension(680, 420));
+        JOptionPane.showMessageDialog(this, scroll, "使用说明", JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void switchToPanelMode() {

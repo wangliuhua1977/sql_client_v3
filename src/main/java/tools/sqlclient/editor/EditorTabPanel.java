@@ -45,6 +45,7 @@ public class EditorTabPanel extends JPanel {
     private Runnable executeHandler;
     private EditorStyle currentStyle;
     private int runtimeFontSize;
+    private final Consumer<EditorTabPanel> focusNotifier;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
@@ -52,7 +53,8 @@ public class EditorTabPanel extends JPanel {
                           Consumer<String> titleUpdater,
                           Note note,
                           boolean convertFullWidth,
-                          EditorStyle style) {
+                          EditorStyle style,
+                          Consumer<EditorTabPanel> focusNotifier) {
         super(new BorderLayout());
         this.noteRepository = noteRepository;
         this.note = note;
@@ -63,6 +65,7 @@ public class EditorTabPanel extends JPanel {
         this.titleUpdater = titleUpdater;
         this.autoSaveService = new AutoSaveService(autosaveCallback, taskCallback);
         this.suggestionEngine = new SuggestionEngine(metadataService, textArea);
+        this.focusNotifier = focusNotifier;
         this.fullWidthFilter = new FullWidthFilter(convertFullWidth);
         if (textArea.getDocument() instanceof javax.swing.text.AbstractDocument doc) {
             doc.setDocumentFilter(fullWidthFilter);
@@ -86,6 +89,7 @@ public class EditorTabPanel extends JPanel {
                 e.consume();
             }
         });
+        installFocusHooks();
         this.textArea.setText(note.getContent());
         installExecuteShortcut();
         applyStyle(style);
@@ -107,6 +111,18 @@ public class EditorTabPanel extends JPanel {
                 }
             }
         });
+    }
+
+    private void installFocusHooks() {
+        java.awt.event.FocusAdapter adapter = new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusGained(java.awt.event.FocusEvent e) {
+                notifyFocus();
+            }
+        };
+        textArea.addFocusListener(adapter);
+        resultTabs.addFocusListener(adapter);
+        this.addFocusListener(adapter);
     }
 
     private RSyntaxTextArea createEditor() {
@@ -245,12 +261,26 @@ public class EditorTabPanel extends JPanel {
         textArea.setFont(textArea.getFont().deriveFont((float) runtimeFontSize));
     }
 
+    private void notifyFocus() {
+        if (focusNotifier != null) {
+            focusNotifier.accept(this);
+        }
+    }
+
     public Note getNote() {
         return note;
     }
 
     public void setExecuteHandler(Runnable executeHandler) {
         this.executeHandler = executeHandler;
+    }
+
+    public void setSuggestionEnabled(boolean enabled) {
+        suggestionEngine.setEnabled(enabled);
+    }
+
+    public void hideSuggestionPopup() {
+        suggestionEngine.closePopup();
     }
 
     public java.util.List<String> getExecutableStatements(boolean blockMode) {

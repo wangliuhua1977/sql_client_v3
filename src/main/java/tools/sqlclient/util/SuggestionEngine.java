@@ -35,6 +35,7 @@ public class SuggestionEngine {
     private SuggestionContext lastContext;
     private volatile boolean objectsRefreshInFlight = false;
     private long lastObjectsRefreshAt = 0L;
+    private volatile boolean enabled = true;
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -68,10 +69,25 @@ public class SuggestionEngine {
         });
     }
 
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
+        if (!enabled) {
+            popup.setVisible(false);
+        }
+    }
+
+    public void closePopup() {
+        popup.setVisible(false);
+    }
+
     public KeyAdapter createKeyListener() {
         return new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
+                if (!enabled) {
+                    popup.setVisible(false);
+                    return;
+                }
                 if (popup.isVisible()) {
                     if (e.getKeyCode() == KeyEvent.VK_DOWN) {
                         int next = Math.min(list.getSelectedIndex() + 1, list.getModel().getSize() - 1);
@@ -95,10 +111,19 @@ public class SuggestionEngine {
 
             @Override
             public void keyReleased(KeyEvent e) {
+                if (!enabled) {
+                    popup.setVisible(false);
+                    return;
+                }
                 // 弹窗打开时，用上下键只移动选中项，不触发重新检索
                 if (popup.isVisible()
                         && (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN)) {
                     e.consume();
+                    return;
+                }
+
+                if (e.getKeyChar() == ';') {
+                    popup.setVisible(false);
                     return;
                 }
 
@@ -186,6 +211,10 @@ public class SuggestionEngine {
     }
 
     private void showSuggestions(String token, SuggestionContext context, boolean skipFetch) {
+        if (!enabled) {
+            popup.setVisible(false);
+            return;
+        }
         boolean refreshing = false;
         this.showTableHintForColumns = context.showTableHint();
         this.lastContext = context;
