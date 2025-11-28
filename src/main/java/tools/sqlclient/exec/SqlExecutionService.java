@@ -8,11 +8,13 @@ import tools.sqlclient.network.TrustAllHttpClient;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -29,6 +31,12 @@ public class SqlExecutionService {
     private static final String EXEC_API =
             "https://leshan.paas.sc.ctc.com/waf-dev/api?api_id=sql_exec&api_token=xxfs&sql_memo=";
 
+    /**
+     * AES 密钥（示例值），务必改成你自己的 16/24/32 字节秘钥，并且不要提交到仓库。
+     * 例如 32 字节 = AES-256
+     */
+    private static final String AES_KEY = "a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuv";
+
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
 
@@ -43,19 +51,19 @@ public class SqlExecutionService {
         // 先输出本次将要执行的完整 SQL（可能是一整块，多行）
         OperationLog.log("即将执行 SQL（本次 Ctrl+Enter 文本，未拆分）:\n" + trimmed);
 
-        // === 使用 base64 编码 SQL，避免引号 / 换行 / $$ 等一切妖魔鬼怪 ===
-        // 原始 SQL：用户在编辑器里写的内容
-        String rawSql = trimmed;
+        // === 原始 SQL -> base64 -> AES 加密 -> hex 密文 ===
+        String cipherHex;
+        try {
+            cipherHex = encryptSqlToHex(trimmed);
+        } catch (Exception e) {
+            // 加密失败就直接报错，不再尝试明文发送
+            CompletableFuture<Void> f = new CompletableFuture<>();
+            f.completeExceptionally(new RuntimeException("SQL 加密失败", e));
+            return f;
+        }
 
-        // 1) 按 UTF-8 转字节再做 base64
-        String sqlBase64 = Base64.getEncoder()
-                .encodeToString(rawSql.getBytes(StandardCharsets.UTF_8));
-
-        // 2) 带一个前缀，方便后端识别
-        String payload = "base64:" + sqlBase64;
-
-        // 3) 再做一次 URL 编码，只是为了合法拼到 query 参数里
-        String encoded = URLEncoder.encode(payload, StandardCharsets.UTF_8);
+        // 再做 URL 编码，只为合法挂到 query 参数里
+        String encoded = URLEncoder.encode(cipherHex, StandardCharsets.UTF_8);
 
         URI uri;
         try {
@@ -63,14 +71,15 @@ public class SqlExecutionService {
             // 形如：https://.../api?api_id=sql_exec&api_token=xxfs&sql_memo=<encoded>
             uri = URI.create(EXEC_API + encoded);
         } catch (IllegalArgumentException ex) {
-            // 理论上 base64 + URLEncoder 不会再出 URI 问题，这里只是兜底
-            String fallback = URLEncoder.encode(payload, StandardCharsets.UTF_8);
-            uri = URI.create(EXEC_API + fallback);
+            // 这里理论上不会再出事，除非你手动改坏 EXEC_API
+            CompletableFuture<Void> f = new CompletableFuture<>();
+            f.completeExceptionally(ex);
+            return f;
         }
 
         HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
 
-        // 输出请求 URL
+        // 输出请求 URL（已经是密文，看个寂寞，但好歹能排查）
         OperationLog.log("SQL 执行请求: " + uri);
 
         return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
@@ -90,6 +99,54 @@ public class SqlExecutionService {
                     }
                     return null;
                 });
+    }
+
+    /**
+     * 原始 SQL 文本：
+     *   1）UTF-8 -> 字节
+     *   2）Base64 编码成字符串
+     *   3）AES(ECB/PKCS5Padding) 加密
+     *   4）密文转为十六进制字符串
+     *
+     * PG 侧：把 sql_memo 当作 hex 字符串，先 decode，再用 pgcrypto 解密，然后再从 base64 还原 SQL。
+     */
+    private String encryptSqlToHex(String rawSql) throws Exception {
+        if (rawSql == null) {
+            rawSql = "";
+        }
+
+        // 1) SQL -> base64（文本形式，便于以后扩展）
+        String sqlBase64 = Base64.getEncoder()
+                .encodeToString(rawSql.getBytes(StandardCharsets.UTF_8));
+
+        // 2) 准备 AES 秘钥
+        byte[] keyBytes = AES_KEY.getBytes(StandardCharsets.UTF_8);
+        int len = keyBytes.length;
+        if (len != 16 && len != 24 && len != 32) {
+            throw new IllegalStateException("AES_KEY 长度必须为 16/24/32 字节，目前为: " + len);
+        }
+        SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
+
+        // 3) AES/ECB/PKCS5Padding 加密（PG 侧可用 aes-ecb/pad:pkcs 解密）
+        Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+        cipher.init(Cipher.ENCRYPT_MODE, keySpec);
+        byte[] encrypted = cipher.doFinal(sqlBase64.getBytes(StandardCharsets.UTF_8));
+
+        // 4) 密文转十六进制，便于在 URL 中传输，PG 侧 decode(..., 'hex')
+        return bytesToHex(encrypted);
+    }
+
+    private String bytesToHex(byte[] bytes) {
+        if (bytes == null) return "";
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            int v = b & 0xFF;
+            if (v < 16) {
+                sb.append('0');
+            }
+            sb.append(Integer.toHexString(v));
+        }
+        return sb.toString();
     }
 
     private SqlExecResult parseResponse(String sql, String body) {
