@@ -68,6 +68,14 @@ public class SQLiteManager {
             ensureColumn(conn, "notes", "deleted_at", "INTEGER DEFAULT 0");
             normalizeNoteTitles(conn);
             ensureUniqueIndex(conn, "idx_notes_title_unique", "notes", "title");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS note_links (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "from_note_id INTEGER NOT NULL, " +
+                    "to_note_id INTEGER NOT NULL, " +
+                    "created_at INTEGER NOT NULL, " +
+                    "last_seen_at INTEGER NOT NULL, " +
+                    "UNIQUE(from_note_id, to_note_id)" +
+                    ")");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS app_state (" +
                     "key TEXT PRIMARY KEY, " +
                     "value TEXT"

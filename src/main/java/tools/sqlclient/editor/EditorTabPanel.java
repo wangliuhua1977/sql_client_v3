@@ -10,7 +10,9 @@ import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.util.AutoSaveService;
 import tools.sqlclient.util.LinkResolver;
+import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.SuggestionEngine;
+import tools.sqlclient.util.ThreadPools;
 
 import javax.swing.*;
 import java.awt.*;
@@ -35,6 +37,7 @@ public class EditorTabPanel extends JPanel {
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
+    private final Consumer<String> linkOpener;
     private final FullWidthFilter fullWidthFilter;
     private final JTabbedPane resultTabs = new JTabbedPane();
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
@@ -54,7 +57,8 @@ public class EditorTabPanel extends JPanel {
                           Note note,
                           boolean convertFullWidth,
                           EditorStyle style,
-                          Consumer<EditorTabPanel> focusNotifier) {
+                          Consumer<EditorTabPanel> focusNotifier,
+                          Consumer<String> linkOpener) {
         super(new BorderLayout());
         this.noteRepository = noteRepository;
         this.note = note;
@@ -63,6 +67,7 @@ public class EditorTabPanel extends JPanel {
         this.currentStyle = style;
         this.runtimeFontSize = style.getFontSize();
         this.titleUpdater = titleUpdater;
+        this.linkOpener = linkOpener;
         this.autoSaveService = new AutoSaveService(autosaveCallback, taskCallback);
         this.suggestionEngine = new SuggestionEngine(metadataService, textArea);
         this.focusNotifier = focusNotifier;
@@ -94,9 +99,14 @@ public class EditorTabPanel extends JPanel {
         installExecuteShortcut();
         applyStyle(style);
         initLayout();
-        LinkResolver.install(textArea);
+        LinkResolver.install(textArea, this::handleLinkClick);
         autoSaveService.startAutoSave(this::autoSave);
         updateTitle();
+    }
+
+    private void handleLinkClick(LinkResolver.LinkRef ref) {
+        if (ref == null || linkOpener == null) return;
+        linkOpener.accept(ref.targetTitle);
     }
 
     private void installExecuteShortcut() {
@@ -194,9 +204,21 @@ public class EditorTabPanel extends JPanel {
             lastSaveLabel.setText("自动保存: " + time);
             autoSaveService.onSaved(time);
             updateTitle();
+            persistLinksAsync();
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "保存失败: " + ex.getMessage());
         }
+    }
+
+    private void persistLinksAsync() {
+        String content = textArea.getText();
+        ThreadPools.NETWORK_POOL.submit(() -> {
+            try {
+                LinkResolver.resolveAndPersistLinks(noteRepository, note, content);
+            } catch (Exception ex) {
+                OperationLog.log("解析/持久化链接失败: " + ex.getMessage());
+            }
+        });
     }
 
     private void updateTitle() {

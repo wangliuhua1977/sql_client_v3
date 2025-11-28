@@ -1,5 +1,4 @@
 package tools.sqlclient.ui;
-import java.util.concurrent.CopyOnWriteArrayList;
 import tools.sqlclient.db.AppStateRepository;
 import tools.sqlclient.db.EditorStyleRepository;
 import tools.sqlclient.db.NoteRepository;
@@ -12,6 +11,7 @@ import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.ui.QueryResultPanel;
+import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
 
 import javax.swing.*;
@@ -899,7 +899,8 @@ public class MainFrame extends JFrame {
         return panelCache.computeIfAbsent(note.getId(), id -> {
             EditorTabPanel p = new EditorTabPanel(noteRepository, metadataService,
                     this::updateAutosaveTime, this::updateTaskCount,
-                    newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle, this::onPanelFocused);
+                    newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle, this::onPanelFocused,
+                    this::openNoteByTitle);
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
             return p;
@@ -1103,7 +1104,7 @@ public class MainFrame extends JFrame {
         }
 
         java.util.List<String> statements = panel.getExecutableStatements(blockMode).stream()
-                .map(this::stripLinkMarkers)
+                .map(LinkResolver::stripLinkTags)
                 .filter(s -> s != null && !s.isBlank())
                 .toList();
         if (statements.isEmpty()) {
@@ -1542,11 +1543,13 @@ public class MainFrame extends JFrame {
         return runningExecutions.values().stream().anyMatch(list -> list != null && !list.isEmpty());
     }
 
-    private String stripLinkMarkers(String sql) {
-        if (sql == null) return "";
-        // 删除所有 [[...]] 双向链接标签（包含内容本身），仅保留其余 SQL
-        String cleaned = sql.replaceAll("(?s)\\[\\[(.+?)\\]\\]", "");
-        return cleaned.trim();
+    private void openNoteByTitle(String title) {
+        try {
+            Note target = noteRepository.findOrCreateByTitle(title);
+            SwingUtilities.invokeLater(() -> openNoteInCurrentMode(target));
+        } catch (Exception ex) {
+            OperationLog.log("打开链接失败: " + title + " | " + ex.getMessage());
+        }
     }
 
     private void showUsageGuide() {

@@ -4,6 +4,7 @@ import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.model.Note;
 
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.table.AbstractTableModel;
@@ -42,6 +43,8 @@ public class ManageNotesDialog extends JDialog {
     private final NoteTableModel tableModel;
     private final JTable table;
     private final TableRowSorter<NoteTableModel> sorter;
+    private final DefaultListModel<Note> backlinkModel = new DefaultListModel<>();
+    private final JList<Note> backlinkList = new JList<>(backlinkModel);
 
     private final JTextField searchField = new JTextField(18);
     private final JCheckBox fullTextBox = new JCheckBox("全文搜索内容");
@@ -194,10 +197,15 @@ public class ManageNotesDialog extends JDialog {
         table.getSelectionModel().addListSelectionListener(e -> {
             if (!e.getValueIsAdjusting()) {
                 updateButtonState();
+                refreshBacklinks();
             }
         });
 
-        add(new JScrollPane(table), BorderLayout.CENTER);
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
+                new JScrollPane(table), createBacklinkPanel());
+        split.setResizeWeight(0.72);
+        split.setDividerSize(8);
+        add(split, BorderLayout.CENTER);
 
         // ==== 底部按钮 ====
         JPanel btnPanel = new JPanel();
@@ -313,6 +321,7 @@ public class ManageNotesDialog extends JDialog {
         tableModel.setData(loadData());
         applyFilter();
         updateButtonState();
+        refreshBacklinks();
     }
 
     private void openSelectedNote() {
@@ -336,6 +345,52 @@ public class ManageNotesDialog extends JDialog {
         trashButton.setEnabled(has && !note.isTrashed());
         restoreButton.setEnabled(has && note.isTrashed());
         emptyTrashButton.setEnabled(true);
+    }
+
+    private JPanel createBacklinkPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(BorderFactory.createTitledBorder("反向链接（指向当前选中笔记）"));
+        backlinkList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                Component c = super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if (c instanceof JLabel label && value instanceof Note note) {
+                    label.setText(note.getTitle() + "  ·  " + TIME_FMT.format(Instant.ofEpochMilli(note.getUpdatedAt())));
+                    if (iconProvider != null) {
+                        label.setIcon(iconProvider.apply(note));
+                    }
+                }
+                return c;
+            }
+        });
+        backlinkList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        backlinkList.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
+                    Note n = backlinkList.getSelectedValue();
+                    if (n != null && opener != null) {
+                        opener.accept(n);
+                    }
+                }
+            }
+        });
+        panel.add(new JScrollPane(backlinkList), BorderLayout.CENTER);
+        JLabel hint = new JLabel("双击链接的笔记即可打开");
+        hint.setBorder(new EmptyBorder(4,8,4,8));
+        panel.add(hint, BorderLayout.SOUTH);
+        return panel;
+    }
+
+    private void refreshBacklinks() {
+        backlinkModel.clear();
+        Note note = getSelectedNote();
+        if (note == null) return;
+        try {
+            repository.findBacklinks(note.getId()).forEach(backlinkModel::addElement);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "加载反向链接失败: " + ex.getMessage());
+        }
     }
 
     // === 标题列渲染：文本 + 图标 ===
