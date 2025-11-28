@@ -275,6 +275,7 @@ public class SqlExecutionService {
         return t.length() > 240 ? t.substring(0, 240) + "..." : t;
     }
 
+
     private JsonArray extractDataArray(JsonObject obj) {
         if (obj == null) return new JsonArray();
         if (obj.has("Data") && obj.get("Data").isJsonArray()) {
