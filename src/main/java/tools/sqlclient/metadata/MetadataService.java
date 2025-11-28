@@ -48,37 +48,74 @@ public class MetadataService {
     private final Object dbWriteLock = new Object();
     private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
 
+    public record MetadataRefreshResult(boolean success, int totalObjects, int changedObjects, String message) {}
+
     public MetadataService(Path dbPath) {
         this.sqliteManager = new SQLiteManager(dbPath);
         this.sqliteManager.initSchema();
     }
 
     public void refreshMetadataAsync(Runnable done) {
-        CompletableFuture.runAsync(this::refreshMetadata, metadataPool).thenRunAsync(done);
+        refreshMetadataAsync(result -> {
+            if (done != null) {
+                done.run();
+            }
+        });
+    }
+
+    public void refreshMetadataAsync(java.util.function.Consumer<MetadataRefreshResult> done) {
+        CompletableFuture
+                .supplyAsync(this::refreshMetadata, metadataPool)
+                .handle((result, ex) -> {
+                    if (ex != null) {
+                        log.error("刷新元数据失败", ex);
+                        return new MetadataRefreshResult(false, countCachedObjects(), 0, ex.getMessage());
+                    }
+                    return result;
+                })
+                .whenComplete((result, ex) -> {
+                    if (done != null) {
+                        SwingUtilities.invokeLater(() -> done.accept(result));
+                    }
+                });
     }
 
     /**
      * 清空本地对象/字段缓存并重新拉取一次对象列表。
      */
     public void resetMetadataAsync(Runnable done) {
-        CompletableFuture.runAsync(() -> {
-            clearLocalMetadata();
-            refreshMetadata();
-        }, metadataPool).whenComplete((v, ex) -> {
-            if (ex != null) {
-                log.error("重置元数据失败", ex);
-            }
+        resetMetadataAsync(result -> {
             if (done != null) {
-                SwingUtilities.invokeLater(done);
+                done.run();
             }
         });
     }
 
-    private void refreshMetadata() {
+    public void resetMetadataAsync(java.util.function.Consumer<MetadataRefreshResult> done) {
+        CompletableFuture.supplyAsync(() -> {
+            clearLocalMetadata();
+            return refreshMetadata();
+        }, metadataPool).handle((result, ex) -> {
+            if (ex != null) {
+                log.error("重置元数据失败", ex);
+                return new MetadataRefreshResult(false, countCachedObjects(), 0, ex.getMessage());
+            }
+            return result;
+        }).whenComplete((result, ex) -> {
+            if (done != null) {
+                SwingUtilities.invokeLater(() -> done.accept(result));
+            }
+        });
+    }
+
+    private MetadataRefreshResult refreshMetadata() {
         try {
             OperationLog.log("开始刷新对象元数据");
             List<RemoteObject> remoteObjects = fetchObjects();
             Set<String> remoteNames = remoteObjects.stream().map(o -> o.object_name).collect(Collectors.toSet());
+
+            int added = 0;
+            int removed = 0;
 
             synchronized (dbWriteLock) {
                 try (Connection conn = sqliteManager.getConnection()) {
@@ -98,6 +135,9 @@ public class MetadataService {
                             ps.setString(2, obj.object_name);
                             ps.setString(3, obj.object_type);
                             ps.addBatch();
+                            if (!existing.contains(obj.object_name)) {
+                                added++;
+                            }
                         }
                         ps.executeBatch();
                     }
@@ -107,6 +147,7 @@ public class MetadataService {
                             if (!remoteNames.contains(old)) {
                                 ps.setString(1, old);
                                 ps.addBatch();
+                                removed++;
                             }
                         }
                         ps.executeBatch();
@@ -117,9 +158,11 @@ public class MetadataService {
 
             // 更新列信息
             OperationLog.log("对象同步完成，共 " + remoteObjects.size() + " 个");
+            return new MetadataRefreshResult(true, countCachedObjects(), added + removed, "刷新成功");
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
+            return new MetadataRefreshResult(false, countCachedObjects(), 0, e.getMessage());
         }
     }
 
@@ -138,6 +181,20 @@ public class MetadataService {
                 OperationLog.log("清空本地元数据失败: " + e.getMessage());
             }
         }
+    }
+
+    public int countCachedObjects() {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM objects")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("统计本地对象数量失败", e);
+        }
+        return 0;
     }
 
     /**
