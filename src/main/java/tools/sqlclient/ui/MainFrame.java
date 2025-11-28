@@ -1,5 +1,5 @@
 package tools.sqlclient.ui;
-
+import java.util.concurrent.CopyOnWriteArrayList;
 import tools.sqlclient.db.AppStateRepository;
 import tools.sqlclient.db.EditorStyleRepository;
 import tools.sqlclient.db.NoteRepository;
@@ -59,6 +59,9 @@ public class MainFrame extends JFrame {
     private final Map<Long, java.util.List<CompletableFuture<?>>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
+    // 笔记图标持久化：noteId -> 图标规格
+    private final java.util.Map<Long, NoteIconSpec> noteIconSpecs = new java.util.HashMap<>();
+    private final java.util.Random iconRandom = new java.util.Random();
     private boolean windowMode = true;
     private JRadioButtonMenuItem windowModeItem;
     private JRadioButtonMenuItem panelModeItem;
@@ -87,6 +90,10 @@ public class MainFrame extends JFrame {
         this.noteRepository = new NoteRepository(sqliteManager);
         this.appStateRepository = new AppStateRepository(sqliteManager);
         this.styleRepository = new EditorStyleRepository(sqliteManager);
+        // 加载笔记图标配置（noteId -> 图标规格）
+        loadNoteIcons();
+        // 加载主窗体图标：resources 目录下的 PNG，不存在则回退默认图标
+        loadMainWindowIcon();
         var styles = styleRepository.listAll();
         String styleName = appStateRepository.loadCurrentStyleName(styles.isEmpty() ? "默认" : styles.get(0).getName());
         this.currentStyle = styles.stream().filter(s -> s.getName().equals(styleName)).findFirst()
@@ -130,6 +137,529 @@ public class MainFrame extends JFrame {
             }
         });
         updateExecutionButtons();
+    }
+
+    // ==================== 主窗体图标 ====================
+
+    /**
+     * 从 resources 目录加载主窗体图标：
+     * 约定路径：/icons/sql_client.png
+     * 如果资源不存在，则回退为系统默认图标。
+     */
+    private void loadMainWindowIcon() {
+        try {
+            // Maven 工程中，resources 下的图标文件会被打成类路径资源
+            java.net.URL url = getClass().getResource("/icons/sql_client.png");
+            if (url != null) {
+                Image img = new ImageIcon(url).getImage();
+                setIconImage(img);
+            } else {
+                // 回退：尝试使用系统默认图标
+                Icon uiIcon = UIManager.getIcon("FileView.computerIcon");
+                if (uiIcon instanceof ImageIcon icon) {
+                    setIconImage(icon.getImage());
+                }
+            }
+        } catch (Exception ignore) {
+            // 图标加载失败不影响主程序运行
+        }
+    }
+
+    // ==================== 笔记图标：加载 / 保存 / 生成 ====================
+
+    /**
+     * 启动时从本地文件加载所有笔记图标配置。
+     * 文件格式：每行  noteId|paletteIndex,shapeIndex,motifIndex
+     */
+    private void loadNoteIcons() {
+        try {
+            java.nio.file.Path path = java.nio.file.Path.of("note_icons.conf");
+            if (!java.nio.file.Files.exists(path)) {
+                return;
+            }
+            java.util.List<String> lines =
+                    java.nio.file.Files.readAllLines(path, java.nio.charset.StandardCharsets.UTF_8);
+            for (String line : lines) {
+                if (line == null || line.isBlank()) continue;
+                String[] parts = line.split("\\|", 2);
+                if (parts.length != 2) continue;
+                long id = Long.parseLong(parts[0].trim());
+                NoteIconSpec spec = NoteIconSpec.fromString(parts[1].trim());
+                if (spec != null) {
+                    noteIconSpecs.put(id, spec);
+                }
+            }
+        } catch (Exception ignore) {
+            // 图标加载失败不用影响主流程，后面会重新生成
+        }
+    }
+
+    /**
+     * 将当前所有笔记图标配置写入本地文件 note_icons.conf。
+     */
+    private void persistNoteIcons() {
+        try {
+            java.nio.file.Path path = java.nio.file.Path.of("note_icons.conf");
+            java.util.List<String> out = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<Long, NoteIconSpec> e : noteIconSpecs.entrySet()) {
+                out.add(e.getKey() + "|" + e.getValue().toConfigString());
+            }
+            java.nio.file.Files.write(path, out, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception ignore) {
+            // 写失败就算了，不阻塞主流程
+        }
+    }
+
+    /**
+     * 获取某个笔记的图标，如无则生成一个随机图标规格并持久化。
+     */
+    private Icon getOrCreateNoteIcon(Note note) {
+        if (note == null) return null;
+        long id = note.getId();
+        NoteIconSpec spec = noteIconSpecs.get(id);
+        if (spec == null) {
+            spec = NoteIconSpec.random(iconRandom);
+            noteIconSpecs.put(id, spec);
+            persistNoteIcons();
+        }
+        return spec.toIcon();
+    }
+
+    /**
+     * 重新抽一枚图标：管理笔记中“更换图标”会调用。
+     * 同时刷新已打开窗口和标签上的图标。
+     */
+    private Icon regenerateNoteIcon(Note note) {
+        if (note == null) return null;
+        long id = note.getId();
+        NoteIconSpec spec = NoteIconSpec.random(iconRandom);
+        noteIconSpecs.put(id, spec);
+        persistNoteIcons();
+        Icon icon = spec.toIcon();
+        // 刷新所有已打开的窗口 & 标签
+        for (JInternalFrame frame : desktopPane.getAllFrames()) {
+            EditorTabPanel p = extractPanelFromFrame(frame);
+            if (p != null && p.getNote().getId() == id) {
+                frame.setFrameIcon(icon);
+            }
+        }
+        for (int i = 0; i < tabbedPane.getTabCount(); i++) {
+            Component comp = tabbedPane.getComponentAt(i);
+            EditorTabPanel p = extractPanel(comp);
+            if (p != null && p.getNote().getId() == id) {
+                tabbedPane.setIconAt(i, icon);
+            }
+        }
+        return icon;
+    }
+
+    /**
+     * 图标规格：决定调色板、外形、内部图案。
+     * 现有设计：12 组高饱和配色 × 8 种外形 × 10 种内部图案
+     * 理论组合数 960 种，差异明显、不易混淆。
+     */
+    private static class NoteIconSpec {
+        // 颜色调色板：每组 [0]=背景, [1]=前景主色, [2]=点缀色
+        private static final java.awt.Color[][] PALETTES = new java.awt.Color[][]{
+                // 高饱和撞色，避免“看上去都差不多”
+                {new java.awt.Color(0xF44336), new java.awt.Color(0xFFFFFF), new java.awt.Color(0xFF9800)}, // 红 + 白 + 橙
+                {new java.awt.Color(0xE91E63), new java.awt.Color(0xFFFFFF), new java.awt.Color(0xFFC107)}, // 粉 + 白 + 金
+                {new java.awt.Color(0x9C27B0), new java.awt.Color(0xFFEB3B), new java.awt.Color(0xFFFFFF)}, // 紫 + 黄 + 白
+                {new java.awt.Color(0x673AB7), new java.awt.Color(0xFFEB3B), new java.awt.Color(0x00BCD4)}, // 深紫 + 黄 + 青
+                {new java.awt.Color(0x3F51B5), new java.awt.Color(0xFFFFFF), new java.awt.Color(0xFF5722)}, // 靛蓝 + 白 + 橘
+                {new java.awt.Color(0x2196F3), new java.awt.Color(0xFFFFFF), new java.awt.Color(0xFFEB3B)}, // 亮蓝 + 白 + 黄
+                {new java.awt.Color(0x009688), new java.awt.Color(0xFFFFFF), new java.awt.Color(0xFF9800)}, // 蓝绿 + 白 + 橙
+                {new java.awt.Color(0x4CAF50), new java.awt.Color(0xFFFFFF), new java.awt.Color(0xFF5722)}, // 绿色 + 白 + 深橘
+                {new java.awt.Color(0x8BC34A), new java.awt.Color(0x1A237E), new java.awt.Color(0xFF5722)}, // 亮绿 + 深蓝 + 深橘
+                {new java.awt.Color(0xFFC107), new java.awt.Color(0x1A237E), new java.awt.Color(0xD32F2F)}, // 金黄 + 深蓝 + 深红
+                {new java.awt.Color(0xFF9800), new java.awt.Color(0x212121), new java.awt.Color(0x03A9F4)}, // 橙色 + 深灰 + 天蓝
+                {new java.awt.Color(0xFF5722), new java.awt.Color(0xFFFFFF), new java.awt.Color(0x00BCD4)}  // 深橘 + 白 + 青
+        };
+
+        // 外形种类数量
+        private static final int SHAPE_COUNT = 8;
+        // 内部图案种类数量
+        private static final int MOTIF_COUNT = 10;
+
+        final int paletteIndex;
+        final int shapeIndex;
+        final int motifIndex;
+
+        NoteIconSpec(int paletteIndex, int shapeIndex, int motifIndex) {
+            this.paletteIndex = paletteIndex;
+            this.shapeIndex = shapeIndex;
+            this.motifIndex = motifIndex;
+        }
+
+        static NoteIconSpec random(java.util.Random rnd) {
+            int p = rnd.nextInt(PALETTES.length);
+            int s = rnd.nextInt(SHAPE_COUNT);
+            int m = rnd.nextInt(MOTIF_COUNT);
+            return new NoteIconSpec(p, s, m);
+        }
+
+        String toConfigString() {
+            return paletteIndex + "," + shapeIndex + "," + motifIndex;
+        }
+
+        static NoteIconSpec fromString(String s) {
+            if (s == null || s.isBlank()) return null;
+            String[] parts = s.split(",");
+            if (parts.length < 3) return null;
+            try {
+                int p = Integer.parseInt(parts[0].trim());
+                int sh = Integer.parseInt(parts[1].trim());
+                int mo = Integer.parseInt(parts[2].trim());
+                if (p < 0 || p >= PALETTES.length) return null;
+                if (sh < 0) sh = 0;
+                if (mo < 0) mo = 0;
+                return new NoteIconSpec(p, sh, mo);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+
+        Icon toIcon() {
+            return new NoteIcon(this);
+        }
+    }
+
+    /**
+     * 真正绘制图标的类：高饱和背景 + 多种外形 + 多种内部图案。
+     */
+    private static class NoteIcon implements Icon {
+        private static final int SIZE = 18;
+        private final NoteIconSpec spec;
+
+        NoteIcon(NoteIconSpec spec) {
+            this.spec = spec;
+        }
+
+        @Override
+        public int getIconWidth() {
+            return SIZE;
+        }
+
+        @Override
+        public int getIconHeight() {
+            return SIZE;
+        }
+
+        @Override
+        public void paintIcon(Component c, java.awt.Graphics g, int x, int y) {
+            java.awt.Graphics2D g2 = (java.awt.Graphics2D) g.create();
+            g2.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
+                    java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+
+            java.awt.Color[] palette =
+                    NoteIconSpec.PALETTES[spec.paletteIndex % NoteIconSpec.PALETTES.length];
+            java.awt.Color bg = palette[0];
+            java.awt.Color fg = palette[1];
+            java.awt.Color accent = palette[2];
+
+            int padding = 2;
+            int w = SIZE - padding * 2;
+            int h = SIZE - padding * 2;
+            int left = x + padding;
+            int top = y + padding;
+            int centerX = x + SIZE / 2;
+            int centerY = y + SIZE / 2;
+
+            // 绘制外形底图
+            drawShape(g2, spec.shapeIndex, bg, accent, left, top, w, h, centerX, centerY);
+
+            // 绘制内部图案
+            drawMotif(g2, spec.motifIndex, fg, accent, x, y, SIZE);
+
+            g2.dispose();
+        }
+
+        private void drawShape(java.awt.Graphics2D g2,
+                               int shapeIndex,
+                               java.awt.Color bg,
+                               java.awt.Color accent,
+                               int left, int top, int w, int h,
+                               int cx, int cy) {
+            shapeIndex = Math.floorMod(shapeIndex, NoteIconSpec.SHAPE_COUNT);
+
+            g2.setStroke(new java.awt.BasicStroke(1.4f));
+
+            switch (shapeIndex) {
+                case 0 -> {
+                    // 圆角方块
+                    java.awt.geom.RoundRectangle2D.Float rr =
+                            new java.awt.geom.RoundRectangle2D.Float(
+                                    left, top, w, h, 7, 7);
+                    g2.setColor(bg);
+                    g2.fill(rr);
+                    g2.setColor(accent);
+                    g2.draw(rr);
+                }
+                case 1 -> {
+                    // 纯圆
+                    java.awt.geom.Ellipse2D.Float circle =
+                            new java.awt.geom.Ellipse2D.Float(left, top, w, h);
+                    g2.setColor(bg);
+                    g2.fill(circle);
+                }
+                case 2 -> {
+                    // 胶囊（横向）
+                    java.awt.geom.RoundRectangle2D.Float pill =
+                            new java.awt.geom.RoundRectangle2D.Float(
+                                    left - 2, top + h * 0.15f,
+                                    w + 4, h * 0.7f,
+                                    h, h);
+                    g2.setColor(bg);
+                    g2.fill(pill);
+                    g2.setColor(accent.darker());
+                    g2.draw(pill);
+                }
+                case 3 -> {
+                    // 菱形
+                    java.awt.geom.Path2D.Float diamond = new java.awt.geom.Path2D.Float();
+                    diamond.moveTo(cx, top);
+                    diamond.lineTo(left + w, cy);
+                    diamond.lineTo(cx, top + h);
+                    diamond.lineTo(left, cy);
+                    diamond.closePath();
+                    g2.setColor(bg);
+                    g2.fill(diamond);
+                    g2.setColor(accent);
+                    g2.draw(diamond);
+                }
+                case 4 -> {
+                    // 六边形
+                    java.awt.geom.Path2D.Float hex = new java.awt.geom.Path2D.Float();
+                    double radius = Math.min(w, h) / 2.0;
+                    for (int i = 0; i < 6; i++) {
+                        double angle = Math.toRadians(60 * i - 30);
+                        double px = cx + radius * Math.cos(angle);
+                        double py = cy + radius * Math.sin(angle);
+                        if (i == 0) {
+                            hex.moveTo(px, py);
+                        } else {
+                            hex.lineTo(px, py);
+                        }
+                    }
+                    hex.closePath();
+                    g2.setColor(bg);
+                    g2.fill(hex);
+                    g2.setColor(accent);
+                    g2.draw(hex);
+                }
+                case 5 -> {
+                    // 文件夹卡片
+                    java.awt.geom.Path2D.Float folder = new java.awt.geom.Path2D.Float();
+                    int tabHeight = (int) (h * 0.35);
+                    int tabWidth = (int) (w * 0.55);
+                    folder.moveTo(left, top + tabHeight);
+                    folder.lineTo(left, top + h);
+                    folder.lineTo(left + w, top + h);
+                    folder.lineTo(left + w, top);
+                    folder.lineTo(left + tabWidth, top);
+                    folder.lineTo(left + tabWidth - (int) (w * 0.2), top + tabHeight);
+                    folder.closePath();
+                    g2.setColor(bg);
+                    g2.fill(folder);
+                    g2.setColor(accent.darker());
+                    g2.draw(folder);
+                }
+                case 6 -> {
+                    // 圆环
+                    int r = Math.min(w, h);
+                    java.awt.geom.Ellipse2D.Float outer =
+                            new java.awt.geom.Ellipse2D.Float(
+                                    cx - r / 2f, cy - r / 2f, r, r);
+                    java.awt.geom.Ellipse2D.Float inner =
+                            new java.awt.geom.Ellipse2D.Float(
+                                    cx - r / 3f, cy - r / 3f, r * 2f / 3f, r * 2f / 3f);
+                    g2.setColor(bg);
+                    g2.fill(outer);
+                    g2.setColor(accent);
+                    g2.fill(inner);
+                }
+                case 7 -> {
+                    // 右上角切角方块
+                    java.awt.geom.Path2D.Float cut = new java.awt.geom.Path2D.Float();
+                    int cutSize = (int) (w * 0.35);
+                    cut.moveTo(left, top);
+                    cut.lineTo(left + w - cutSize, top);
+                    cut.lineTo(left + w, top + cutSize);
+                    cut.lineTo(left + w, top + h);
+                    cut.lineTo(left, top + h);
+                    cut.closePath();
+                    g2.setColor(bg);
+                    g2.fill(cut);
+                    g2.setColor(accent);
+                    g2.draw(cut);
+                }
+            }
+        }
+
+        private void drawMotif(java.awt.Graphics2D g2,
+                               int motifIndex,
+                               java.awt.Color fg,
+                               java.awt.Color accent,
+                               int x, int y, int size) {
+            motifIndex = Math.floorMod(motifIndex, NoteIconSpec.MOTIF_COUNT);
+
+            int inner = size - 8;
+            int left = x + (size - inner) / 2;
+            int top = y + (size - inner) / 2;
+            int w = inner;
+            int h = inner;
+            int cx = x + size / 2;
+            int cy = y + size / 2;
+
+            g2.setStroke(new java.awt.BasicStroke(1.3f));
+
+            switch (motifIndex) {
+                case 0 -> {
+                    // 中心圆点 + 描边
+                    java.awt.geom.Ellipse2D.Float outer =
+                            new java.awt.geom.Ellipse2D.Float(
+                                    cx - w * 0.3f, cy - h * 0.3f,
+                                    w * 0.6f, h * 0.6f);
+                    java.awt.geom.Ellipse2D.Float innerCircle =
+                            new java.awt.geom.Ellipse2D.Float(
+                                    cx - w * 0.16f, cy - h * 0.16f,
+                                    w * 0.32f, h * 0.32f);
+                    g2.setColor(accent);
+                    g2.fill(outer);
+                    g2.setColor(fg);
+                    g2.fill(innerCircle);
+                }
+                case 1 -> {
+                    // 斜向条纹
+                    g2.setColor(fg);
+                    for (int i = -w; i < w * 2; i += 4) {
+                        g2.drawLine(left + i, top, left + i - h, top + h);
+                    }
+                    g2.setColor(accent);
+                    g2.drawLine(left, top + h / 2, left + w, top + h / 2);
+                }
+                case 2 -> {
+                    // 横向三道杠
+                    g2.setColor(fg);
+                    int gap = h / 5;
+                    int barW = (int) (w * 0.75);
+                    int startX = cx - barW / 2;
+                    for (int i = -1; i <= 1; i++) {
+                        int yy = cy + i * gap;
+                        g2.drawLine(startX, yy, startX + barW, yy);
+                    }
+                }
+                case 3 -> {
+                    // 纵向三道柱
+                    g2.setColor(fg);
+                    int gap = w / 5;
+                    int barH = (int) (h * 0.75);
+                    int startY = cy - barH / 2;
+                    for (int i = -1; i <= 1; i++) {
+                        int xx = cx + i * gap;
+                        g2.drawLine(xx, startY, xx, startY + barH);
+                    }
+                }
+                case 4 -> {
+                    // 内部小三角
+                    java.awt.geom.Path2D.Float tri = new java.awt.geom.Path2D.Float();
+                    tri.moveTo(cx, top + h * 0.25);
+                    tri.lineTo(left + w * 0.25, top + h * 0.75);
+                    tri.lineTo(left + w * 0.75, top + h * 0.75);
+                    tri.closePath();
+                    g2.setColor(accent);
+                    g2.fill(tri);
+                    g2.setColor(fg);
+                    g2.draw(tri);
+                }
+                case 5 -> {
+                    // 五角星
+                    java.awt.geom.Path2D.Float star = new java.awt.geom.Path2D.Float();
+                    double outerR = Math.min(w, h) * 0.45;
+                    double innerR = outerR * 0.45;
+                    for (int i = 0; i < 10; i++) {
+                        double angle = Math.PI / 2 + Math.PI / 5 * i;
+                        double r = (i % 2 == 0) ? outerR : innerR;
+                        double px = cx + r * Math.cos(angle);
+                        double py = cy - r * Math.sin(angle);
+                        if (i == 0) {
+                            star.moveTo(px, py);
+                        } else {
+                            star.lineTo(px, py);
+                        }
+                    }
+                    star.closePath();
+                    g2.setColor(accent);
+                    g2.fill(star);
+                    g2.setColor(fg);
+                    g2.draw(star);
+                }
+                case 6 -> {
+                    // 柱状图
+                    g2.setColor(fg);
+                    int barW = w / 5;
+                    int baseY = top + h;
+                    int x1 = left + w / 8;
+                    int x2 = left + w / 8 + barW + 2;
+                    int x3 = left + w / 8 + (barW + 2) * 2;
+                    g2.fillRect(x1, baseY - h / 3, barW, h / 3);
+                    g2.fillRect(x2, baseY - h / 2, barW, h / 2);
+                    g2.fillRect(x3, baseY - (int) (h * 0.75), barW, (int) (h * 0.75));
+                }
+                case 7 -> {
+                    // 半身人像：圆头 + 肩膀
+                    g2.setColor(fg);
+                    java.awt.geom.Ellipse2D.Float head =
+                            new java.awt.geom.Ellipse2D.Float(
+                                    cx - w * 0.18f, top + h * 0.15f,
+                                    w * 0.36f, w * 0.36f);
+                    g2.fill(head);
+                    java.awt.geom.RoundRectangle2D.Float body =
+                            new java.awt.geom.RoundRectangle2D.Float(
+                                    left + w * 0.18f, top + h * 0.45f,
+                                    w * 0.64f, h * 0.4f,
+                                    h * 0.4f, h * 0.4f);
+                    g2.fill(body);
+                }
+                case 8 -> {
+                    // 音符
+                    g2.setColor(fg);
+                    int stemH = (int) (h * 0.6);
+                    int stemX = cx + w / 6;
+                    int stemY = cy - stemH / 2;
+                    g2.drawLine(stemX, stemY, stemX, stemY + stemH);
+                    java.awt.geom.Ellipse2D.Float noteHead =
+                            new java.awt.geom.Ellipse2D.Float(
+                                    stemX - w * 0.3f, stemY + stemH * 0.55f,
+                                    w * 0.4f, h * 0.28f);
+                    g2.fill(noteHead);
+                    g2.setColor(accent);
+                    g2.drawArc(stemX - w / 3, stemY, w / 2, h / 2, 0, -160);
+                }
+                case 9 -> {
+                    // 代码尖括号 < >
+                    g2.setColor(fg);
+                    int len = (int) (w * 0.32);
+                    int offset = (int) (w * 0.12);
+
+                    // <
+                    java.awt.geom.Path2D.Float leftCode = new java.awt.geom.Path2D.Float();
+                    leftCode.moveTo(cx - offset, cy);
+                    leftCode.lineTo(cx - offset + len / 2.0, cy - len / 2.0);
+                    leftCode.moveTo(cx - offset, cy);
+                    leftCode.lineTo(cx - offset + len / 2.0, cy + len / 2.0);
+                    g2.draw(leftCode);
+
+                    // >
+                    java.awt.geom.Path2D.Float rightCode = new java.awt.geom.Path2D.Float();
+                    rightCode.moveTo(cx + offset, cy);
+                    rightCode.lineTo(cx + offset - len / 2.0, cy - len / 2.0);
+                    rightCode.moveTo(cx + offset, cy);
+                    rightCode.lineTo(cx + offset - len / 2.0, cy + len / 2.0);
+                    g2.draw(rightCode);
+                }
+            }
+        }
     }
 
     private void buildMenu() {
@@ -420,6 +950,8 @@ public class MainFrame extends JFrame {
     private void addFrame(EditorTabPanel panel) {
         detachFromParent(panel);
         JInternalFrame frame = new JInternalFrame(panel.getNote().getTitle(), true, true, true, true);
+        // 为子窗体设置持久化的随机绘制图标
+        frame.setFrameIcon(getOrCreateNoteIcon(panel.getNote()));
         frame.setSize(600, 400);
         frame.setLocation(20 * desktopPane.getAllFrames().length, 20 * desktopPane.getAllFrames().length);
         frame.setVisible(true);
@@ -438,6 +970,8 @@ public class MainFrame extends JFrame {
         detachFromParent(panel);
         tabbedPane.addTab(panel.getNote().getTitle(), panel);
         int idx = tabbedPane.indexOfComponent(panel);
+        // 面板模式下标签使用与子窗体相同的图标
+        tabbedPane.setIconAt(idx, getOrCreateNoteIcon(panel.getNote()));
         tabbedPane.setSelectedIndex(idx);
         persistOpenFrames();
         onPanelFocused(panel);
@@ -593,8 +1127,10 @@ public class MainFrame extends JFrame {
         OperationLog.log("开始执行 SQL，共 " + statements.size() + " 条 | " + panel.getNote().getTitle());
 
         // 按笔记 ID 记录运行中的 Future
-        runningExecutions.putIfAbsent(noteId, new java.util.concurrent.CopyOnWriteArrayList<>());
-        java.util.List<java.util.concurrent.CompletableFuture<?>> execList = runningExecutions.get(noteId);
+        // 按笔记 ID 记录运行中的 Future
+        runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
+        List<CompletableFuture<?>> execList = runningExecutions.get(noteId);
+
 
         // 关键：构造一个“串行链”
         java.util.concurrent.CompletableFuture<Void> chain =
@@ -822,7 +1358,14 @@ public class MainFrame extends JFrame {
     }
 
     private void openManageDialog() {
-        ManageNotesDialog dialog = new ManageNotesDialog(this, noteRepository, this::openNoteInCurrentMode);
+        // 将图标提供与“更换图标”回调传入管理界面
+        ManageNotesDialog dialog = new ManageNotesDialog(
+                this,
+                noteRepository,
+                this::openNoteInCurrentMode,
+                this::getOrCreateNoteIcon,
+                this::regenerateNoteIcon
+        );
         dialog.setVisible(true);
     }
 
@@ -831,38 +1374,31 @@ public class MainFrame extends JFrame {
         chooser.setDialogTitle("导入本地笔记 (*.sql, *.md)");
         chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("SQL/Markdown", "sql", "md", "txt"));
         int result = chooser.showOpenDialog(this);
-        if (result != JFileChooser.APPROVE_OPTION) {
-            return;
-        }
-        Path path = chooser.getSelectedFile().toPath();
-        String baseName = path.getFileName().toString();
-        int dot = baseName.lastIndexOf('.') > 0 ? baseName.lastIndexOf('.') : baseName.length();
-        String title = baseName.substring(0, dot);
-        DatabaseType type = (DatabaseType) JOptionPane.showInputDialog(this, "选择数据库类型", "导入笔记",
-                JOptionPane.PLAIN_MESSAGE, null, DatabaseType.values(), DatabaseType.POSTGRESQL);
-        if (type == null) return;
-        title = askUniqueTitle(title);
-        try {
-            String content = Files.readString(path, StandardCharsets.UTF_8);
-            Note note = noteRepository.create(title, type);
-            noteRepository.updateContent(note, content);
-            openNoteInCurrentMode(note);
-        } catch (IllegalStateException ignore) {
-            // 用户取消输入
-        } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "导入失败: " + ex.getMessage());
-        }
-    }
-
-    private String askUniqueTitle(String suggested) {
-        String title = suggested;
-        while (noteRepository.titleExists(title, null)) {
-            title = JOptionPane.showInputDialog(this, "笔记标题已存在，请输入新标题", title + "_1");
-            if (title == null || title.isBlank()) {
-                throw new IllegalStateException("用户取消导入");
+        if (result == JFileChooser.APPROVE_OPTION) {
+            Path file = chooser.getSelectedFile().toPath();
+            try {
+                String content = Files.readString(file, StandardCharsets.UTF_8);
+                String name = file.getFileName().toString();
+                int dot = name.lastIndexOf('.');
+                String title = dot > 0 ? name.substring(0, dot) : name;
+                DatabaseType type = (DatabaseType) JOptionPane.showInputDialog(
+                        this,
+                        "选择数据库类型",
+                        "导入笔记",
+                        JOptionPane.QUESTION_MESSAGE,
+                        null,
+                        DatabaseType.values(),
+                        DatabaseType.POSTGRESQL
+                );
+                if (type != null) {
+                    Note note = noteRepository.create(title, type);
+                    noteRepository.updateContent(note, content);
+                    openNoteInCurrentMode(note);
+                }
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, "导入失败: " + ex.getMessage());
             }
         }
-        return title;
     }
 
     private void openEditorSettings() {
@@ -1013,7 +1549,6 @@ public class MainFrame extends JFrame {
         return cleaned.trim();
     }
 
-
     private void showUsageGuide() {
         String guide = """
 # SQL Notebook 使用说明
@@ -1080,6 +1615,8 @@ public class MainFrame extends JFrame {
         for (EditorTabPanel panel : panels) {
             detachFromParent(panel);
             JInternalFrame frame = new JInternalFrame(panel.getNote().getTitle(), true, true, true, true);
+            // 独立窗口模式下，同样为子窗体设置持久化的随机绘制图标
+            frame.setFrameIcon(getOrCreateNoteIcon(panel.getNote()));
             frame.setSize(600, 400);
             frame.setLocation(20 * offset, 20 * offset);
             offset++;
