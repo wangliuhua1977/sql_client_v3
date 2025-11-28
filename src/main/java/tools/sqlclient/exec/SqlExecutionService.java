@@ -94,10 +94,14 @@ public class SqlExecutionService {
         } catch (Exception parseEx) {
             return messageResult(sql, "执行响应解析失败: " + safeSnippet(body));
         }
+
         if (parsed == null || !parsed.isJsonObject()) {
             return messageResult(sql, "执行响应不是合法的 JSON 对象: " + safeSnippet(body));
         }
+
         JsonObject obj = parsed.getAsJsonObject();
+
+        // rows_count 仍按接口返回为准
         int rowsCount = 0;
         if (obj.has("rows_count") && !obj.get("rows_count").isJsonNull()) {
             try {
@@ -106,32 +110,154 @@ public class SqlExecutionService {
                 rowsCount = 0;
             }
         }
+
         JsonArray data = extractDataArray(obj);
         List<String> columns = new ArrayList<>();
         List<List<String>> rows = new ArrayList<>();
-        if (data != null) {
+
+        if (data != null && data.size() > 0) {
+            // 找到第一条真正的对象行，后面所有“魔法”都围绕它展开
+            JsonObject firstRow = null;
             for (JsonElement el : data) {
-                if (!el.isJsonObject()) continue;
-                JsonObject rowObj = el.getAsJsonObject();
-                if (columns.isEmpty()) {
-                    for (Map.Entry<String, JsonElement> entry : rowObj.entrySet()) {
-                        if (shouldSkip(entry.getKey())) continue;
-                        columns.add(entry.getKey());
+                if (el != null && el.isJsonObject()) {
+                    firstRow = el.getAsJsonObject();
+                    break;
+                }
+            }
+
+            // ========== 1) 优先：使用第一行的 __col_meta 决定列顺序 ==========
+            if (firstRow != null && firstRow.has("__col_meta") && !firstRow.get("__col_meta").isJsonNull()) {
+                JsonElement metaEl = firstRow.get("__col_meta");
+                JsonArray metaArr = null;
+
+                // 兼容两种情况：
+                // 1) __col_meta 本身就是 JSON 数组
+                // 2) __col_meta 是字符串，里面是 JSON 数组文本
+                if (metaEl.isJsonArray()) {
+                    metaArr = metaEl.getAsJsonArray();
+                } else if (metaEl.isJsonPrimitive() && metaEl.getAsJsonPrimitive().isString()) {
+                    try {
+                        metaArr = gson.fromJson(metaEl.getAsString(), JsonArray.class);
+                    } catch (Exception ignore) {
+                        metaArr = null;
                     }
                 }
-                List<String> row = new ArrayList<>();
-                for (String col : columns) {
-                    JsonElement value = rowObj.get(col);
-                    row.add(value == null || value.isJsonNull() ? "" : value.getAsString());
+
+                if (metaArr != null) {
+                    class ColMeta {
+                        final String name;
+                        final int seq;
+
+                        ColMeta(String name, int seq) {
+                            this.name = name;
+                            this.seq = seq;
+                        }
+                    }
+
+                    List<ColMeta> metaList = new ArrayList<>();
+                    for (JsonElement mEl : metaArr) {
+                        if (mEl == null || !mEl.isJsonObject()) {
+                            continue;
+                        }
+                        JsonObject mObj = mEl.getAsJsonObject();
+                        if (!mObj.has("col_name") || mObj.get("col_name").isJsonNull()) {
+                            continue;
+                        }
+                        String name = mObj.get("col_name").getAsString();
+                        if (name == null || name.isEmpty() || shouldSkip(name)) {
+                            continue;
+                        }
+
+                        int seq = 0;
+                        if (mObj.has("col_seq") && !mObj.get("col_seq").isJsonNull()) {
+                            try {
+                                seq = mObj.get("col_seq").getAsInt();
+                            } catch (Exception ignore) {
+                                seq = 0;
+                            }
+                        }
+                        metaList.add(new ColMeta(name, seq));
+                    }
+
+                    // 按 col_seq 排序（从 1 开始的自然顺序）
+                    metaList.sort((a, b) -> Integer.compare(a.seq, b.seq));
+
+                    for (ColMeta cm : metaList) {
+                        if (!columns.contains(cm.name)) {
+                            columns.add(cm.name);
+                        }
+                    }
                 }
-                rows.add(row);
+            }
+
+            // ========== 2) 兜底：没有 __col_meta 或解析失败时的旧逻辑 ==========
+            if (columns.isEmpty() && firstRow != null) {
+                // (a) 看根对象是否有 "columns" 数组
+                if (obj.has("columns") && obj.get("columns").isJsonArray()) {
+                    JsonArray colsArr = obj.getAsJsonArray("columns");
+                    for (JsonElement colEl : colsArr) {
+                        if (colEl == null || colEl.isJsonNull()) continue;
+                        String colName = colEl.getAsString();
+                        if (shouldSkip(colName)) continue;
+                        columns.add(colName);
+                    }
+                } else {
+                    // (b) 否则就按第一行 JSON 字段出现的顺序
+                    for (Map.Entry<String, JsonElement> entry : firstRow.entrySet()) {
+                        String key = entry.getKey();
+                        if (shouldSkip(key)) {
+                            continue;
+                        }
+                        columns.add(key);
+                    }
+                }
+            }
+
+            // ========== 3) 按确定好的列顺序，构造所有行的数据 ==========
+            if (!columns.isEmpty()) {
+                for (JsonElement el : data) {
+                    if (el == null || !el.isJsonObject()) {
+                        continue;
+                    }
+                    JsonObject rowObj = el.getAsJsonObject();
+                    List<String> row = new ArrayList<>(columns.size());
+                    for (String col : columns) {
+                        JsonElement value = rowObj.get(col);
+                        if (value == null || value.isJsonNull()) {
+                            row.add("");
+                        } else {
+                            row.add(value.getAsString());
+                        }
+                    }
+                    rows.add(row);
+                }
+            } else {
+                // Data 有内容但没拿到任何有效列的极端情况：
+                // 把整行 JSON 当成一列文本交给前端，至少不至于全空。
+                for (JsonElement el : data) {
+                    String text = (el == null || el.isJsonNull()) ? "" : el.toString();
+                    List<String> row = new ArrayList<>();
+                    row.add(text);
+                    rows.add(row);
+                }
+                columns.add("结果");
             }
         }
-        if (columns.isEmpty() && obj.has("msg")) {
+
+        // 如果没有任何列，但有 msg，就当成提示消息
+        if (columns.isEmpty() && obj.has("msg") && !obj.get("msg").isJsonNull()) {
             return messageResult(sql, obj.get("msg").getAsString());
         }
+
+        // 再兜个底：什么都没有，就给一条“无数据返回”的提示
+        if (columns.isEmpty()) {
+            return messageResult(sql, "无数据返回");
+        }
+
         return new SqlExecResult(sql, columns, rows, rowsCount);
     }
+
+
 
     private SqlExecResult messageResult(String sql, String message) {
         List<String> columns = new ArrayList<>();
