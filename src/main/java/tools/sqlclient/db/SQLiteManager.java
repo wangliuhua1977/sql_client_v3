@@ -33,6 +33,10 @@ public class SQLiteManager {
         return DriverManager.getConnection("jdbc:sqlite:" + dbPath.toAbsolutePath(), config.toProperties());
     }
 
+    public Path getDbPath() {
+        return dbPath;
+    }
+
     public void initSchema() {
         try (Connection conn = getConnection(); Statement st = conn.createStatement()) {
             if (dbPath.getParent() != null) {

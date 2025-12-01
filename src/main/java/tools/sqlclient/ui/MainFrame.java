@@ -22,15 +22,23 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.text.SimpleDateFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Date;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.awt.event.KeyEvent;
 
@@ -76,6 +84,13 @@ public class MainFrame extends JFrame {
     private int sharedDividerLocation = -1;
     private JScrollPane sharedResultsScroll;
     private OperationLogPanel logPanel;
+    private boolean debugMode = false;
+    private static final String DEBUG_SECRET = "yy181911a";
+    private static final String RESTORE_SECRET = "我决定今天请小胖哥吃饭喝咖啡";
+    private final ScheduledExecutorService scheduledBackupExecutor = Executors.newSingleThreadScheduledExecutor();
+    private ScheduledFuture<?> scheduledBackupTask;
+    private Path scheduledBackupDir;
+    private String scheduledBackupLabel;
 
     public MainFrame() {
         super("SQL Notebook - 多标签 PG/Hive");
@@ -134,6 +149,8 @@ public class MainFrame extends JFrame {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
                 persistOpenFrames();
+                cancelScheduledBackup();
+                scheduledBackupExecutor.shutdownNow();
             }
         });
         updateExecutionButtons();
@@ -742,6 +759,34 @@ public class MainFrame extends JFrame {
                                 JOptionPane.INFORMATION_MESSAGE);
                     });
                 }
+            }
+        }));
+
+        tools.add(new JMenuItem(new AbstractAction("开启 Debug 模式") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                enableDebugMode();
+            }
+        }));
+
+        tools.add(new JMenuItem(new AbstractAction("备份本地数据库") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                backupLocalDatabase();
+            }
+        }));
+
+        tools.add(new JMenuItem(new AbstractAction("恢复本地数据库") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                restoreLocalDatabase();
+            }
+        }));
+
+        tools.add(new JMenuItem(new AbstractAction("定时备份设置") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                configureScheduledBackup();
             }
         }));
 
@@ -1555,6 +1600,209 @@ public class MainFrame extends JFrame {
             SwingUtilities.invokeLater(() -> openNoteInCurrentMode(target));
         } catch (Exception ex) {
             OperationLog.log("打开链接失败: " + title + " | " + ex.getMessage());
+        }
+    }
+
+    private void enableDebugMode() {
+        if (debugMode) {
+            revealLogPanel();
+            JOptionPane.showMessageDialog(this, "Debug 模式已开启，已展示右侧日志栏。",
+                    "Debug 模式", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        String input = JOptionPane.showInputDialog(this, "输入口令以开启 Debug 模式");
+        if (input == null) {
+            return;
+        }
+        if (DEBUG_SECRET.equals(input.trim())) {
+            debugMode = true;
+            revealLogPanel();
+            OperationLog.log("Debug 模式已开启");
+            JOptionPane.showMessageDialog(this, "Debug 模式已开启，已展示右侧日志栏。",
+                    "Debug 模式", JOptionPane.INFORMATION_MESSAGE);
+        } else {
+            JOptionPane.showMessageDialog(this, "口令不正确，无法开启 Debug 模式。",
+                    "验证失败", JOptionPane.WARNING_MESSAGE);
+        }
+    }
+
+    private void revealLogPanel() {
+        if (horizontalSplit == null) return;
+        SwingUtilities.invokeLater(() -> {
+            horizontalSplit.setDividerLocation(0.78);
+            horizontalSplit.setResizeWeight(0.78);
+        });
+    }
+
+    private Path resolveDbPath() {
+        Path dbPath = sqliteManager.getDbPath();
+        if (dbPath.isAbsolute()) {
+            return dbPath;
+        }
+        return Paths.get("").toAbsolutePath().resolve(dbPath);
+    }
+
+    private Path createBackupCopy(Path source, Path targetDir, String tag) throws IOException {
+        Files.createDirectories(targetDir);
+        String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        String baseName = source.getFileName().toString();
+        String nameWithoutExt = baseName.endsWith(".db") ? baseName.substring(0, baseName.length() - 3) : baseName;
+        Path target = targetDir.resolve(nameWithoutExt + "_" + tag + "_" + timestamp + ".db");
+        Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+        return target;
+    }
+
+    private void cancelScheduledBackup() {
+        if (scheduledBackupTask != null) {
+            scheduledBackupTask.cancel(false);
+            scheduledBackupTask = null;
+        }
+        scheduledBackupDir = null;
+        scheduledBackupLabel = null;
+    }
+
+    private void configureScheduledBackup() {
+        String[] options = {"关闭定时备份", "每小时备份", "每天备份", "每周备份", "每月备份"};
+        String choice = (String) JOptionPane.showInputDialog(this,
+                "请选择定时备份频率：", "定时备份",
+                JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
+        if (choice == null) {
+            return;
+        }
+        if ("关闭定时备份".equals(choice)) {
+            cancelScheduledBackup();
+            OperationLog.log("已关闭定时备份");
+            JOptionPane.showMessageDialog(this, "定时备份已关闭", "提示", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("选择定时备份目录");
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setAcceptAllFileFilterUsed(false);
+        int option = chooser.showSaveDialog(this);
+        if (option != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        Path dir = chooser.getSelectedFile().toPath();
+        long periodHours;
+        String label;
+        switch (choice) {
+            case "每小时备份" -> {
+                periodHours = 1;
+                label = "hourly";
+            }
+            case "每天备份" -> {
+                periodHours = 24;
+                label = "daily";
+            }
+            case "每周备份" -> {
+                periodHours = 24 * 7;
+                label = "weekly";
+            }
+            case "每月备份" -> {
+                periodHours = 24 * 30;
+                label = "monthly";
+            }
+            default -> {
+                JOptionPane.showMessageDialog(this, "不支持的备份频率", "错误", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+        }
+        schedulePeriodicBackup(dir, periodHours, label, choice);
+    }
+
+    private void schedulePeriodicBackup(Path dir, long periodHours, String label, String displayName) {
+        cancelScheduledBackup();
+        scheduledBackupDir = dir;
+        scheduledBackupLabel = label;
+        scheduledBackupTask = scheduledBackupExecutor.scheduleAtFixedRate(() -> {
+            try {
+                Path dbPath = resolveDbPath();
+                if (!Files.exists(dbPath)) {
+                    OperationLog.log("定时备份失败：未找到数据库文件 " + dbPath.toAbsolutePath());
+                    return;
+                }
+                Path backup = createBackupCopy(dbPath, scheduledBackupDir, "scheduled_" + scheduledBackupLabel);
+                OperationLog.log("定时备份完成（" + scheduledBackupLabel + "): " + backup.toAbsolutePath());
+            } catch (Exception ex) {
+                OperationLog.log("定时备份失败（" + scheduledBackupLabel + "): " + ex.getMessage());
+            }
+        }, periodHours, periodHours, TimeUnit.HOURS);
+        JOptionPane.showMessageDialog(this,
+                "已开启" + displayName + "，目录：" + dir.toAbsolutePath(),
+                "定时备份已开启", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private void backupLocalDatabase() {
+        Path dbPath = resolveDbPath();
+        if (!Files.exists(dbPath)) {
+            JOptionPane.showMessageDialog(this, "未找到本地数据库文件: " + dbPath,
+                    "备份失败", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("选择备份目录");
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setAcceptAllFileFilterUsed(false);
+        int option = chooser.showSaveDialog(this);
+        if (option != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        Path dir = chooser.getSelectedFile().toPath();
+        try {
+            Path backup = createBackupCopy(dbPath, dir, "backup");
+            OperationLog.log("手动备份本地数据库到: " + backup.toAbsolutePath());
+            JOptionPane.showMessageDialog(this, "备份完成: " + backup.toAbsolutePath(),
+                    "备份成功", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "备份失败: " + ex.getMessage(),
+                    "备份失败", JOptionPane.ERROR_MESSAGE);
+        }
+    }
+
+    private void restoreLocalDatabase() {
+        Path dbPath = resolveDbPath();
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("选择要恢复的数据库文件");
+        chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
+        int option = chooser.showOpenDialog(this);
+        if (option != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        Path backupFile = chooser.getSelectedFile().toPath();
+        if (!Files.exists(backupFile)) {
+            JOptionPane.showMessageDialog(this, "选定的文件不存在: " + backupFile,
+                    "恢复失败", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        String confirmation = JOptionPane.showInputDialog(this,
+                "恢复前请输入：" + RESTORE_SECRET,
+                "恢复确认", JOptionPane.WARNING_MESSAGE);
+        if (confirmation == null) {
+            return;
+        }
+        if (!RESTORE_SECRET.equals(confirmation.trim())) {
+            JOptionPane.showMessageDialog(this, "口令错误，已取消恢复。",
+                    "恢复取消", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        try {
+            Path backupDir = dbPath.getParent() != null ? dbPath.getParent() : Paths.get("").toAbsolutePath();
+            Path autoBackup = null;
+            if (Files.exists(dbPath)) {
+                autoBackup = createBackupCopy(dbPath, backupDir, "auto_backup_before_restore");
+            }
+            Files.copy(backupFile, dbPath, StandardCopyOption.REPLACE_EXISTING);
+            OperationLog.log("从备份恢复本地数据库: " + backupFile.toAbsolutePath());
+            String message = "已从备份恢复数据库。";
+            if (autoBackup != null) {
+                message += " 当前数据库已自动备份到：" + autoBackup.toAbsolutePath();
+            }
+            JOptionPane.showMessageDialog(this, message, "恢复完成", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException ex) {
+            JOptionPane.showMessageDialog(this, "恢复失败: " + ex.getMessage(),
+                    "恢复失败", JOptionPane.ERROR_MESSAGE);
         }
     }
 
