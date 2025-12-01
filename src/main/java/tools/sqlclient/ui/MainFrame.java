@@ -841,7 +841,13 @@ public class MainFrame extends JFrame {
         horizontalSplit.setDividerSize(8);
         horizontalSplit.setContinuousLayout(true);
         horizontalSplit.setOneTouchExpandable(true);
-        add(horizontalSplit, BorderLayout.CENTER);
+        // 原来：右侧带日志的水平拆分面板，加到主窗体
+      add(horizontalSplit, BorderLayout.CENTER);
+
+// 改成：只显示主编辑区 + 下方结果面板，不把右侧日志加进来
+      //  add(mainSplitPane, BorderLayout.CENTER);
+
+
         SwingUtilities.invokeLater(this::collapseSharedResults);
         SwingUtilities.invokeLater(() -> horizontalSplit.setDividerLocation(1.0));
         centerLayout.show(centerPanel, "window");
