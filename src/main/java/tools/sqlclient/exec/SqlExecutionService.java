@@ -173,7 +173,29 @@ public class SqlExecutionService {
             }
         }
 
-        JsonArray data = extractDataArray(obj);
+        JsonElement dataElement = findDataElement(obj);
+        JsonObject dataContainer = dataElement != null && dataElement.isJsonObject()
+                ? dataElement.getAsJsonObject()
+                : null;
+
+        JsonArray data = new JsonArray();
+        if (dataElement != null) {
+            if (dataElement.isJsonArray()) {
+                data = dataElement.getAsJsonArray();
+            } else if (dataContainer != null) {
+                // 常见格式：{"msg":"Success", "data": {"columns": [...], "rows": [...]}}
+                JsonArray nested = extractDataArray(dataContainer);
+                data = nested != null ? nested : new JsonArray();
+
+                if (rowsCount == 0 && dataContainer.has("rows_count") && !dataContainer.get("rows_count").isJsonNull()) {
+                    try {
+                        rowsCount = Integer.parseInt(dataContainer.get("rows_count").getAsString());
+                    } catch (NumberFormatException ignore) {
+                        rowsCount = 0;
+                    }
+                }
+            }
+        }
         List<String> columns = new ArrayList<>();
         List<List<String>> rows = new ArrayList<>();
 
@@ -255,8 +277,14 @@ public class SqlExecutionService {
             // ========== 2) 兜底：没有 __col_meta 或解析失败时的旧逻辑 ==========
             if (columns.isEmpty() && firstRow != null) {
                 // (a) 看根对象是否有 "columns" 数组
+                JsonArray colsArr = null;
                 if (obj.has("columns") && obj.get("columns").isJsonArray()) {
-                    JsonArray colsArr = obj.getAsJsonArray("columns");
+                    colsArr = obj.getAsJsonArray("columns");
+                } else if (dataContainer != null && dataContainer.has("columns") && dataContainer.get("columns").isJsonArray()) {
+                    colsArr = dataContainer.getAsJsonArray("columns");
+                }
+
+                if (colsArr != null) {
                     for (JsonElement colEl : colsArr) {
                         if (colEl == null || colEl.isJsonNull()) continue;
                         String colName = colEl.getAsString();
@@ -333,6 +361,16 @@ public class SqlExecutionService {
         }
         String t = body.strip();
         return t.length() > 240 ? t.substring(0, 240) + "..." : t;
+    }
+
+    private JsonElement findDataElement(JsonObject obj) {
+        if (obj == null) return null;
+        for (String key : List.of("Data", "data", "rows", "list", "items", "result")) {
+            if (obj.has(key) && !obj.get(key).isJsonNull()) {
+                return obj.get(key);
+            }
+        }
+        return null;
     }
 
     private JsonArray extractDataArray(JsonObject obj) {
