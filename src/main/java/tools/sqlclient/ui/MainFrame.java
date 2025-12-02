@@ -1,4 +1,5 @@
 package tools.sqlclient.ui;
+
 import tools.sqlclient.db.AppStateRepository;
 import tools.sqlclient.db.EditorStyleRepository;
 import tools.sqlclient.db.NoteRepository;
@@ -22,6 +23,7 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.event.KeyEvent;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -29,9 +31,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.text.SimpleDateFormat;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
-import java.util.Date;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -40,7 +42,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.awt.event.KeyEvent;
 
 /**
  * 主窗口，符合 Windows 11 扁平化风格，全部中文。
@@ -87,13 +88,17 @@ public class MainFrame extends JFrame {
     private boolean debugMode = false;
     private static final String DEBUG_SECRET = "yy181911a";
     private static final String RESTORE_SECRET = "我决定今天请小胖哥吃饭喝咖啡";
+    // 记住上一次备份/恢复使用的目录
+    private static final String BACKUP_DIR_STATE_KEY = "last_backup_dir";
     private final ScheduledExecutorService scheduledBackupExecutor = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> scheduledBackupTask;
     private Path scheduledBackupDir;
     private String scheduledBackupLabel;
+    private Path lastBackupDir;
 
     public MainFrame() {
-        super("SQL Notebook - 多标签 PG/Hive");
+        // 需求 2：修改主窗体标题
+        super("Supper SQL Note");
         setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
         setSize(1200, 800);
         setLocationRelativeTo(null);
@@ -109,9 +114,14 @@ public class MainFrame extends JFrame {
         loadNoteIcons();
         // 加载主窗体图标：resources 目录下的 PNG，不存在则回退默认图标
         loadMainWindowIcon();
+
+        // 加载编辑器样式
         var styles = styleRepository.listAll();
-        String styleName = appStateRepository.loadCurrentStyleName(styles.isEmpty() ? "默认" : styles.get(0).getName());
-        this.currentStyle = styles.stream().filter(s -> s.getName().equals(styleName)).findFirst()
+        String styleName = appStateRepository.loadCurrentStyleName(
+                styles.isEmpty() ? "默认" : styles.get(0).getName());
+        this.currentStyle = styles.stream()
+                .filter(s -> s.getName().equals(styleName))
+                .findFirst()
                 .orElseGet(() -> {
                     if (!styles.isEmpty()) {
                         return styles.get(0);
@@ -137,6 +147,19 @@ public class MainFrame extends JFrame {
                     );
                 });
         this.convertFullWidth = appStateRepository.loadFullWidthOption(true);
+
+        // 需求 1：加载上一次备份目录
+        String lastDir = appStateRepository.loadStringOption(BACKUP_DIR_STATE_KEY, "");
+        if (lastDir != null && !lastDir.isBlank()) {
+            try {
+                Path p = Paths.get(lastDir).toAbsolutePath().normalize();
+                if (Files.isDirectory(p)) {
+                    lastBackupDir = p;
+                }
+            } catch (Exception ignored) {
+            }
+        }
+
         buildMenu();
         buildToolbar();
         buildContent();
@@ -451,7 +474,7 @@ public class MainFrame extends JFrame {
                     for (int i = 0; i < 6; i++) {
                         double angle = Math.toRadians(60 * i - 30);
                         double px = cx + radius * Math.cos(angle);
-                        double py = cy + radius * Math.sin(angle);
+                        double py = cy * 1.0 + radius * Math.sin(angle);
                         if (i == 0) {
                             hex.moveTo(px, py);
                         } else {
@@ -877,7 +900,8 @@ public class MainFrame extends JFrame {
             if (mainSplitPane.getHeight() <= 0) return;
             int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
             int minBottom = sharedResultsWrapper.getMinimumSize().height;
-            int location = Math.max(minTop, Math.min(mainSplitPane.getDividerLocation(), mainSplitPane.getHeight() - minBottom));
+            int location = Math.max(minTop, Math.min(mainSplitPane.getDividerLocation(),
+                    mainSplitPane.getHeight() - minBottom));
             sharedDividerLocation = location;
         });
         logPanel = new OperationLogPanel();
@@ -886,12 +910,8 @@ public class MainFrame extends JFrame {
         horizontalSplit.setDividerSize(8);
         horizontalSplit.setContinuousLayout(true);
         horizontalSplit.setOneTouchExpandable(true);
-        // 原来：右侧带日志的水平拆分面板，加到主窗体
-      add(horizontalSplit, BorderLayout.CENTER);
-
-// 改成：只显示主编辑区 + 下方结果面板，不把右侧日志加进来
-      //  add(mainSplitPane, BorderLayout.CENTER);
-
+        // 默认右侧日志整体加入主界面，Debug 模式再打开
+        add(horizontalSplit, BorderLayout.CENTER);
 
         SwingUtilities.invokeLater(this::collapseSharedResults);
         SwingUtilities.invokeLater(() -> horizontalSplit.setDividerLocation(1.0));
@@ -912,8 +932,8 @@ public class MainFrame extends JFrame {
 
     private void buildStatusBar() {
         JPanel status = new JPanel(new BorderLayout());
-        status.setBorder(new EmptyBorder(4,8,4,8));
-        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10,0));
+        status.setBorder(new EmptyBorder(4, 8, 4, 8));
+        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
         left.add(statusLabel);
         left.add(autosaveLabel);
         left.add(taskLabel);
@@ -948,10 +968,18 @@ public class MainFrame extends JFrame {
 
     private EditorTabPanel getOrCreatePanel(Note note) {
         return panelCache.computeIfAbsent(note.getId(), id -> {
-            EditorTabPanel p = new EditorTabPanel(noteRepository, metadataService,
-                    this::updateAutosaveTime, this::updateTaskCount,
-                    newTitle -> updateTitleForPanel(newTitle, id), note, convertFullWidth, currentStyle, this::onPanelFocused,
-                    this::openNoteByTitle);
+            EditorTabPanel p = new EditorTabPanel(
+                    noteRepository,
+                    metadataService,
+                    this::updateAutosaveTime,
+                    this::updateTaskCount,
+                    newTitle -> updateTitleForPanel(newTitle, id),
+                    note,
+                    convertFullWidth,
+                    currentStyle,
+                    this::onPanelFocused,
+                    this::openNoteByTitle
+            );
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
             return p;
@@ -979,7 +1007,8 @@ public class MainFrame extends JFrame {
                     frame.setIcon(false);
                     frame.setSelected(true);
                     frame.toFront();
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                }
                 return true;
             }
         }
@@ -1005,14 +1034,16 @@ public class MainFrame extends JFrame {
         // 为子窗体设置持久化的随机绘制图标
         frame.setFrameIcon(getOrCreateNoteIcon(panel.getNote()));
         frame.setSize(600, 400);
-        frame.setLocation(20 * desktopPane.getAllFrames().length, 20 * desktopPane.getAllFrames().length);
+        frame.setLocation(20 * desktopPane.getAllFrames().length,
+                20 * desktopPane.getAllFrames().length);
         frame.setVisible(true);
         frame.add(panel, BorderLayout.CENTER);
         installRenameHandler(frame, panel);
         desktopPane.add(frame);
         try {
             frame.setSelected(true);
-        } catch (java.beans.PropertyVetoException ignored) { }
+        } catch (java.beans.PropertyVetoException ignored) {
+        }
         persistOpenFrames();
         onPanelFocused(panel);
         updateExecutionButtons();
@@ -1046,7 +1077,8 @@ public class MainFrame extends JFrame {
                 @Override
                 public void mousePressed(MouseEvent e) {
                     if (SwingUtilities.isRightMouseButton(e)) {
-                        String newTitle = JOptionPane.showInputDialog(MainFrame.this, "重命名窗口", frame.getTitle());
+                        String newTitle = JOptionPane.showInputDialog(
+                                MainFrame.this, "重命名窗口", frame.getTitle());
                         if (newTitle != null && !newTitle.trim().isEmpty()) {
                             panel.rename(newTitle.trim());
                             frame.setTitle(newTitle.trim());
@@ -1098,7 +1130,10 @@ public class MainFrame extends JFrame {
         if (windowMode) {
             for (JInternalFrame frame : desktopPane.getAllFrames()) {
                 if (extractPanelFromFrame(frame) == panel) {
-                    try { frame.setSelected(true); } catch (java.beans.PropertyVetoException ignored) {}
+                    try {
+                        frame.setSelected(true);
+                    } catch (java.beans.PropertyVetoException ignored) {
+                    }
                     frame.toFront();
                     break;
                 }
@@ -1179,33 +1214,29 @@ public class MainFrame extends JFrame {
         OperationLog.log("开始执行 SQL，共 " + statements.size() + " 条 | " + panel.getNote().getTitle());
 
         // 按笔记 ID 记录运行中的 Future
-        // 按笔记 ID 记录运行中的 Future
         runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
         List<CompletableFuture<?>> execList = runningExecutions.get(noteId);
 
-
-        // 关键：构造一个“串行链”
+        // 串行执行每一条 SQL
         java.util.concurrent.CompletableFuture<Void> chain =
                 java.util.concurrent.CompletableFuture.completedFuture(null);
 
         for (String stmt : statements) {
             final String sqlStmt = stmt;
             chain = chain.thenCompose(v -> {
-                // 每次只在上一条执行完之后才真正发请求
-                java.util.concurrent.CompletableFuture<Void> future = sqlExecutionService.execute(
+                CompletableFuture<Void> future = sqlExecutionService.execute(
                         sqlStmt,
-                        res -> javax.swing.SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res)),
-                        ex  -> javax.swing.SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage()))
+                        res -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res)),
+                        ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage()))
                 );
 
                 execList.add(future);
 
-                future.whenComplete((vv, ex) -> javax.swing.SwingUtilities.invokeLater(() -> {
-                    java.util.List<java.util.concurrent.CompletableFuture<?>> list = runningExecutions.get(noteId);
+                future.whenComplete((vv, ex) -> SwingUtilities.invokeLater(() -> {
+                    java.util.List<CompletableFuture<?>> list = runningExecutions.get(noteId);
                     if (list != null) {
                         list.remove(future);
                         if (list.isEmpty()) {
-                            // 所有语句都执行完（或失败完）之后，才真正收尾
                             runningExecutions.remove(noteId);
                             panel.setExecutionRunning(false);
                             statusLabel.setText("就绪");
@@ -1214,14 +1245,12 @@ public class MainFrame extends JFrame {
                     updateExecutionButtons();
                 }));
 
-                // 返回这一条的 Future，使后续 thenCompose 串在它后面
                 return future;
             });
         }
 
         updateExecutionButtons();
     }
-
 
     private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result) {
         int idx = nextResultIndex(noteId);
@@ -1285,7 +1314,9 @@ public class MainFrame extends JFrame {
         int height = mainSplitPane.getHeight();
         int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
         int minBottom = sharedResultsWrapper.getMinimumSize().height;
-        int collapsePos = sharedResultsWrapper.isVisible() ? Math.max(minTop, height - minBottom) : height;
+        int collapsePos = sharedResultsWrapper.isVisible()
+                ? Math.max(minTop, height - minBottom)
+                : height;
         SwingUtilities.invokeLater(() -> mainSplitPane.setDividerLocation(collapsePos));
     }
 
@@ -1340,7 +1371,8 @@ public class MainFrame extends JFrame {
             @Override
             public void paintIcon(Component c, Graphics g, int x, int y) {
                 Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                        RenderingHints.VALUE_ANTIALIAS_ON);
                 int[] xs = {x, x, x + size};
                 int[] ys = {y, y + size, y + size / 2};
                 Color color = c.isEnabled() ? new Color(46, 170, 220) : Color.GRAY;
@@ -1350,10 +1382,14 @@ public class MainFrame extends JFrame {
             }
 
             @Override
-            public int getIconWidth() { return size + 2; }
+            public int getIconWidth() {
+                return size + 2;
+            }
 
             @Override
-            public int getIconHeight() { return size + 2; }
+            public int getIconHeight() {
+                return size + 2;
+            }
         };
     }
 
@@ -1371,10 +1407,14 @@ public class MainFrame extends JFrame {
             }
 
             @Override
-            public int getIconWidth() { return size + 2; }
+            public int getIconWidth() {
+                return size + 2;
+            }
 
             @Override
-            public int getIconHeight() { return size + 2; }
+            public int getIconHeight() {
+                return size + 2;
+            }
         };
     }
 
@@ -1402,10 +1442,12 @@ public class MainFrame extends JFrame {
     private void refreshToolbarButtonStyles() {
         Color active = new Color(46, 170, 220);
         if (executeButton != null) {
-            executeButton.setBorder(new javax.swing.border.LineBorder(executeButton.isEnabled() ? active : Color.BLACK));
+            executeButton.setBorder(new javax.swing.border.LineBorder(
+                    executeButton.isEnabled() ? active : Color.BLACK));
         }
         if (stopButton != null) {
-            stopButton.setBorder(new javax.swing.border.LineBorder(stopButton.isEnabled() ? active : Color.BLACK));
+            stopButton.setBorder(new javax.swing.border.LineBorder(
+                    stopButton.isEnabled() ? active : Color.BLACK));
         }
     }
 
@@ -1424,7 +1466,9 @@ public class MainFrame extends JFrame {
     private void importNoteFromFile() {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("导入本地笔记 (*.sql, *.md)");
-        chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("SQL/Markdown", "sql", "md", "txt"));
+        chooser.setFileFilter(
+                new javax.swing.filechooser.FileNameExtensionFilter(
+                        "SQL/Markdown", "sql", "md", "txt"));
         int result = chooser.showOpenDialog(this);
         if (result == JFileChooser.APPROVE_OPTION) {
             Path file = chooser.getSelectedFile().toPath();
@@ -1454,8 +1498,13 @@ public class MainFrame extends JFrame {
     }
 
     private void openEditorSettings() {
-        SqlEditorSettingsDialog dialog = new SqlEditorSettingsDialog(this, convertFullWidth, styleRepository,
-                styleRepository.listAll(), currentStyle);
+        SqlEditorSettingsDialog dialog = new SqlEditorSettingsDialog(
+                this,
+                convertFullWidth,
+                styleRepository,
+                styleRepository.listAll(),
+                currentStyle
+        );
         dialog.setVisible(true);
         if (dialog.isConfirmed()) {
             convertFullWidth = dialog.isConvertFullWidthEnabled();
@@ -1537,7 +1586,8 @@ public class MainFrame extends JFrame {
             int c = i % cols;
             try {
                 frames[i].setMaximum(false);
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
             frames[i].setBounds(c * w, r * h, w, h);
         }
     }
@@ -1551,13 +1601,16 @@ public class MainFrame extends JFrame {
     }
 
     private void installGlobalShortcuts() {
-        KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(e -> {
-            if (e.getID() == KeyEvent.KEY_PRESSED && e.isAltDown() && e.getKeyCode() == KeyEvent.VK_E) {
-                toggleSuggestionMode();
-                return true;
-            }
-            return false;
-        });
+        KeyboardFocusManager.getCurrentKeyboardFocusManager()
+                .addKeyEventDispatcher(e -> {
+                    if (e.getID() == KeyEvent.KEY_PRESSED
+                            && e.isAltDown()
+                            && e.getKeyCode() == KeyEvent.VK_E) {
+                        toggleSuggestionMode();
+                        return true;
+                    }
+                    return false;
+                });
     }
 
     private void toggleSuggestionMode() {
@@ -1591,7 +1644,8 @@ public class MainFrame extends JFrame {
     }
 
     private boolean hasRunningExecutions() {
-        return runningExecutions.values().stream().anyMatch(list -> list != null && !list.isEmpty());
+        return runningExecutions.values().stream()
+                .anyMatch(list -> list != null && !list.isEmpty());
     }
 
     private void openNoteByTitle(String title) {
@@ -1606,8 +1660,10 @@ public class MainFrame extends JFrame {
     private void enableDebugMode() {
         if (debugMode) {
             revealLogPanel();
-            JOptionPane.showMessageDialog(this, "Debug 模式已开启，已展示右侧日志栏。",
-                    "Debug 模式", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "Debug 模式已开启，已展示右侧日志栏。",
+                    "Debug 模式",
+                    JOptionPane.INFORMATION_MESSAGE);
             return;
         }
         String input = JOptionPane.showInputDialog(this, "输入口令以开启 Debug 模式");
@@ -1618,11 +1674,15 @@ public class MainFrame extends JFrame {
             debugMode = true;
             revealLogPanel();
             OperationLog.log("Debug 模式已开启");
-            JOptionPane.showMessageDialog(this, "Debug 模式已开启，已展示右侧日志栏。",
-                    "Debug 模式", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "Debug 模式已开启，已展示右侧日志栏。",
+                    "Debug 模式",
+                    JOptionPane.INFORMATION_MESSAGE);
         } else {
-            JOptionPane.showMessageDialog(this, "口令不正确，无法开启 Debug 模式。",
-                    "验证失败", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "口令不正确，无法开启 Debug 模式。",
+                    "验证失败",
+                    JOptionPane.WARNING_MESSAGE);
         }
     }
 
@@ -1642,11 +1702,25 @@ public class MainFrame extends JFrame {
         return Paths.get("").toAbsolutePath().resolve(dbPath);
     }
 
+    // 记录并持久化最新备份目录
+    private void updateLastBackupDir(Path dir) {
+        if (dir == null) return;
+        try {
+            Path abs = dir.toAbsolutePath().normalize();
+            lastBackupDir = abs;
+            appStateRepository.saveStringOption(BACKUP_DIR_STATE_KEY, abs.toString());
+        } catch (Exception ex) {
+            OperationLog.log("保存备份目录失败: " + ex.getMessage());
+        }
+    }
+
     private Path createBackupCopy(Path source, Path targetDir, String tag) throws IOException {
         Files.createDirectories(targetDir);
         String timestamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
         String baseName = source.getFileName().toString();
-        String nameWithoutExt = baseName.endsWith(".db") ? baseName.substring(0, baseName.length() - 3) : baseName;
+        String nameWithoutExt = baseName.endsWith(".db")
+                ? baseName.substring(0, baseName.length() - 3)
+                : baseName;
         Path target = targetDir.resolve(nameWithoutExt + "_" + tag + "_" + timestamp + ".db");
         Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
         return target;
@@ -1663,16 +1737,24 @@ public class MainFrame extends JFrame {
 
     private void configureScheduledBackup() {
         String[] options = {"关闭定时备份", "每小时备份", "每天备份", "每周备份", "每月备份"};
-        String choice = (String) JOptionPane.showInputDialog(this,
-                "请选择定时备份频率：", "定时备份",
-                JOptionPane.QUESTION_MESSAGE, null, options, options[0]);
+        String choice = (String) JOptionPane.showInputDialog(
+                this,
+                "请选择定时备份频率：",
+                "定时备份",
+                JOptionPane.QUESTION_MESSAGE,
+                null,
+                options,
+                options[0]);
         if (choice == null) {
             return;
         }
         if ("关闭定时备份".equals(choice)) {
             cancelScheduledBackup();
             OperationLog.log("已关闭定时备份");
-            JOptionPane.showMessageDialog(this, "定时备份已关闭", "提示", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "定时备份已关闭",
+                    "提示",
+                    JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
@@ -1680,11 +1762,18 @@ public class MainFrame extends JFrame {
         chooser.setDialogTitle("选择定时备份目录");
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         chooser.setAcceptAllFileFilterUsed(false);
+        // 记住最后一次备份目录
+        if (lastBackupDir != null && Files.isDirectory(lastBackupDir)) {
+            chooser.setCurrentDirectory(lastBackupDir.toFile());
+            chooser.setSelectedFile(lastBackupDir.toFile());
+        }
         int option = chooser.showSaveDialog(this);
         if (option != JFileChooser.APPROVE_OPTION) {
             return;
         }
         Path dir = chooser.getSelectedFile().toPath();
+        updateLastBackupDir(dir);
+
         long periodHours;
         String label;
         switch (choice) {
@@ -1705,7 +1794,10 @@ public class MainFrame extends JFrame {
                 label = "monthly";
             }
             default -> {
-                JOptionPane.showMessageDialog(this, "不支持的备份频率", "错误", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(this,
+                        "不支持的备份频率",
+                        "错误",
+                        JOptionPane.ERROR_MESSAGE);
                 return;
             }
         }
@@ -1723,41 +1815,56 @@ public class MainFrame extends JFrame {
                     OperationLog.log("定时备份失败：未找到数据库文件 " + dbPath.toAbsolutePath());
                     return;
                 }
-                Path backup = createBackupCopy(dbPath, scheduledBackupDir, "scheduled_" + scheduledBackupLabel);
-                OperationLog.log("定时备份完成（" + scheduledBackupLabel + "): " + backup.toAbsolutePath());
+                Path backup = createBackupCopy(
+                        dbPath, scheduledBackupDir, "scheduled_" + scheduledBackupLabel);
+                OperationLog.log("定时备份完成（" + scheduledBackupLabel + "): "
+                        + backup.toAbsolutePath());
             } catch (Exception ex) {
                 OperationLog.log("定时备份失败（" + scheduledBackupLabel + "): " + ex.getMessage());
             }
         }, periodHours, periodHours, TimeUnit.HOURS);
         JOptionPane.showMessageDialog(this,
                 "已开启" + displayName + "，目录：" + dir.toAbsolutePath(),
-                "定时备份已开启", JOptionPane.INFORMATION_MESSAGE);
+                "定时备份已开启",
+                JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void backupLocalDatabase() {
         Path dbPath = resolveDbPath();
         if (!Files.exists(dbPath)) {
-            JOptionPane.showMessageDialog(this, "未找到本地数据库文件: " + dbPath,
-                    "备份失败", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "未找到本地数据库文件: " + dbPath,
+                    "备份失败",
+                    JOptionPane.ERROR_MESSAGE);
             return;
         }
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("选择备份目录");
         chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         chooser.setAcceptAllFileFilterUsed(false);
+        // 使用上一次备份目录作为默认目录
+        if (lastBackupDir != null && Files.isDirectory(lastBackupDir)) {
+            chooser.setCurrentDirectory(lastBackupDir.toFile());
+            chooser.setSelectedFile(lastBackupDir.toFile());
+        }
         int option = chooser.showSaveDialog(this);
         if (option != JFileChooser.APPROVE_OPTION) {
             return;
         }
         Path dir = chooser.getSelectedFile().toPath();
+        updateLastBackupDir(dir);
         try {
             Path backup = createBackupCopy(dbPath, dir, "backup");
             OperationLog.log("手动备份本地数据库到: " + backup.toAbsolutePath());
-            JOptionPane.showMessageDialog(this, "备份完成: " + backup.toAbsolutePath(),
-                    "备份成功", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "备份完成: " + backup.toAbsolutePath(),
+                    "备份成功",
+                    JOptionPane.INFORMATION_MESSAGE);
         } catch (IOException ex) {
-            JOptionPane.showMessageDialog(this, "备份失败: " + ex.getMessage(),
-                    "备份失败", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "备份失败: " + ex.getMessage(),
+                    "备份失败",
+                    JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -1766,29 +1873,46 @@ public class MainFrame extends JFrame {
         JFileChooser chooser = new JFileChooser();
         chooser.setDialogTitle("选择要恢复的数据库文件");
         chooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
+        // 使用上一次备份目录作为默认目录
+        if (lastBackupDir != null && Files.isDirectory(lastBackupDir)) {
+            chooser.setCurrentDirectory(lastBackupDir.toFile());
+        }
         int option = chooser.showOpenDialog(this);
         if (option != JFileChooser.APPROVE_OPTION) {
             return;
         }
         Path backupFile = chooser.getSelectedFile().toPath();
         if (!Files.exists(backupFile)) {
-            JOptionPane.showMessageDialog(this, "选定的文件不存在: " + backupFile,
-                    "恢复失败", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "选定的文件不存在: " + backupFile,
+                    "恢复失败",
+                    JOptionPane.ERROR_MESSAGE);
             return;
         }
-        String confirmation = JOptionPane.showInputDialog(this,
+        // 更新记忆目录为备份文件所在目录
+        if (backupFile.getParent() != null) {
+            updateLastBackupDir(backupFile.getParent());
+        }
+
+        String confirmation = JOptionPane.showInputDialog(
+                this,
                 "恢复前请输入：" + RESTORE_SECRET,
-                "恢复确认", JOptionPane.WARNING_MESSAGE);
+                "恢复确认",
+                JOptionPane.WARNING_MESSAGE);
         if (confirmation == null) {
             return;
         }
         if (!RESTORE_SECRET.equals(confirmation.trim())) {
-            JOptionPane.showMessageDialog(this, "口令错误，已取消恢复。",
-                    "恢复取消", JOptionPane.WARNING_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "口令错误，已取消恢复。",
+                    "恢复取消",
+                    JOptionPane.WARNING_MESSAGE);
             return;
         }
         try {
-            Path backupDir = dbPath.getParent() != null ? dbPath.getParent() : Paths.get("").toAbsolutePath();
+            Path backupDir = dbPath.getParent() != null
+                    ? dbPath.getParent()
+                    : Paths.get("").toAbsolutePath();
             Path autoBackup = null;
             if (Files.exists(dbPath)) {
                 autoBackup = createBackupCopy(dbPath, backupDir, "auto_backup_before_restore");
@@ -1799,10 +1923,15 @@ public class MainFrame extends JFrame {
             if (autoBackup != null) {
                 message += " 当前数据库已自动备份到：" + autoBackup.toAbsolutePath();
             }
-            JOptionPane.showMessageDialog(this, message, "恢复完成", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    message,
+                    "恢复完成",
+                    JOptionPane.INFORMATION_MESSAGE);
         } catch (IOException ex) {
-            JOptionPane.showMessageDialog(this, "恢复失败: " + ex.getMessage(),
-                    "恢复失败", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this,
+                    "恢复失败: " + ex.getMessage(),
+                    "恢复失败",
+                    JOptionPane.ERROR_MESSAGE);
         }
     }
 
@@ -1833,7 +1962,8 @@ public class MainFrame extends JFrame {
         area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
         JScrollPane scroll = new JScrollPane(area);
         scroll.setPreferredSize(new Dimension(680, 420));
-        JOptionPane.showMessageDialog(this, scroll, "使用说明", JOptionPane.INFORMATION_MESSAGE);
+        JOptionPane.showMessageDialog(this, scroll, "使用说明",
+                JOptionPane.INFORMATION_MESSAGE);
     }
 
     private void switchToPanelMode() {
@@ -1843,7 +1973,8 @@ public class MainFrame extends JFrame {
         panelModeItem.setSelected(true);
         OperationLog.log("切换到面板模式");
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
-            if (frame.getContentPane().getComponentCount() > 0 && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
+            if (frame.getContentPane().getComponentCount() > 0
+                    && frame.getContentPane().getComponent(0) instanceof EditorTabPanel panel) {
                 addTab(panel);
             }
             frame.dispose();
@@ -1871,7 +2002,8 @@ public class MainFrame extends JFrame {
         int offset = 0;
         for (EditorTabPanel panel : panels) {
             detachFromParent(panel);
-            JInternalFrame frame = new JInternalFrame(panel.getNote().getTitle(), true, true, true, true);
+            JInternalFrame frame = new JInternalFrame(
+                    panel.getNote().getTitle(), true, true, true, true);
             // 独立窗口模式下，同样为子窗体设置持久化的随机绘制图标
             frame.setFrameIcon(getOrCreateNoteIcon(panel.getNote()));
             frame.setSize(600, 400);
@@ -1881,7 +2013,10 @@ public class MainFrame extends JFrame {
             frame.add(panel, BorderLayout.CENTER);
             installRenameHandler(frame, panel);
             desktopPane.add(frame);
-            try { frame.setSelected(true); } catch (java.beans.PropertyVetoException ignored) {}
+            try {
+                frame.setSelected(true);
+            } catch (java.beans.PropertyVetoException ignored) {
+            }
         }
         centerLayout.show(centerPanel, "window");
         sharedResultsWrapper.setVisible(false);
