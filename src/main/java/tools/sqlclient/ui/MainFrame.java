@@ -12,6 +12,7 @@ import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.ui.QueryResultPanel;
+import tools.sqlclient.ui.ManageNotesDialog.SearchNavigation;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
 
@@ -998,6 +999,15 @@ public class MainFrame extends JFrame {
         }
     }
 
+    private void openNoteWithNavigation(Note note, SearchNavigation navigation) {
+        openNoteInCurrentMode(note);
+        if (note == null || navigation == null) {
+            return;
+        }
+        EditorTabPanel panel = getOrCreatePanel(note);
+        panel.revealMatch(navigation.offset(), navigation.keyword());
+    }
+
     private boolean focusExistingFrame(Long noteId) {
         long targetId = noteId != null ? noteId : -1L;
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
@@ -1456,7 +1466,7 @@ public class MainFrame extends JFrame {
         ManageNotesDialog dialog = new ManageNotesDialog(
                 this,
                 noteRepository,
-                this::openNoteInCurrentMode,
+                this::openNoteWithNavigation,
                 this::getOrCreateNoteIcon,
                 this::regenerateNoteIcon
         );
