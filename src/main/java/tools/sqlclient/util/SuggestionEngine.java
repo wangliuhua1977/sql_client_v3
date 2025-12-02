@@ -374,7 +374,8 @@ public class SuggestionEngine {
         }
 
         List<TableBinding> bindings = parseBindings(statement);
-        int tableCount = (int) bindings.stream().map(TableBinding::table).distinct().count();
+        List<String> distinctTables = bindings.stream().map(TableBinding::table).distinct().toList();
+        int tableCount = distinctTables.size();
 
         String token = currentToken();
         // ★ 关键修正：token 起始位置要按「当前语句前缀」来算，而不是整篇文档
@@ -397,36 +398,36 @@ public class SuggestionEngine {
                 }
                 if (table == null) {
                     showHint = tableCount > 1;
-                    return new SuggestionContext(SuggestionType.COLUMN, null, showHint, aliasOrTable);
+                    return new SuggestionContext(SuggestionType.COLUMN, null, showHint, aliasOrTable, distinctTables);
                 }
-                return new SuggestionContext(SuggestionType.COLUMN, table, false, aliasOrTable);
+                return new SuggestionContext(SuggestionType.COLUMN, table, false, aliasOrTable, distinctTables);
             }
         }
 
         KeywordMatch onMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, COLUMN_KEYWORDS);
         if (onMatch != null) {
-            return new SuggestionContext(SuggestionType.COLUMN, null, tableCount > 1, null);
+            return new SuggestionContext(SuggestionType.COLUMN, null, tableCount > 1, null, distinctTables);
         }
 
         KeywordMatch tableMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, TABLE_KEYWORDS);
         if (tableMatch != null) {
             if ("where".equalsIgnoreCase(tableMatch.keyword()) && !bindings.isEmpty()) {
                 if (tableCount == 1) {
-                    return new SuggestionContext(SuggestionType.COLUMN, bindings.get(0).table(), false, null);
+                    return new SuggestionContext(SuggestionType.COLUMN, bindings.get(0).table(), false, null, distinctTables);
                 }
-                return new SuggestionContext(SuggestionType.COLUMN, null, true, null);
+                return new SuggestionContext(SuggestionType.COLUMN, null, true, null, distinctTables);
             }
-            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
+            return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null, List.of());
         }
 
         KeywordMatch fnMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, FUNCTION_KEYWORDS);
         if (fnMatch != null) {
-            return new SuggestionContext(SuggestionType.FUNCTION, null, false, null);
+            return new SuggestionContext(SuggestionType.FUNCTION, null, false, null, List.of());
         }
 
         KeywordMatch procMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, PROCEDURE_KEYWORDS);
         if (procMatch != null) {
-            return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null);
+            return new SuggestionContext(SuggestionType.PROCEDURE, null, false, null, List.of());
         }
         return null;
     }
@@ -519,12 +520,13 @@ public class SuggestionEngine {
     }
 
     private List<TableBinding> parseBindings(String statement) {
-        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?(?!join\\b|where\\b|on\\b|inner\\b|left\\b|right\\b|full\\b|cross\\b|group\\b|order\\b|having\\b|limit\\b|union\\b)([\\w]+))?");
         java.util.regex.Matcher matcher = pattern.matcher(statement);
         java.util.Map<String, TableBinding> map = new java.util.LinkedHashMap<>();
         while (matcher.find()) {
             String tableToken = matcher.group(2);
-            String aliasToken = matcher.group(3);
+            String aliasToken = sanitizeAlias(matcher.group(3));
             String base = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
             map.putIfAbsent(base.toLowerCase(), new TableBinding(base, aliasToken));
             if (aliasToken != null && !aliasToken.isBlank()) {
@@ -543,7 +545,7 @@ public class SuggestionEngine {
                 java.util.regex.Matcher m = item.matcher(raw.trim());
                 if (m.find()) {
                     String table = m.group(1);
-                    String alias = m.group(2);
+                    String alias = sanitizeAlias(m.group(2));
                     String base = table.contains(".") ? table.substring(table.lastIndexOf('.') + 1) : table;
                     map.putIfAbsent(base.toLowerCase(), new TableBinding(base, alias));
                     if (alias != null && !alias.isBlank()) {
@@ -553,6 +555,17 @@ public class SuggestionEngine {
             }
         }
         return new java.util.ArrayList<>(new java.util.LinkedHashSet<>(map.values()));
+    }
+
+    private String sanitizeAlias(String aliasToken) {
+        if (aliasToken == null) return null;
+        String alias = aliasToken.trim();
+        if (alias.isEmpty()) return null;
+        String lower = alias.toLowerCase();
+        java.util.Set<String> reserved = java.util.Set.of(
+                "join", "on", "where", "inner", "left", "right", "full", "cross", "group", "order", "having", "limit", "union"
+        );
+        return reserved.contains(lower) ? null : alias;
     }
 
     private record TableBinding(String table, String alias) {}
