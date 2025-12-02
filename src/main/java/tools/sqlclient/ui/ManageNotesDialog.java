@@ -26,7 +26,7 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 import java.util.function.Function;
 
 /**
@@ -36,13 +36,17 @@ import java.util.function.Function;
 public class ManageNotesDialog extends JDialog {
 
     private final NoteRepository repository;
-    private final Consumer<Note> opener;
+    private final BiConsumer<Note, SearchNavigation> opener;
     private final Function<Note, Icon> iconProvider;
     private final Function<Note, Icon> iconRefresher;
 
-    private final NoteTableModel tableModel;
-    private final JTable table;
-    private final TableRowSorter<NoteTableModel> sorter;
+    private final NoteTableModel activeModel;
+    private final NoteTableModel trashModel;
+    private final JTable activeTable;
+    private final JTable trashTable;
+    private final TableRowSorter<NoteTableModel> activeSorter;
+    private final TableRowSorter<NoteTableModel> trashSorter;
+    private final JTabbedPane tabbedPane = new JTabbedPane();
     private final DefaultListModel<Note> backlinkModel = new DefaultListModel<>();
     private final JList<Note> backlinkList = new JList<>(backlinkModel);
 
@@ -53,6 +57,8 @@ public class ManageNotesDialog extends JDialog {
     private final JButton trashButton = new JButton("移到垃圾箱");
     private final JButton restoreButton = new JButton("从垃圾箱还原");
     private final JButton emptyTrashButton = new JButton("清空垃圾箱");
+    private final JButton deleteButton = new JButton("彻底删除");
+    private final JButton searchButton = new JButton("全文搜索预览");
     private final JButton closeButton = new JButton("关闭");
 
     private static final DateTimeFormatter TIME_FMT =
@@ -60,7 +66,7 @@ public class ManageNotesDialog extends JDialog {
 
     public ManageNotesDialog(Frame owner,
                              NoteRepository repository,
-                             Consumer<Note> opener,
+                             BiConsumer<Note, SearchNavigation> opener,
                              Function<Note, Icon> iconProvider,
                              Function<Note, Icon> iconRefresher) {
         super(owner, "管理笔记", true);
@@ -69,10 +75,14 @@ public class ManageNotesDialog extends JDialog {
         this.iconProvider = iconProvider;
         this.iconRefresher = iconRefresher;
 
-        this.tableModel = new NoteTableModel(loadData());
-        this.table = new JTable(tableModel);
-        this.sorter = new TableRowSorter<>(tableModel);
-        this.table.setRowSorter(sorter);
+        this.activeModel = new NoteTableModel(loadData(false));
+        this.trashModel = new NoteTableModel(loadData(true));
+        this.activeTable = new JTable(activeModel);
+        this.trashTable = new JTable(trashModel);
+        this.activeSorter = new TableRowSorter<>(activeModel);
+        this.trashSorter = new TableRowSorter<>(trashModel);
+        this.activeTable.setRowSorter(activeSorter);
+        this.trashTable.setRowSorter(trashSorter);
 
         initUI();
         setPreferredSize(new Dimension(880, 520));
@@ -80,8 +90,8 @@ public class ManageNotesDialog extends JDialog {
         setLocationRelativeTo(owner);
     }
 
-    private List<Note> loadData() {
-        List<Note> list = repository.listAll();
+    private List<Note> loadData(boolean trashed) {
+        List<Note> list = repository.listByTrashed(trashed);
         return new ArrayList<>(list);
     }
 
@@ -103,6 +113,9 @@ public class ManageNotesDialog extends JDialog {
         gbc.gridx = 2;
         searchPanel.add(fullTextBox, gbc);
 
+        gbc.gridx = 3;
+        searchPanel.add(searchButton, gbc);
+
         add(searchPanel, BorderLayout.NORTH);
 
         // 搜索实时过滤
@@ -123,14 +136,58 @@ public class ManageNotesDialog extends JDialog {
             }
         });
         fullTextBox.addActionListener(e -> applyFilter());
+        searchButton.addActionListener(e -> openSearchDialog());
+        searchField.addActionListener(e -> {
+            if (fullTextBox.isSelected()) {
+                openSearchDialog();
+            }
+        });
 
         // ==== 中间表格 ====
+        configureTable(activeTable, activeModel);
+        configureTable(trashTable, trashModel);
+
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
+                tabbedPane, createBacklinkPanel());
+        split.setResizeWeight(0.72);
+        split.setDividerSize(8);
+        add(split, BorderLayout.CENTER);
+
+        tabbedPane.addTab("笔记", new JScrollPane(activeTable));
+        tabbedPane.addTab("垃圾箱", new JScrollPane(trashTable));
+        tabbedPane.addChangeListener(e -> {
+            applyFilter();
+            updateButtonState();
+            refreshBacklinks();
+        });
+
+        // ==== 底部按钮 ====
+        JPanel btnPanel = new JPanel();
+        openButton.addActionListener(this::onOpen);
+        trashButton.addActionListener(this::onTrash);
+        restoreButton.addActionListener(this::onRestore);
+        emptyTrashButton.addActionListener(this::onEmptyTrash);
+        deleteButton.addActionListener(this::onDeleteForever);
+        closeButton.addActionListener(e -> dispose());
+
+        btnPanel.add(openButton);
+        btnPanel.add(trashButton);
+        btnPanel.add(restoreButton);
+        btnPanel.add(deleteButton);
+        btnPanel.add(emptyTrashButton);
+        btnPanel.add(closeButton);
+
+        add(btnPanel, BorderLayout.SOUTH);
+
+        updateButtonState();
+    }
+
+    private void configureTable(JTable table, NoteTableModel model) {
         table.setFillsViewportHeight(true);
         table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
         table.setRowHeight(24);
 
-        // 列宽
         table.getColumnModel().getColumn(0).setPreferredWidth(40);   // 星标
         table.getColumnModel().getColumn(1).setPreferredWidth(260);  // 标题 + 图标
         table.getColumnModel().getColumn(2).setPreferredWidth(60);   // 数据库
@@ -139,11 +196,9 @@ public class ManageNotesDialog extends JDialog {
         table.getColumnModel().getColumn(5).setPreferredWidth(120);  // 修改时间
         table.getColumnModel().getColumn(6).setPreferredWidth(80);   // 状态
 
-        // 标题列：文本 + 图标
         table.getColumnModel().getColumn(1).setCellRenderer(
-                new TitleWithIconRenderer(tableModel, iconProvider));
+                new TitleWithIconRenderer(model, iconProvider));
 
-        // 时间列渲染
         DefaultTableCellRenderer timeRenderer = new DefaultTableCellRenderer() {
             @Override
             protected void setValue(Object value) {
@@ -157,16 +212,13 @@ public class ManageNotesDialog extends JDialog {
         table.getColumnModel().getColumn(4).setCellRenderer(timeRenderer);
         table.getColumnModel().getColumn(5).setCellRenderer(timeRenderer);
 
-        // 状态列居中
         DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
         centerRenderer.setHorizontalAlignment(SwingConstants.CENTER);
         table.getColumnModel().getColumn(6).setCellRenderer(centerRenderer);
 
-        // 鼠标行为：双击打开 + 右键菜单
         table.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
-                // 双击左键打开
                 if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
                     openSelectedNote();
                 }
@@ -193,37 +245,12 @@ public class ManageNotesDialog extends JDialog {
             }
         });
 
-        // 选中变化时更新按钮状态
         table.getSelectionModel().addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting()) {
+            if (!e.getValueIsAdjusting() && table.isShowing()) {
                 updateButtonState();
                 refreshBacklinks();
             }
         });
-
-        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT,
-                new JScrollPane(table), createBacklinkPanel());
-        split.setResizeWeight(0.72);
-        split.setDividerSize(8);
-        add(split, BorderLayout.CENTER);
-
-        // ==== 底部按钮 ====
-        JPanel btnPanel = new JPanel();
-        openButton.addActionListener(this::onOpen);
-        trashButton.addActionListener(this::onTrash);
-        restoreButton.addActionListener(this::onRestore);
-        emptyTrashButton.addActionListener(this::onEmptyTrash);
-        closeButton.addActionListener(e -> dispose());
-
-        btnPanel.add(openButton);
-        btnPanel.add(trashButton);
-        btnPanel.add(restoreButton);
-        btnPanel.add(emptyTrashButton);
-        btnPanel.add(closeButton);
-
-        add(btnPanel, BorderLayout.SOUTH);
-
-        updateButtonState();
     }
 
     private void showContextMenu(int x, int y) {
@@ -237,7 +264,10 @@ public class ManageNotesDialog extends JDialog {
         changeIconItem.addActionListener(e -> changeIconForSelectedNote());
         menu.add(changeIconItem);
 
-        menu.show(table, x, y);
+        JTable table = currentTable();
+        if (table != null) {
+            menu.show(table, x, y);
+        }
     }
 
     private void changeIconForSelectedNote() {
@@ -245,13 +275,19 @@ public class ManageNotesDialog extends JDialog {
         Note note = getSelectedNote();
         if (note == null) return;
         iconRefresher.apply(note);  // 让 MainFrame 重抽并持久化图标
-        table.repaint();            // 重新绘制当前行图标
+        JTable table = currentTable();
+        if (table != null) {
+            table.repaint();            // 重新绘制当前行图标
+        }
     }
 
     private void applyFilter() {
         String text = searchField.getText();
         if (text == null) text = "";
         final String query = text.trim().toLowerCase();
+        TableRowSorter<NoteTableModel> sorter = currentSorter();
+        NoteTableModel model = currentModel();
+        if (sorter == null || model == null) return;
         if (query.isEmpty()) {
             sorter.setRowFilter(null);
             return;
@@ -261,7 +297,7 @@ public class ManageNotesDialog extends JDialog {
             @Override
             public boolean include(Entry<? extends NoteTableModel, ? extends Integer> entry) {
                 int modelRow = entry.getIdentifier();
-                Note note = tableModel.getNoteAt(modelRow);
+                Note note = model.getNoteAt(modelRow);
                 if (note == null) return false;
                 String base = (safe(note.getTitle()) + " " + safe(note.getTags())).toLowerCase();
                 if (base.contains(query)) return true;
@@ -274,6 +310,103 @@ public class ManageNotesDialog extends JDialog {
 
     private static String safe(String s) {
         return s == null ? "" : s;
+    }
+
+    private void openSearchDialog() {
+        String keyword = searchField.getText();
+        if (keyword == null || keyword.isBlank()) {
+            JOptionPane.showMessageDialog(this, "请输入要搜索的内容");
+            return;
+        }
+        if (!fullTextBox.isSelected()) {
+            applyFilter();
+            return;
+        }
+        String normalized = keyword.trim();
+        List<SearchHit> hits = collectHits(normalized, isTrashTab());
+        if (hits.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "未在" + (isTrashTab() ? "垃圾箱" : "笔记") + "中找到匹配项。");
+            return;
+        }
+
+        JDialog dialog = new JDialog(this, "全文搜索结果", true);
+        SearchHitTableModel model = new SearchHitTableModel(hits);
+        JTable table = new JTable(model);
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
+        table.setRowHeight(26);
+        table.getColumnModel().getColumn(0).setPreferredWidth(220);
+        table.getColumnModel().getColumn(1).setPreferredWidth(80);
+        table.getColumnModel().getColumn(2).setPreferredWidth(480);
+        table.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
+                    int row = table.getSelectedRow();
+                    if (row >= 0) {
+                        SearchHit hit = model.getHit(table.convertRowIndexToModel(row));
+                        if (hit != null && opener != null) {
+                            opener.accept(hit.note(), new SearchNavigation(hit.offset(), normalized));
+                            dialog.dispose();
+                        }
+                    }
+                }
+            }
+        });
+        dialog.setLayout(new BorderLayout());
+        dialog.add(new JScrollPane(table), BorderLayout.CENTER);
+        dialog.setSize(840, 420);
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+    }
+
+    private List<SearchHit> collectHits(String keyword, boolean trashOnly) {
+        List<SearchHit> hits = new ArrayList<>();
+        List<Note> notes = repository.search(keyword, true, trashOnly);
+        for (Note n : notes) {
+            if (trashOnly && !n.isTrashed()) continue;
+            if (!trashOnly && n.isTrashed()) continue;
+            for (Integer pos : findMatches(n.getContent(), keyword)) {
+                hits.add(new SearchHit(n, pos, buildPreview(n.getContent(), pos, keyword.length())));
+            }
+        }
+        return hits;
+    }
+
+    private List<Integer> findMatches(String content, String keyword) {
+        List<Integer> list = new ArrayList<>();
+        if (content == null || keyword == null || keyword.isBlank()) return list;
+        String lower = content.toLowerCase();
+        String target = keyword.toLowerCase();
+        int idx = lower.indexOf(target);
+        while (idx >= 0) {
+            list.add(idx);
+            idx = lower.indexOf(target, idx + target.length());
+        }
+        return list;
+    }
+
+    private String buildPreview(String content, int pos, int len) {
+        if (content == null) return "";
+        int start = Math.max(0, pos - 24);
+        int end = Math.min(content.length(), pos + len + 24);
+        String snippet = content.substring(start, end);
+        return snippet.replaceAll("\n", " ");
+    }
+
+    private JTable currentTable() {
+        return isTrashTab() ? trashTable : activeTable;
+    }
+
+    private NoteTableModel currentModel() {
+        return isTrashTab() ? trashModel : activeModel;
+    }
+
+    private TableRowSorter<NoteTableModel> currentSorter() {
+        return isTrashTab() ? trashSorter : activeSorter;
+    }
+
+    private boolean isTrashTab() {
+        return tabbedPane.getSelectedIndex() == 1;
     }
 
     private void onOpen(ActionEvent e) {
@@ -317,8 +450,23 @@ public class ManageNotesDialog extends JDialog {
         }
     }
 
+    private void onDeleteForever(ActionEvent e) {
+        Note note = getSelectedNote();
+        if (note == null || !note.isTrashed()) {
+            return;
+        }
+        int opt = JOptionPane.showConfirmDialog(this,
+                "确定彻底删除《" + note.getTitle() + "》？此操作无法恢复！",
+                "警告", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (opt == JOptionPane.YES_OPTION) {
+            repository.deleteForever(note);
+            reloadData();
+        }
+    }
+
     private void reloadData() {
-        tableModel.setData(loadData());
+        activeModel.setData(loadData(false));
+        trashModel.setData(loadData(true));
         applyFilter();
         updateButtonState();
         refreshBacklinks();
@@ -327,24 +475,29 @@ public class ManageNotesDialog extends JDialog {
     private void openSelectedNote() {
         Note note = getSelectedNote();
         if (note == null || opener == null) return;
-        opener.accept(note);
+        opener.accept(note, null);
         dispose();
     }
 
     private Note getSelectedNote() {
+        JTable table = currentTable();
+        NoteTableModel model = currentModel();
+        if (table == null || model == null) return null;
         int viewRow = table.getSelectedRow();
         if (viewRow < 0) return null;
         int modelRow = table.convertRowIndexToModel(viewRow);
-        return tableModel.getNoteAt(modelRow);
+        return model.getNoteAt(modelRow);
     }
 
     private void updateButtonState() {
         Note note = getSelectedNote();
         boolean has = note != null;
+        boolean trashTab = isTrashTab();
         openButton.setEnabled(has);
-        trashButton.setEnabled(has && !note.isTrashed());
-        restoreButton.setEnabled(has && note.isTrashed());
-        emptyTrashButton.setEnabled(true);
+        trashButton.setEnabled(has && !trashTab);
+        restoreButton.setEnabled(has && trashTab);
+        deleteButton.setEnabled(has && trashTab);
+        emptyTrashButton.setEnabled(trashTab);
     }
 
     private JPanel createBacklinkPanel() {
@@ -370,7 +523,7 @@ public class ManageNotesDialog extends JDialog {
                 if (SwingUtilities.isLeftMouseButton(e) && e.getClickCount() == 2) {
                     Note n = backlinkList.getSelectedValue();
                     if (n != null && opener != null) {
-                        opener.accept(n);
+                        opener.accept(n, null);
                     }
                 }
             }
@@ -512,4 +665,51 @@ public class ManageNotesDialog extends JDialog {
             fireTableRowsUpdated(rowIndex, rowIndex);
         }
     }
+
+    private static class SearchHitTableModel extends AbstractTableModel {
+        private final List<SearchHit> hits;
+
+        SearchHitTableModel(List<SearchHit> hits) {
+            this.hits = hits != null ? hits : new ArrayList<>();
+        }
+
+        @Override
+        public int getRowCount() {
+            return hits.size();
+        }
+
+        @Override
+        public int getColumnCount() {
+            return 3;
+        }
+
+        @Override
+        public String getColumnName(int column) {
+            return switch (column) {
+                case 0 -> "笔记";
+                case 1 -> "位置";
+                case 2 -> "预览";
+                default -> "";
+            };
+        }
+
+        @Override
+        public Object getValueAt(int rowIndex, int columnIndex) {
+            SearchHit hit = hits.get(rowIndex);
+            return switch (columnIndex) {
+                case 0 -> hit.note().getTitle();
+                case 1 -> hit.offset();
+                case 2 -> hit.preview();
+                default -> null;
+            };
+        }
+
+        SearchHit getHit(int row) {
+            if (row < 0 || row >= hits.size()) return null;
+            return hits.get(row);
+        }
+    }
+
+    public record SearchNavigation(int offset, String keyword) {}
+    private record SearchHit(Note note, int offset, String preview) {}
 }

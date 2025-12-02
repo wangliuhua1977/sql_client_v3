@@ -410,6 +410,12 @@ public class SuggestionEngine {
 
         KeywordMatch tableMatch = findKeywordWithWhitespace(statementPrefix, tokenStartInPrefix, TABLE_KEYWORDS);
         if (tableMatch != null) {
+            if ("where".equalsIgnoreCase(tableMatch.keyword()) && !bindings.isEmpty()) {
+                if (tableCount == 1) {
+                    return new SuggestionContext(SuggestionType.COLUMN, bindings.get(0).table(), false, null);
+                }
+                return new SuggestionContext(SuggestionType.COLUMN, null, true, null);
+            }
             return new SuggestionContext(SuggestionType.TABLE_OR_VIEW, null, false, null);
         }
 
@@ -443,7 +449,7 @@ public class SuggestionEngine {
                 boolean afterOk = end >= lower.length() || !Character.isLetterOrDigit(lower.charAt(end));
                 if (beforeOk && afterOk && onlyWhitespaceBetween(prefix, end, tokenStart)) {
                     if (best == null || end > best.end()) {
-                        best = new KeywordMatch(keywordTypeFor(kw), idx, end);
+                        best = new KeywordMatch(keywordTypeFor(kw), idx, end, kw);
                     }
                     break;
                 }
@@ -515,16 +521,40 @@ public class SuggestionEngine {
     private List<TableBinding> parseBindings(String statement) {
         java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("(?i)(from|join)\\s+([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
         java.util.regex.Matcher matcher = pattern.matcher(statement);
-        java.util.List<TableBinding> bindings = new java.util.ArrayList<>();
+        java.util.Map<String, TableBinding> map = new java.util.LinkedHashMap<>();
         while (matcher.find()) {
             String tableToken = matcher.group(2);
             String aliasToken = matcher.group(3);
             String base = tableToken.contains(".") ? tableToken.substring(tableToken.lastIndexOf('.') + 1) : tableToken;
-            bindings.add(new TableBinding(base, aliasToken));
+            map.putIfAbsent(base.toLowerCase(), new TableBinding(base, aliasToken));
+            if (aliasToken != null && !aliasToken.isBlank()) {
+                map.putIfAbsent(aliasToken.toLowerCase(), new TableBinding(base, aliasToken));
+            }
         }
-        return bindings;
+
+        java.util.regex.Matcher fromMatcher = java.util.regex.Pattern
+                .compile("(?i)from\\s+(.+?)(?=\\bwhere\\b|\\bgroup\\b|\\border\\b|\\bhaving\\b|\\blimit\\b|$)")
+                .matcher(statement);
+        if (fromMatcher.find()) {
+            String fromSegment = fromMatcher.group(1);
+            String[] parts = fromSegment.split(",");
+            java.util.regex.Pattern item = java.util.regex.Pattern.compile("(?i)([\\w.]+)(?:\\s+(?:as\\s+)?([\\w]+))?");
+            for (String raw : parts) {
+                java.util.regex.Matcher m = item.matcher(raw.trim());
+                if (m.find()) {
+                    String table = m.group(1);
+                    String alias = m.group(2);
+                    String base = table.contains(".") ? table.substring(table.lastIndexOf('.') + 1) : table;
+                    map.putIfAbsent(base.toLowerCase(), new TableBinding(base, alias));
+                    if (alias != null && !alias.isBlank()) {
+                        map.putIfAbsent(alias.toLowerCase(), new TableBinding(base, alias));
+                    }
+                }
+            }
+        }
+        return new java.util.ArrayList<>(new java.util.LinkedHashSet<>(map.values()));
     }
 
     private record TableBinding(String table, String alias) {}
-    private record KeywordMatch(SuggestionType type, int start, int end) {}
+    private record KeywordMatch(SuggestionType type, int start, int end, String keyword) {}
 }

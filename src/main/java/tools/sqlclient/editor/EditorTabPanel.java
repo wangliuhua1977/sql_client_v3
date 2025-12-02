@@ -305,6 +305,32 @@ public class EditorTabPanel extends JPanel {
         suggestionEngine.closePopup();
     }
 
+    public void revealMatch(int offset, String keyword) {
+        String text = textArea.getText();
+        if (text == null) {
+            return;
+        }
+        int target = Math.max(0, Math.min(offset, text.length()));
+        if (target >= text.length() && keyword != null && !keyword.isBlank()) {
+            int idx = text.toLowerCase().indexOf(keyword.toLowerCase());
+            if (idx >= 0) {
+                target = idx;
+            }
+        }
+        int end = target;
+        if (keyword != null && !keyword.isBlank()) {
+            end = Math.min(text.length(), target + keyword.length());
+        }
+        textArea.requestFocusInWindow();
+        textArea.setCaretPosition(target);
+        textArea.select(target, end);
+        try {
+            Rectangle view = textArea.modelToView(target);
+            textArea.scrollRectToVisible(view);
+        } catch (Exception ignored) {
+        }
+    }
+
     public java.util.List<String> getExecutableStatements(boolean blockMode) {
         String selected = textArea.getSelectedText();
         String target;
