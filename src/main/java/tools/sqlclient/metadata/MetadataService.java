@@ -408,7 +408,7 @@ public class MetadataService {
             case TABLE_OR_VIEW -> queryObjects(likePattern, Set.of("table", "view"), limit);
             case FUNCTION -> queryObjects(likePattern, Set.of("function"), limit);
             case PROCEDURE -> queryObjects(likePattern, Set.of("procedure"), limit);
-            case COLUMN -> queryColumns(likePattern, context.tableHint(), limit);
+            case COLUMN -> queryColumns(likePattern, context.tableHint(), context.scopedTables(), limit);
         };
     }
 
@@ -445,10 +445,13 @@ public class MetadataService {
         }
     }
 
-    private List<SuggestionItem> queryColumns(String likeSql, String tableHint, int limit) {
+    private List<SuggestionItem> queryColumns(String likeSql, String tableHint, List<String> scopedTables, int limit) {
         StringBuilder sql = new StringBuilder("SELECT column_name, object_name, sort_no, use_count FROM columns WHERE lower(column_name) LIKE ?");
+        List<String> tables = scopedTables == null ? List.of() : scopedTables.stream().filter(Objects::nonNull).distinct().toList();
         if (tableHint != null && !tableHint.isBlank()) {
             sql.append(" AND object_name = ?");
+        } else if (!tables.isEmpty()) {
+            sql.append(" AND object_name IN (" + tables.stream().map(t -> "?").collect(Collectors.joining(",")) + ")");
         }
         sql.append(" ORDER BY sort_no ASC, use_count DESC, column_name ASC LIMIT ?");
         try (Connection conn = sqliteManager.getConnection();
@@ -457,6 +460,10 @@ public class MetadataService {
             ps.setString(idx++, likeSql);
             if (tableHint != null && !tableHint.isBlank()) {
                 ps.setString(idx++, tableHint);
+            } else {
+                for (String t : tables) {
+                    ps.setString(idx++, t);
+                }
             }
             ps.setInt(idx, limit);
             try (ResultSet rs = ps.executeQuery()) {
@@ -569,7 +576,7 @@ public class MetadataService {
         return List.of();
     }
 
-    public record SuggestionContext(SuggestionType type, String tableHint, boolean showTableHint, String alias) {}
+    public record SuggestionContext(SuggestionType type, String tableHint, boolean showTableHint, String alias, List<String> scopedTables) {}
 
     public record TableEntry(String name, String type) {}
 

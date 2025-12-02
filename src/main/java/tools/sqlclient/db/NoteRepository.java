@@ -152,6 +152,23 @@ public class NoteRepository {
         return notes;
     }
 
+    public List<Note> listByTrashed(boolean trashed) {
+        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE trashed=? ORDER BY updated_at DESC, id DESC";
+        List<Note> notes = new ArrayList<>();
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, trashed ? 1 : 0);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    notes.add(mapRow(rs));
+                }
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("获取笔记列表失败", e);
+        }
+        return notes;
+    }
+
     public List<Note> listByIds(List<Long> ids) {
         if (ids == null || ids.isEmpty()) return List.of();
         String placeholders = ids.stream().map(i -> "?").collect(java.util.stream.Collectors.joining(","));
@@ -340,15 +357,18 @@ public class NoteRepository {
 
     public void moveToTrash(Note note) {
         long now = Instant.now().toEpochMilli();
+        String trashedTitle = ensureTrashSuffix(note.getTitle(), now, note.getId());
         try (Connection conn = sqliteManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET trashed=1, deleted_at=?, updated_at=? WHERE id=?")) {
+             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET trashed=1, deleted_at=?, updated_at=?, title=? WHERE id=?")) {
             ps.setLong(1, now);
             ps.setLong(2, now);
-            ps.setLong(3, note.getId());
+            ps.setString(3, trashedTitle);
+            ps.setLong(4, note.getId());
             ps.executeUpdate();
             note.setTrashed(true);
             note.setDeletedAt(now);
             note.setUpdatedAt(now);
+            note.setTitle(trashedTitle);
         } catch (Exception e) {
             throw new RuntimeException("移动到垃圾箱失败", e);
         }
@@ -356,16 +376,34 @@ public class NoteRepository {
 
     public void restore(Note note) {
         long now = Instant.now().toEpochMilli();
+        String targetTitle = stripTrashSuffix(note.getTitle());
+        boolean conflict = titleExists(targetTitle, note.getId());
+        if (conflict) {
+            targetTitle = ensureTrashSuffix(targetTitle, note.getDeletedAt() > 0 ? note.getDeletedAt() : now, note.getId());
+        }
         try (Connection conn = sqliteManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET trashed=0, deleted_at=0, updated_at=? WHERE id=?")) {
+             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET trashed=0, deleted_at=0, updated_at=?, title=? WHERE id=?")) {
             ps.setLong(1, now);
-            ps.setLong(2, note.getId());
+            ps.setString(2, targetTitle);
+            ps.setLong(3, note.getId());
             ps.executeUpdate();
             note.setTrashed(false);
             note.setDeletedAt(0);
             note.setUpdatedAt(now);
+            note.setTitle(targetTitle);
         } catch (Exception e) {
             throw new RuntimeException("恢复笔记失败", e);
+        }
+    }
+
+    public void deleteForever(Note note) {
+        if (note == null || !note.isTrashed()) return;
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("DELETE FROM notes WHERE id=?")) {
+            ps.setLong(1, note.getId());
+            ps.executeUpdate();
+        } catch (Exception e) {
+            throw new RuntimeException("彻底删除笔记失败", e);
         }
     }
 
@@ -376,5 +414,16 @@ public class NoteRepository {
         } catch (Exception e) {
             throw new RuntimeException("清空垃圾箱失败", e);
         }
+    }
+
+    private String ensureTrashSuffix(String title, long timestamp, long id) {
+        String base = stripTrashSuffix(title);
+        long marker = timestamp > 0 ? timestamp : id;
+        return base + " [trash-" + marker + "]";
+    }
+
+    private String stripTrashSuffix(String title) {
+        if (title == null) return "";
+        return title.replaceFirst("\\s*\\[trash-\\d+\\]$", "");
     }
 }
