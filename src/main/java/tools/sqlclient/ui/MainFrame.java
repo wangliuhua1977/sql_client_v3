@@ -4,6 +4,7 @@ import tools.sqlclient.db.AppStateRepository;
 import tools.sqlclient.db.EditorStyleRepository;
 import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.db.SQLiteManager;
+import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlExecutionService;
@@ -22,9 +23,10 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.plaf.basic.BasicInternalFrameUI;
 import java.awt.*;
 import java.awt.event.ActionEvent;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.awt.event.KeyEvent;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -62,6 +64,7 @@ public class MainFrame extends JFrame {
     private final SQLiteManager sqliteManager;
     private final NoteRepository noteRepository;
     private final AppStateRepository appStateRepository;
+    private final SqlSnippetRepository sqlSnippetRepository;
     private final MetadataService metadataService;
     private final EditorStyleRepository styleRepository;
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
@@ -97,6 +100,8 @@ public class MainFrame extends JFrame {
     private String scheduledBackupLabel;
     private Path lastBackupDir;
 
+    private QuickSqlSnippetDialog quickSqlSnippetDialog;
+
     public MainFrame() {
         // 需求 2：修改主窗体标题
         super("Supper SQL Note");
@@ -110,6 +115,7 @@ public class MainFrame extends JFrame {
         this.metadataService = new MetadataService(dbPath);
         this.noteRepository = new NoteRepository(sqliteManager);
         this.appStateRepository = new AppStateRepository(sqliteManager);
+        this.sqlSnippetRepository = new SqlSnippetRepository(sqliteManager);
         this.styleRepository = new EditorStyleRepository(sqliteManager);
         // 加载笔记图标配置（noteId -> 图标规格）
         loadNoteIcons();
@@ -804,6 +810,13 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 restoreLocalDatabase();
+            }
+        }));
+
+        tools.add(new JMenuItem(new AbstractAction("SQL片段库 (Alt+W)") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                getQuickSqlSnippetDialog().toggleVisible();
             }
         }));
 
@@ -1611,6 +1624,15 @@ public class MainFrame extends JFrame {
     }
 
     private void installGlobalShortcuts() {
+        InputMap inputMap = getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
+        ActionMap actionMap = getRootPane().getActionMap();
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.ALT_DOWN_MASK), "toggle_quick_snippet_dialog");
+        actionMap.put("toggle_quick_snippet_dialog", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                getQuickSqlSnippetDialog().toggleVisible();
+            }
+        });
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addKeyEventDispatcher(e -> {
                     if (e.getID() == KeyEvent.KEY_PRESSED
@@ -1621,6 +1643,13 @@ public class MainFrame extends JFrame {
                     }
                     return false;
                 });
+    }
+
+    private QuickSqlSnippetDialog getQuickSqlSnippetDialog() {
+        if (quickSqlSnippetDialog == null) {
+            quickSqlSnippetDialog = new QuickSqlSnippetDialog(this, sqlSnippetRepository);
+        }
+        return quickSqlSnippetDialog;
     }
 
     private void toggleSuggestionMode() {
