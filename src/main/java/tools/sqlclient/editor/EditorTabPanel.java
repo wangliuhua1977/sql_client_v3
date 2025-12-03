@@ -15,12 +15,15 @@ import tools.sqlclient.util.SuggestionEngine;
 import tools.sqlclient.util.ThreadPools;
 
 import javax.swing.*;
+import javax.swing.text.BadLocationException;
 import java.awt.*;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 单个 SQL 标签面板，包含自动保存与联想逻辑。
@@ -73,6 +76,7 @@ public class EditorTabPanel extends JPanel {
         if (textArea.getDocument() instanceof javax.swing.text.AbstractDocument doc) {
             doc.setDocumentFilter(fullWidthFilter);
         }
+        installSmartParseMenu();
         this.textArea.addKeyListener(new java.awt.event.KeyAdapter() {
             @Override
             public void keyTyped(java.awt.event.KeyEvent e) {
@@ -161,6 +165,138 @@ public class EditorTabPanel extends JPanel {
         textArea.addFocusListener(adapter);
         resultTabs.addFocusListener(adapter);
         this.addFocusListener(adapter);
+    }
+
+    private void installSmartParseMenu() {
+        JPopupMenu popup = textArea.getPopupMenu();
+        if (popup == null) {
+            popup = new JPopupMenu();
+            textArea.setPopupMenu(popup);
+        }
+        if (popup.getComponentCount() > 0) {
+            popup.addSeparator();
+        }
+        JMenuItem smartParse = new JMenuItem("智能解析");
+        smartParse.addActionListener(e -> performSmartParse());
+        popup.add(smartParse);
+    }
+
+    private void performSmartParse() {
+        String selection = textArea.getSelectedText();
+        if (selection == null || selection.isBlank()) {
+            JOptionPane.showMessageDialog(this, "请先选中要解析的工单文本。", "提示", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        String mobile = extractMobile(selection);
+        if (mobile == null) {
+            JOptionPane.showMessageDialog(this, "未找到手机号", "提示", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        String orderNo = extractOrderNo(selection);
+        if (orderNo == null) {
+            JOptionPane.showMessageDialog(this, "未找到单号", "提示", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        String reason = extractReason(selection);
+        if (reason == null || reason.isBlank()) {
+            JOptionPane.showMessageDialog(this, "未找到标题行", "提示", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        String param2 = orderNo + "," + reason;
+        String sql = String.format(
+                "select file_send('%s','%s','select * from  ' ,1,'qq123',6) ;",
+                mobile,
+                param2
+        );
+        insertAfterSelectionLine(sql + System.lineSeparator());
+    }
+
+    private void insertAfterSelectionLine(String text) {
+        try {
+            int end = textArea.getSelectionEnd();
+            int line = textArea.getLineOfOffset(end);
+            int lineEnd = textArea.getLineEndOffset(line);
+            textArea.getDocument().insertString(lineEnd, text, null);
+            textArea.setCaretPosition(lineEnd + text.length());
+        } catch (BadLocationException ex) {
+            textArea.append(System.lineSeparator() + text);
+            textArea.setCaretPosition(textArea.getText().length());
+        }
+    }
+
+    private String extractMobile(String text) {
+        Matcher matcher = Pattern.compile("1[3-9]\\d{9}").matcher(text);
+        if (matcher.find()) {
+            return matcher.group();
+        }
+        return null;
+    }
+
+    private String extractOrderNo(String text) {
+        Pattern inline = Pattern.compile("单号[:：]\\s*([A-Za-z0-9_]+)");
+        Pattern dataPattern = Pattern.compile("DATA[_A-Za-z0-9]+");
+        boolean afterLabel = false;
+        for (String line : text.split("\\r?\\n")) {
+            Matcher inlineMatcher = inline.matcher(line);
+            if (inlineMatcher.find()) {
+                return inlineMatcher.group(1);
+            }
+            if (line.contains("单号")) {
+                Matcher dataMatcher = dataPattern.matcher(line);
+                if (dataMatcher.find()) {
+                    return dataMatcher.group();
+                }
+                afterLabel = true;
+                continue;
+            }
+            if (afterLabel) {
+                Matcher dataMatcher = dataPattern.matcher(line);
+                if (dataMatcher.find()) {
+                    return dataMatcher.group();
+                }
+            }
+        }
+        return null;
+    }
+
+    private String extractReason(String text) {
+        String[] lines = text.split("\\r?\\n");
+        int titleIndex = -1;
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].contains("标题")) {
+                titleIndex = i;
+                break;
+            }
+        }
+        if (titleIndex < 0) {
+            return null;
+        }
+        String titleLine = null;
+        for (int i = titleIndex + 1; i < lines.length; i++) {
+            if (!lines[i].isBlank()) {
+                titleLine = lines[i].trim();
+                break;
+            }
+        }
+        if (titleLine == null) {
+            return null;
+        }
+
+        String cleanTitle = titleLine.replaceAll("[,，]?\\s*使用期限[^天\\n]*天", "").trim();
+        int idx = cleanTitle.indexOf('因');
+        String reason;
+        if (idx > 0) {
+            reason = cleanTitle.substring(idx);
+        } else {
+            reason = cleanTitle;
+        }
+        reason = reason.replace('、', ',').replace('，', ',');
+        reason = reason.replaceAll("\\s+", " ").trim();
+        return reason;
     }
 
     private RSyntaxTextArea createEditor() {
