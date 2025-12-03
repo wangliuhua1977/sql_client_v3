@@ -827,6 +827,14 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        tools.add(new JMenuItem(new AbstractAction("文本解析") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                TextParseDialog dialog = new TextParseDialog(MainFrame.this);
+                dialog.setVisible(true);
+            }
+        }));
+
         view.add(new JMenuItem(new AbstractAction("对象浏览器") {
             @Override
             public void actionPerformed(ActionEvent e) {
