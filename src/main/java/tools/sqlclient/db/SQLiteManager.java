@@ -84,6 +84,15 @@ public class SQLiteManager {
                     "key TEXT PRIMARY KEY, " +
                     "value TEXT"
                     + ")");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS sql_snippets (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "name TEXT NOT NULL, " +
+                    "tags TEXT DEFAULT '', " +
+                    "content TEXT NOT NULL, " +
+                    "created_at INTEGER NOT NULL DEFAULT 0, " +
+                    "updated_at INTEGER NOT NULL DEFAULT 0" +
+                    ")");
+            ensureUniqueIndex(conn, "idx_sql_snippets_name", "sql_snippets", "name");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS editor_styles(" +
                     "name TEXT PRIMARY KEY, " +
                     "font_size INTEGER NOT NULL DEFAULT 14, " +
