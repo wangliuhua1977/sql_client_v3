@@ -20,8 +20,6 @@ import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.function.Consumer;
 
 /**
@@ -48,7 +46,7 @@ public class EditorTabPanel extends JPanel {
     private Runnable executeHandler;
     private EditorStyle currentStyle;
     private int runtimeFontSize;
-    private final Consumer<EditorTabPanel> focusNotifier;
+    private final java.util.function.Consumer<EditorTabPanel> focusNotifier;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
@@ -57,7 +55,7 @@ public class EditorTabPanel extends JPanel {
                           Note note,
                           boolean convertFullWidth,
                           EditorStyle style,
-                          Consumer<EditorTabPanel> focusNotifier,
+                          java.util.function.Consumer<EditorTabPanel> focusNotifier,
                           Consumer<String> linkOpener) {
         super(new BorderLayout());
         this.noteRepository = noteRepository;
@@ -87,13 +85,43 @@ public class EditorTabPanel extends JPanel {
             }
         });
         this.textArea.addKeyListener(suggestionEngine.createKeyListener());
+
+        // ===== 鼠标滚轮：Shift+滚轮 调整字体，其余情况驱动外层滚动条上下滚动 =====
         this.textArea.addMouseWheelListener(e -> {
+            // 1) Shift + 滚轮：缩放字体大小
             if (e.isShiftDown()) {
-                runtimeFontSize = Math.max(10, Math.min(40, runtimeFontSize + (e.getWheelRotation() < 0 ? 1 : -1)));
+                runtimeFontSize = Math.max(10,
+                        Math.min(40, runtimeFontSize + (e.getWheelRotation() < 0 ? 1 : -1)));
                 applyFontSize();
                 e.consume();
+                return;
+            }
+
+            // 2) 普通滚轮：找到外层 JScrollPane，手动滚动垂直滚动条
+            Component ancestor = SwingUtilities.getAncestorOfClass(JScrollPane.class, textArea);
+            if (ancestor instanceof JScrollPane scrollPane) {
+                JScrollBar bar = scrollPane.getVerticalScrollBar();
+                if (bar != null && bar.isVisible()) {
+                    int rotation = e.getWheelRotation(); // >0 向下，<0 向上
+                    if (rotation != 0) {
+                        int direction = rotation > 0 ? 1 : -1;
+                        int unit = bar.getUnitIncrement(direction);
+                        if (unit <= 0) {
+                            unit = 16; // 兜底：每格大概 16 像素
+                        }
+                        // 一格滚轮滚 3 个单位，手感稍微快一点
+                        int delta = rotation * unit * 3;
+                        int newValue = bar.getValue() + delta;
+                        int max = bar.getMaximum() - bar.getVisibleAmount();
+                        if (newValue < 0) newValue = 0;
+                        if (newValue > max) newValue = max;
+                        bar.setValue(newValue);
+                    }
+                    e.consume();
+                }
             }
         });
+
         installFocusHooks();
         this.textArea.setText(note.getContent());
         installExecuteShortcut();
@@ -170,7 +198,6 @@ public class EditorTabPanel extends JPanel {
         resultWrapper.setVisible(false);
 
         editorPanel.setMinimumSize(new Dimension(120, 200));
-
 
         splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
         splitPane.setResizeWeight(1.0);
