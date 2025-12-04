@@ -93,6 +93,16 @@ public class SQLiteManager {
                     "updated_at INTEGER NOT NULL DEFAULT 0" +
                     ")");
             ensureUniqueIndex(conn, "idx_sql_snippets_name", "sql_snippets", "name");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS sql_history (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+                    "sql_text TEXT NOT NULL UNIQUE, " +
+                    "db_type TEXT, " +
+                    "created_at INTEGER NOT NULL DEFAULT 0, " +
+                    "last_executed_at INTEGER NOT NULL DEFAULT 0" +
+                    ")");
+            ensureColumn(conn, "sql_history", "db_type", "TEXT");
+            ensureColumn(conn, "sql_history", "created_at", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(conn, "sql_history", "last_executed_at", "INTEGER NOT NULL DEFAULT 0");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS editor_styles(" +
                     "name TEXT PRIMARY KEY, " +
                     "font_size INTEGER NOT NULL DEFAULT 14, " +

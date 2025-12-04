@@ -490,6 +490,17 @@ public class EditorTabPanel extends JPanel {
         return getExecutableStatements(false);
     }
 
+    public void insertSqlAtCaret(String sql) {
+        if (sql == null || sql.isBlank()) {
+            return;
+        }
+        int start = textArea.getSelectionStart();
+        int end = textArea.getSelectionEnd();
+        textArea.requestFocusInWindow();
+        textArea.replaceRange(sql, start, end);
+        textArea.setCaretPosition(start + sql.length());
+    }
+
     private String extractStatementAtCaret() {
         String full = textArea.getText();
         int caret = textArea.getCaretPosition();
