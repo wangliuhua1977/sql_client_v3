@@ -29,6 +29,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.Consumer;
@@ -109,7 +110,7 @@ public class ExecutionHistoryDialog extends JDialog {
         historyTable.setDefaultRenderer(String.class, new SqlPreviewRenderer());
         historyTable.setDefaultRenderer(Long.class, new TimeCellRenderer());
         sorter.setSortsOnUpdates(true);
-        sorter.setComparator(1, Long::compare);
+        sorter.setComparator(1, Comparator.comparingLong(Long::longValue));
         sorter.setSortKeys(List.of(new RowSorter.SortKey(1, SortOrder.DESCENDING)));
         JScrollPane scrollPane = new JScrollPane(historyTable);
         content.add(scrollPane, BorderLayout.CENTER);
