@@ -1642,7 +1642,7 @@ public class MainFrame extends JFrame {
 
     private ExecutionHistoryDialog getExecutionHistoryDialog() {
         if (executionHistoryDialog == null) {
-            executionHistoryDialog = new ExecutionHistoryDialog(this, sqlHistoryRepository, this::insertSqlToCurrentEditor);
+            executionHistoryDialog = new ExecutionHistoryDialog(this, sqlHistoryRepository, sqlSnippetRepository, this::insertSqlToCurrentEditor);
         }
         return executionHistoryDialog;
     }
