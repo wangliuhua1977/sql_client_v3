@@ -4,6 +4,7 @@ import tools.sqlclient.db.AppStateRepository;
 import tools.sqlclient.db.EditorStyleRepository;
 import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.db.SQLiteManager;
+import tools.sqlclient.db.SqlHistoryRepository;
 import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.exec.SqlExecResult;
@@ -14,6 +15,7 @@ import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.ui.QueryResultPanel;
 import tools.sqlclient.ui.ManageNotesDialog.SearchNavigation;
+import tools.sqlclient.util.IconFactory;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
 
@@ -65,6 +67,7 @@ public class MainFrame extends JFrame {
     private final NoteRepository noteRepository;
     private final AppStateRepository appStateRepository;
     private final SqlSnippetRepository sqlSnippetRepository;
+    private final SqlHistoryRepository sqlHistoryRepository;
     private final MetadataService metadataService;
     private final EditorStyleRepository styleRepository;
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
@@ -101,6 +104,8 @@ public class MainFrame extends JFrame {
     private Path lastBackupDir;
 
     private QuickSqlSnippetDialog quickSqlSnippetDialog;
+    private ExecutionHistoryDialog executionHistoryDialog;
+    private TrashBinDialog trashBinDialog;
 
     public MainFrame() {
         // 需求 2：修改主窗体标题
@@ -116,6 +121,7 @@ public class MainFrame extends JFrame {
         this.noteRepository = new NoteRepository(sqliteManager);
         this.appStateRepository = new AppStateRepository(sqliteManager);
         this.sqlSnippetRepository = new SqlSnippetRepository(sqliteManager);
+        this.sqlHistoryRepository = new SqlHistoryRepository(sqliteManager);
         this.styleRepository = new EditorStyleRepository(sqliteManager);
         // 加载笔记图标配置（noteId -> 图标规格）
         loadNoteIcons();
@@ -756,6 +762,12 @@ public class MainFrame extends JFrame {
                 openManageDialog();
             }
         }));
+        file.add(new JMenuItem(new AbstractAction("垃圾站") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openTrashBin();
+            }
+        }));
         file.add(new JMenuItem(new AbstractAction("设置 - SQL 编辑器选项") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -817,6 +829,12 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 getQuickSqlSnippetDialog().toggleVisible();
+            }
+        }));
+        tools.add(new JMenuItem(new AbstractAction("执行历史 (Alt+Q)") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                getExecutionHistoryDialog().toggleVisible();
             }
         }));
 
@@ -881,9 +899,11 @@ public class MainFrame extends JFrame {
     private void buildToolbar() {
         JToolBar toolBar = new JToolBar();
         toolBar.setFloatable(false);
-        executeButton = new JButton(createRunIcon());
+        executeButton = new JButton(IconFactory.createRunIcon(true));
+        executeButton.setDisabledIcon(IconFactory.createRunIcon(false));
         executeButton.setToolTipText("执行 (Ctrl+Enter)");
-        stopButton = new JButton(createStopIcon());
+        stopButton = new JButton(IconFactory.createStopIcon(true));
+        stopButton.setDisabledIcon(IconFactory.createStopIcon(false));
         stopButton.setToolTipText("停止执行");
         stopButton.setEnabled(false);
         executeButton.addActionListener(e -> executeCurrentSql());
@@ -1229,6 +1249,8 @@ public class MainFrame extends JFrame {
             return;
         }
 
+        sqlHistoryRepository.recordExecution(String.join(";\n", statements), panel.getNote().getDatabaseType());
+
         // 清理旧结果
         if (windowMode) {
             panel.clearLocalResults();
@@ -1395,60 +1417,6 @@ public class MainFrame extends JFrame {
         OperationLog.log("停止执行: " + panel.getNote().getTitle());
     }
 
-    private Icon createRunIcon() {
-        return new Icon() {
-            private final int size = 14;
-
-            @Override
-            public void paintIcon(Component c, Graphics g, int x, int y) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
-                        RenderingHints.VALUE_ANTIALIAS_ON);
-                int[] xs = {x, x, x + size};
-                int[] ys = {y, y + size, y + size / 2};
-                Color color = c.isEnabled() ? new Color(46, 170, 220) : Color.GRAY;
-                g2.setColor(color);
-                g2.fillPolygon(xs, ys, 3);
-                g2.dispose();
-            }
-
-            @Override
-            public int getIconWidth() {
-                return size + 2;
-            }
-
-            @Override
-            public int getIconHeight() {
-                return size + 2;
-            }
-        };
-    }
-
-    private Icon createStopIcon() {
-        return new Icon() {
-            private final int size = 12;
-
-            @Override
-            public void paintIcon(Component c, Graphics g, int x, int y) {
-                Graphics2D g2 = (Graphics2D) g.create();
-                Color color = c.isEnabled() ? new Color(46, 170, 220) : Color.GRAY;
-                g2.setColor(color);
-                g2.fillRect(x, y, size, size);
-                g2.dispose();
-            }
-
-            @Override
-            public int getIconWidth() {
-                return size + 2;
-            }
-
-            @Override
-            public int getIconHeight() {
-                return size + 2;
-            }
-        };
-    }
-
     private void updateExecutionButtons() {
         EditorTabPanel panel = getCurrentPanel();
         if (panel == null) {
@@ -1467,18 +1435,19 @@ public class MainFrame extends JFrame {
     private void styleToolbarButton(JButton button) {
         button.setFocusPainted(false);
         button.setContentAreaFilled(false);
-        button.setBorder(new javax.swing.border.LineBorder(new Color(46, 170, 220)));
+        button.setBorder(new javax.swing.border.LineBorder(new Color(46, 170, 220), 2, true));
+        button.setMargin(new Insets(6, 10, 6, 10));
     }
 
     private void refreshToolbarButtonStyles() {
         Color active = new Color(46, 170, 220);
         if (executeButton != null) {
             executeButton.setBorder(new javax.swing.border.LineBorder(
-                    executeButton.isEnabled() ? active : Color.BLACK));
+                    executeButton.isEnabled() ? active : Color.DARK_GRAY, 2, true));
         }
         if (stopButton != null) {
             stopButton.setBorder(new javax.swing.border.LineBorder(
-                    stopButton.isEnabled() ? active : Color.BLACK));
+                    stopButton.isEnabled() ? active : Color.DARK_GRAY, 2, true));
         }
     }
 
@@ -1492,6 +1461,10 @@ public class MainFrame extends JFrame {
                 this::regenerateNoteIcon
         );
         dialog.setVisible(true);
+    }
+
+    private void openTrashBin() {
+        getTrashBinDialog().open();
     }
 
     private void importNoteFromFile() {
@@ -1641,6 +1614,13 @@ public class MainFrame extends JFrame {
                 getQuickSqlSnippetDialog().toggleVisible();
             }
         });
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_Q, InputEvent.ALT_DOWN_MASK), "toggle_exec_history_dialog");
+        actionMap.put("toggle_exec_history_dialog", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                getExecutionHistoryDialog().toggleVisible();
+            }
+        });
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addKeyEventDispatcher(e -> {
                     if (e.getID() == KeyEvent.KEY_PRESSED
@@ -1660,6 +1640,20 @@ public class MainFrame extends JFrame {
         return quickSqlSnippetDialog;
     }
 
+    private ExecutionHistoryDialog getExecutionHistoryDialog() {
+        if (executionHistoryDialog == null) {
+            executionHistoryDialog = new ExecutionHistoryDialog(this, sqlHistoryRepository, this::insertSqlToCurrentEditor);
+        }
+        return executionHistoryDialog;
+    }
+
+    private TrashBinDialog getTrashBinDialog() {
+        if (trashBinDialog == null) {
+            trashBinDialog = new TrashBinDialog(this, noteRepository, this::getOrCreateNoteIcon);
+        }
+        return trashBinDialog;
+    }
+
     private void toggleSuggestionMode() {
         suggestionEnabled = !suggestionEnabled;
         suggestionStateLabel.setText("联想: " + (suggestionEnabled ? "开启" : "关闭"));
@@ -1670,6 +1664,18 @@ public class MainFrame extends JFrame {
                 p.hideSuggestionPopup();
             }
         });
+    }
+
+    private void insertSqlToCurrentEditor(String sql) {
+        if (sql == null || sql.isBlank()) {
+            return;
+        }
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel == null) {
+            JOptionPane.showMessageDialog(this, "请先打开一个笔记窗口");
+            return;
+        }
+        panel.insertSqlAtCaret(sql);
     }
 
     private void handleMetadataRefreshResult(MetadataService.MetadataRefreshResult result) {

@@ -188,15 +188,16 @@ public class ManageNotesDialog extends JDialog {
         table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN);
         table.setRowHeight(24);
 
-        table.getColumnModel().getColumn(0).setPreferredWidth(40);   // 星标
-        table.getColumnModel().getColumn(1).setPreferredWidth(260);  // 标题 + 图标
-        table.getColumnModel().getColumn(2).setPreferredWidth(60);   // 数据库
-        table.getColumnModel().getColumn(3).setPreferredWidth(160);  // 标签
-        table.getColumnModel().getColumn(4).setPreferredWidth(120);  // 创建时间
-        table.getColumnModel().getColumn(5).setPreferredWidth(120);  // 修改时间
-        table.getColumnModel().getColumn(6).setPreferredWidth(80);   // 状态
+        table.getColumnModel().getColumn(0).setPreferredWidth(50);   // 勾选
+        table.getColumnModel().getColumn(1).setPreferredWidth(40);   // 星标
+        table.getColumnModel().getColumn(2).setPreferredWidth(260);  // 标题 + 图标
+        table.getColumnModel().getColumn(3).setPreferredWidth(60);   // 数据库
+        table.getColumnModel().getColumn(4).setPreferredWidth(160);  // 标签
+        table.getColumnModel().getColumn(5).setPreferredWidth(120);  // 创建时间
+        table.getColumnModel().getColumn(6).setPreferredWidth(120);  // 修改时间
+        table.getColumnModel().getColumn(7).setPreferredWidth(80);   // 状态
 
-        table.getColumnModel().getColumn(1).setCellRenderer(
+        table.getColumnModel().getColumn(2).setCellRenderer(
                 new TitleWithIconRenderer(model, iconProvider));
 
         DefaultTableCellRenderer timeRenderer = new DefaultTableCellRenderer() {
@@ -209,12 +210,14 @@ public class ManageNotesDialog extends JDialog {
                 }
             }
         };
-        table.getColumnModel().getColumn(4).setCellRenderer(timeRenderer);
         table.getColumnModel().getColumn(5).setCellRenderer(timeRenderer);
+        table.getColumnModel().getColumn(6).setCellRenderer(timeRenderer);
 
         DefaultTableCellRenderer centerRenderer = new DefaultTableCellRenderer();
         centerRenderer.setHorizontalAlignment(SwingConstants.CENTER);
-        table.getColumnModel().getColumn(6).setCellRenderer(centerRenderer);
+        table.getColumnModel().getColumn(7).setCellRenderer(centerRenderer);
+
+        table.getModel().addTableModelListener(e -> updateButtonState());
 
         table.addMouseListener(new MouseAdapter() {
             @Override
@@ -414,29 +417,29 @@ public class ManageNotesDialog extends JDialog {
     }
 
     private void onTrash(ActionEvent e) {
-        Note note = getSelectedNote();
-        if (note == null) return;
-        if (note.isTrashed()) {
-            JOptionPane.showMessageDialog(this, "该笔记已在垃圾箱中。");
+        if (isTrashTab()) return;
+        List<Note> checked = activeModel.getCheckedNotes();
+        if (checked.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "请先勾选要移动的笔记");
             return;
         }
         int opt = JOptionPane.showConfirmDialog(this,
-                "确定将笔记《" + note.getTitle() + "》移到垃圾箱？",
+                "确定将勾选的 " + checked.size() + " 条笔记移到垃圾箱？",
                 "确认", JOptionPane.YES_NO_OPTION);
         if (opt == JOptionPane.YES_OPTION) {
-            repository.moveToTrash(note);
+            checked.forEach(repository::moveToTrash);
             reloadData();
         }
     }
 
     private void onRestore(ActionEvent e) {
-        Note note = getSelectedNote();
-        if (note == null) return;
-        if (!note.isTrashed()) {
-            JOptionPane.showMessageDialog(this, "该笔记不在垃圾箱中。");
+        if (!isTrashTab()) return;
+        List<Note> checked = trashModel.getCheckedNotes();
+        if (checked.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "请先勾选要还原的笔记");
             return;
         }
-        repository.restore(note);
+        checked.forEach(repository::restore);
         reloadData();
     }
 
@@ -451,15 +454,17 @@ public class ManageNotesDialog extends JDialog {
     }
 
     private void onDeleteForever(ActionEvent e) {
-        Note note = getSelectedNote();
-        if (note == null || !note.isTrashed()) {
+        if (!isTrashTab()) return;
+        List<Note> checked = trashModel.getCheckedNotes();
+        if (checked.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "请先勾选要彻底删除的笔记");
             return;
         }
         int opt = JOptionPane.showConfirmDialog(this,
-                "确定彻底删除《" + note.getTitle() + "》？此操作无法恢复！",
+                "确定彻底删除勾选的 " + checked.size() + " 条笔记？此操作无法恢复！",
                 "警告", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
         if (opt == JOptionPane.YES_OPTION) {
-            repository.deleteForever(note);
+            checked.forEach(repository::deleteForever);
             reloadData();
         }
     }
@@ -491,13 +496,14 @@ public class ManageNotesDialog extends JDialog {
 
     private void updateButtonState() {
         Note note = getSelectedNote();
-        boolean has = note != null;
+        NoteTableModel model = currentModel();
+        boolean hasChecked = model != null && model.hasChecked();
         boolean trashTab = isTrashTab();
-        openButton.setEnabled(has);
-        trashButton.setEnabled(has && !trashTab);
-        restoreButton.setEnabled(has && trashTab);
-        deleteButton.setEnabled(has && trashTab);
-        emptyTrashButton.setEnabled(trashTab);
+        openButton.setEnabled(note != null);
+        trashButton.setEnabled(!trashTab && hasChecked);
+        restoreButton.setEnabled(trashTab && hasChecked);
+        deleteButton.setEnabled(trashTab && hasChecked);
+        emptyTrashButton.setEnabled(trashTab && trashModel.getRowCount() > 0);
     }
 
     private JPanel createBacklinkPanel() {
@@ -587,22 +593,46 @@ public class ManageNotesDialog extends JDialog {
     // === 表模型 ===
     private class NoteTableModel extends AbstractTableModel {
         private final String[] columns = {
-                "★", "标题", "数据库", "标签", "创建时间", "修改时间", "状态"
+                "选择", "★", "标题", "数据库", "标签", "创建时间", "修改时间", "状态"
         };
-        private List<Note> data;
+        private List<RowData> data;
 
         NoteTableModel(List<Note> data) {
-            this.data = data != null ? data : new ArrayList<>();
+            setData(data);
         }
 
         void setData(List<Note> newData) {
-            this.data = newData != null ? newData : new ArrayList<>();
+            this.data = new ArrayList<>();
+            if (newData != null) {
+                for (Note n : newData) {
+                    this.data.add(new RowData(n));
+                }
+            }
             fireTableDataChanged();
+        }
+
+        List<Note> getCheckedNotes() {
+            List<Note> list = new ArrayList<>();
+            for (RowData row : data) {
+                if (row.selected) {
+                    list.add(row.note);
+                }
+            }
+            return list;
+        }
+
+        boolean hasChecked() {
+            return data.stream().anyMatch(r -> r.selected);
         }
 
         Note getNoteAt(int row) {
             if (row < 0 || row >= data.size()) return null;
-            return data.get(row);
+            return data.get(row).note;
+        }
+
+        void clearChecks() {
+            data.forEach(r -> r.selected = false);
+            fireTableDataChanged();
         }
 
         @Override
@@ -623,46 +653,60 @@ public class ManageNotesDialog extends JDialog {
         @Override
         public Class<?> getColumnClass(int columnIndex) {
             return switch (columnIndex) {
-                case 0 -> Boolean.class;
-                case 4, 5 -> Long.class;
+                case 0, 1 -> Boolean.class;
+                case 5, 6 -> Long.class;
                 default -> String.class;
             };
         }
 
         @Override
         public boolean isCellEditable(int rowIndex, int columnIndex) {
-            return columnIndex == 0 || columnIndex == 3;
+            return columnIndex == 0 || columnIndex == 1 || columnIndex == 4;
         }
 
         @Override
         public Object getValueAt(int rowIndex, int columnIndex) {
-            Note note = data.get(rowIndex);
+            RowData row = data.get(rowIndex);
+            Note note = row.note;
             return switch (columnIndex) {
-                case 0 -> note.isStarred();
-                case 1 -> note.getTitle();
-                case 2 -> note.getDatabaseType() == null ? "" : note.getDatabaseType().name();
-                case 3 -> note.getTags();
-                case 4 -> note.getCreatedAt();
-                case 5 -> note.getUpdatedAt();
-                case 6 -> note.isTrashed() ? "垃圾箱" : "正常";
+                case 0 -> row.selected;
+                case 1 -> note.isStarred();
+                case 2 -> note.getTitle();
+                case 3 -> note.getDatabaseType() == null ? "" : note.getDatabaseType().name();
+                case 4 -> note.getTags();
+                case 5 -> note.getCreatedAt();
+                case 6 -> note.getUpdatedAt();
+                case 7 -> note.isTrashed() ? "垃圾箱" : "正常";
                 default -> null;
             };
         }
 
         @Override
         public void setValueAt(Object aValue, int rowIndex, int columnIndex) {
-            Note note = data.get(rowIndex);
-            if (columnIndex == 0 && aValue instanceof Boolean b) {
+            RowData row = data.get(rowIndex);
+            Note note = row.note;
+            if (columnIndex == 0 && aValue instanceof Boolean selected) {
+                row.selected = selected;
+            } else if (columnIndex == 1 && aValue instanceof Boolean b) {
                 boolean starred = b;
                 note.setStarred(starred);
                 String tags = note.getTags();
                 repository.updateMetadata(note, tags, starred);
-            } else if (columnIndex == 3) {
+            } else if (columnIndex == 4) {
                 String tags = aValue == null ? "" : aValue.toString();
                 note.setTags(tags);
                 repository.updateMetadata(note, tags, note.isStarred());
             }
             fireTableRowsUpdated(rowIndex, rowIndex);
+        }
+
+        private class RowData {
+            private final Note note;
+            private boolean selected;
+
+            private RowData(Note note) {
+                this.note = note;
+            }
         }
     }
 
