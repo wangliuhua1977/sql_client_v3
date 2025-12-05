@@ -22,6 +22,9 @@ import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Consumer;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -49,8 +52,13 @@ public class EditorTabPanel extends JPanel {
     private javax.swing.Timer execTimer;
     private Runnable executeHandler;
     private EditorStyle currentStyle;
+    private EditorStyle defaultStyle;
     private int runtimeFontSize;
-    private final java.util.function.Consumer<EditorTabPanel> focusNotifier;
+    private final Consumer<EditorTabPanel> focusNotifier;
+    private JMenu styleMenu;
+    private List<EditorStyle> styleOptions = new ArrayList<>();
+    private Consumer<EditorStyle> styleSelectionHandler;
+    private Runnable resetStyleHandler;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
@@ -59,7 +67,7 @@ public class EditorTabPanel extends JPanel {
                           Note note,
                           boolean convertFullWidth,
                           EditorStyle style,
-                          java.util.function.Consumer<EditorTabPanel> focusNotifier,
+                          Consumer<EditorTabPanel> focusNotifier,
                           Consumer<String> linkOpener) {
         super(new BorderLayout());
         this.noteRepository = noteRepository;
@@ -67,6 +75,7 @@ public class EditorTabPanel extends JPanel {
         this.databaseType = note.getDatabaseType();
         this.textArea = createEditor();
         this.currentStyle = style;
+        this.defaultStyle = style;
         this.runtimeFontSize = style.getFontSize();
         this.titleUpdater = titleUpdater;
         this.linkOpener = linkOpener;
@@ -90,43 +99,13 @@ public class EditorTabPanel extends JPanel {
             }
         });
         this.textArea.addKeyListener(suggestionEngine.createKeyListener());
-
-        // ===== 鼠标滚轮：Shift+滚轮 调整字体，其余情况驱动外层滚动条上下滚动 =====
         this.textArea.addMouseWheelListener(e -> {
-            // 1) Shift + 滚轮：缩放字体大小
             if (e.isShiftDown()) {
-                runtimeFontSize = Math.max(10,
-                        Math.min(40, runtimeFontSize + (e.getWheelRotation() < 0 ? 1 : -1)));
+                runtimeFontSize = Math.max(10, Math.min(40, runtimeFontSize + (e.getWheelRotation() < 0 ? 1 : -1)));
                 applyFontSize();
                 e.consume();
-                return;
-            }
-
-            // 2) 普通滚轮：找到外层 JScrollPane，手动滚动垂直滚动条
-            Component ancestor = SwingUtilities.getAncestorOfClass(JScrollPane.class, textArea);
-            if (ancestor instanceof JScrollPane scrollPane) {
-                JScrollBar bar = scrollPane.getVerticalScrollBar();
-                if (bar != null && bar.isVisible()) {
-                    int rotation = e.getWheelRotation(); // >0 向下，<0 向上
-                    if (rotation != 0) {
-                        int direction = rotation > 0 ? 1 : -1;
-                        int unit = bar.getUnitIncrement(direction);
-                        if (unit <= 0) {
-                            unit = 16; // 兜底：每格大概 16 像素
-                        }
-                        // 一格滚轮滚 3 个单位，手感稍微快一点
-                        int delta = rotation * unit * 3;
-                        int newValue = bar.getValue() + delta;
-                        int max = bar.getMaximum() - bar.getVisibleAmount();
-                        if (newValue < 0) newValue = 0;
-                        if (newValue > max) newValue = max;
-                        bar.setValue(newValue);
-                    }
-                    e.consume();
-                }
             }
         });
-
         installFocusHooks();
         this.textArea.setText(note.getContent());
         installExecuteShortcut();
@@ -180,6 +159,49 @@ public class EditorTabPanel extends JPanel {
         JMenuItem smartParse = new JMenuItem("智能解析");
         smartParse.addActionListener(e -> performSmartParse());
         popup.add(smartParse);
+    }
+
+    private void installStyleMenu() {
+        if (styleOptions == null || styleOptions.isEmpty() || defaultStyle == null) {
+            return;
+        }
+        JPopupMenu popup = textArea.getPopupMenu();
+        if (popup == null) {
+            popup = new JPopupMenu();
+            textArea.setPopupMenu(popup);
+        }
+        if (styleMenu != null) {
+            popup.remove(styleMenu);
+        }
+        boolean followDefault = note.getStyleName() == null || note.getStyleName().isBlank();
+        styleMenu = new JMenu("编辑器样式");
+        ButtonGroup group = new ButtonGroup();
+        JRadioButtonMenuItem follow = new JRadioButtonMenuItem("跟随全局默认", followDefault);
+        follow.addActionListener(e -> {
+            applyStyle(defaultStyle);
+            if (resetStyleHandler != null) {
+                resetStyleHandler.run();
+            }
+        });
+        group.add(follow);
+        styleMenu.add(follow);
+
+        for (EditorStyle style : styleOptions) {
+            boolean selected = !followDefault && style.getName().equalsIgnoreCase(note.getStyleName());
+            JRadioButtonMenuItem item = new JRadioButtonMenuItem(style.getName(), selected);
+            item.addActionListener(e -> {
+                applyStyle(style);
+                if (styleSelectionHandler != null) {
+                    styleSelectionHandler.accept(style);
+                }
+            });
+            group.add(item);
+            styleMenu.add(item);
+        }
+        if (popup.getComponentCount() > 0 && !(popup.getComponent(popup.getComponentCount() - 1) instanceof JSeparator)) {
+            popup.addSeparator();
+        }
+        popup.add(styleMenu);
     }
 
     private void performSmartParse() {
@@ -336,6 +358,7 @@ public class EditorTabPanel extends JPanel {
 
         editorPanel.setMinimumSize(new Dimension(120, 200));
 
+
         splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
         splitPane.setResizeWeight(1.0);
         splitPane.setDividerSize(10);
@@ -402,6 +425,15 @@ public class EditorTabPanel extends JPanel {
 
     public void setFullWidthConversionEnabled(boolean enabled) {
         fullWidthFilter.setEnabled(enabled);
+    }
+
+    public void refreshStyleMenu(List<EditorStyle> styles, EditorStyle globalDefault,
+                                 Consumer<EditorStyle> selectionHandler, Runnable resetHandler) {
+        this.styleOptions = new ArrayList<>(styles);
+        this.styleSelectionHandler = selectionHandler;
+        this.resetStyleHandler = resetHandler;
+        this.defaultStyle = globalDefault;
+        installStyleMenu();
     }
 
     public void applyStyle(EditorStyle style) {
