@@ -25,6 +25,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -51,8 +52,13 @@ public class EditorTabPanel extends JPanel {
     private javax.swing.Timer execTimer;
     private Runnable executeHandler;
     private EditorStyle currentStyle;
+    private EditorStyle defaultStyle;
     private int runtimeFontSize;
     private final Consumer<EditorTabPanel> focusNotifier;
+    private JMenu styleMenu;
+    private List<EditorStyle> styleOptions = new ArrayList<>();
+    private Consumer<EditorStyle> styleSelectionHandler;
+    private Runnable resetStyleHandler;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
@@ -69,6 +75,7 @@ public class EditorTabPanel extends JPanel {
         this.databaseType = note.getDatabaseType();
         this.textArea = createEditor();
         this.currentStyle = style;
+        this.defaultStyle = style;
         this.runtimeFontSize = style.getFontSize();
         this.titleUpdater = titleUpdater;
         this.linkOpener = linkOpener;
@@ -152,6 +159,49 @@ public class EditorTabPanel extends JPanel {
         JMenuItem smartParse = new JMenuItem("智能解析");
         smartParse.addActionListener(e -> performSmartParse());
         popup.add(smartParse);
+    }
+
+    private void installStyleMenu() {
+        if (styleOptions == null || styleOptions.isEmpty() || defaultStyle == null) {
+            return;
+        }
+        JPopupMenu popup = textArea.getPopupMenu();
+        if (popup == null) {
+            popup = new JPopupMenu();
+            textArea.setPopupMenu(popup);
+        }
+        if (styleMenu != null) {
+            popup.remove(styleMenu);
+        }
+        boolean followDefault = note.getStyleName() == null || note.getStyleName().isBlank();
+        styleMenu = new JMenu("编辑器样式");
+        ButtonGroup group = new ButtonGroup();
+        JRadioButtonMenuItem follow = new JRadioButtonMenuItem("跟随全局默认", followDefault);
+        follow.addActionListener(e -> {
+            applyStyle(defaultStyle);
+            if (resetStyleHandler != null) {
+                resetStyleHandler.run();
+            }
+        });
+        group.add(follow);
+        styleMenu.add(follow);
+
+        for (EditorStyle style : styleOptions) {
+            boolean selected = !followDefault && style.getName().equalsIgnoreCase(note.getStyleName());
+            JRadioButtonMenuItem item = new JRadioButtonMenuItem(style.getName(), selected);
+            item.addActionListener(e -> {
+                applyStyle(style);
+                if (styleSelectionHandler != null) {
+                    styleSelectionHandler.accept(style);
+                }
+            });
+            group.add(item);
+            styleMenu.add(item);
+        }
+        if (popup.getComponentCount() > 0 && !(popup.getComponent(popup.getComponentCount() - 1) instanceof JSeparator)) {
+            popup.addSeparator();
+        }
+        popup.add(styleMenu);
     }
 
     private void performSmartParse() {
@@ -375,6 +425,15 @@ public class EditorTabPanel extends JPanel {
 
     public void setFullWidthConversionEnabled(boolean enabled) {
         fullWidthFilter.setEnabled(enabled);
+    }
+
+    public void refreshStyleMenu(List<EditorStyle> styles, EditorStyle globalDefault,
+                                 Consumer<EditorStyle> selectionHandler, Runnable resetHandler) {
+        this.styleOptions = new ArrayList<>(styles);
+        this.styleSelectionHandler = selectionHandler;
+        this.resetStyleHandler = resetHandler;
+        this.defaultStyle = globalDefault;
+        installStyleMenu();
     }
 
     public void applyStyle(EditorStyle style) {

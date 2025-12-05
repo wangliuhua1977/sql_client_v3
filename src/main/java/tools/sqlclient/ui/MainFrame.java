@@ -13,6 +13,8 @@ import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.ui.ThemeManager;
+import tools.sqlclient.ui.ThemeOption;
 import tools.sqlclient.ui.QueryResultPanel;
 import tools.sqlclient.ui.ManageNotesDialog.SearchNavigation;
 import tools.sqlclient.util.IconFactory;
@@ -39,6 +41,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -70,6 +73,7 @@ public class MainFrame extends JFrame {
     private final SqlHistoryRepository sqlHistoryRepository;
     private final MetadataService metadataService;
     private final EditorStyleRepository styleRepository;
+    private final ThemeManager themeManager = new ThemeManager();
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private final Map<Long, java.util.List<CompletableFuture<?>>> runningExecutions = new ConcurrentHashMap<>();
@@ -83,6 +87,8 @@ public class MainFrame extends JFrame {
     private JRadioButtonMenuItem panelModeItem;
     private boolean convertFullWidth = true;
     private EditorStyle currentStyle;
+    private List<EditorStyle> availableStyles = new java.util.ArrayList<>();
+    private ThemeOption currentTheme;
     private boolean suggestionEnabled = true;
     private EditorTabPanel activePanel;
     private JButton executeButton;
@@ -123,42 +129,36 @@ public class MainFrame extends JFrame {
         this.sqlSnippetRepository = new SqlSnippetRepository(sqliteManager);
         this.sqlHistoryRepository = new SqlHistoryRepository(sqliteManager);
         this.styleRepository = new EditorStyleRepository(sqliteManager);
+        initTheme();
         // 加载笔记图标配置（noteId -> 图标规格）
         loadNoteIcons();
         // 加载主窗体图标：resources 目录下的 PNG，不存在则回退默认图标
         loadMainWindowIcon();
 
-        // 加载编辑器样式
-        var styles = styleRepository.listAll();
+        ensureBuiltinStyles();
+        availableStyles = styleRepository.listAll();
         String styleName = appStateRepository.loadCurrentStyleName(
-                styles.isEmpty() ? "默认" : styles.get(0).getName());
-        this.currentStyle = styles.stream()
-                .filter(s -> s.getName().equals(styleName))
-                .findFirst()
-                .orElseGet(() -> {
-                    if (!styles.isEmpty()) {
-                        return styles.get(0);
-                    }
-                    return new EditorStyle(
-                            "默认",
-                            14,
-                            "#FFFFFF", // background
-                            "#000000", // foreground
-                            "#CCE8FF", // selection
-                            "#000000", // caret
-                            "#005CC5", // keyword
-                            "#032F62", // string
-                            "#6A737D", // comment
-                            "#1C7C54", // number
-                            "#000000", // operator
-                            "#6F42C1", // function
-                            "#005CC5", // data type
-                            "#24292E", // identifier
-                            "#D73A49", // literal
-                            "#F6F8FA", // line highlight
-                            "#FFDD88"  // bracket
-                    );
-                });
+                availableStyles.isEmpty() ? "默认" : availableStyles.get(0).getName());
+        this.currentStyle = findStyleByName(styleName)
+                .orElseGet(() -> availableStyles.isEmpty() ? new EditorStyle(
+                        "默认",
+                        14,
+                        "#FFFFFF",
+                        "#000000",
+                        "#CCE8FF",
+                        "#000000",
+                        "#005CC5",
+                        "#032F62",
+                        "#6A737D",
+                        "#1C7C54",
+                        "#000000",
+                        "#6F42C1",
+                        "#005CC5",
+                        "#24292E",
+                        "#D73A49",
+                        "#F6F8FA",
+                        "#FFDD88"
+                ) : availableStyles.get(0));
         this.convertFullWidth = appStateRepository.loadFullWidthOption(true);
 
         // 需求 1：加载上一次备份目录
@@ -719,6 +719,7 @@ public class MainFrame extends JFrame {
         JMenuBar menuBar = new JMenuBar();
         JMenu file = new JMenu("文件");
         JMenu edit = new JMenu("编辑");
+        JMenu preferences = new JMenu("首选项");
         JMenu view = new JMenu("视图");
         JMenu window = new JMenu("窗口");
         JMenu tools = new JMenu("工具");
@@ -768,12 +769,6 @@ public class MainFrame extends JFrame {
                 openTrashBin();
             }
         }));
-        file.add(new JMenuItem(new AbstractAction("设置 - SQL 编辑器选项") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                openEditorSettings();
-            }
-        }));
         file.addSeparator();
         file.add(new JMenuItem(new AbstractAction("退出") {
             @Override
@@ -782,6 +777,15 @@ public class MainFrame extends JFrame {
                 System.exit(0);
             }
         }));
+
+        JMenuItem editorSettings = new JMenuItem(new AbstractAction("SQL 编辑器选项…") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openEditorSettings();
+            }
+        });
+        editorSettings.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_COMMA, InputEvent.CTRL_DOWN_MASK));
+        preferences.add(editorSettings);
 
         tools.add(new JMenuItem(new AbstractAction("重置元数据") {
             @Override
@@ -861,6 +865,16 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        JMenu themeMenu = new JMenu("主题");
+        ButtonGroup themeGroup = new ButtonGroup();
+        for (ThemeOption option : themeManager.getOptions()) {
+            boolean selected = currentTheme != null && currentTheme.getId().equals(option.getId());
+            JRadioButtonMenuItem item = new JRadioButtonMenuItem(option.getName(), selected);
+            item.addActionListener(e -> switchTheme(option));
+            themeGroup.add(item);
+            themeMenu.add(item);
+        }
+        view.add(themeMenu);
         view.addSeparator();
         windowModeItem = new JRadioButtonMenuItem("独立窗口模式", true);
         panelModeItem = new JRadioButtonMenuItem("面板模式", false);
@@ -889,6 +903,7 @@ public class MainFrame extends JFrame {
 
         menuBar.add(file);
         menuBar.add(edit);
+        menuBar.add(preferences);
         menuBar.add(view);
         menuBar.add(window);
         menuBar.add(tools);
@@ -1018,12 +1033,13 @@ public class MainFrame extends JFrame {
                     newTitle -> updateTitleForPanel(newTitle, id),
                     note,
                     convertFullWidth,
-                    currentStyle,
+                    resolveStyleForNote(note),
                     this::onPanelFocused,
                     this::openNoteByTitle
             );
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
+            refreshPanelStyleMenu(p);
             return p;
         });
     }
@@ -1514,12 +1530,102 @@ public class MainFrame extends JFrame {
             convertFullWidth = dialog.isConvertFullWidthEnabled();
             appStateRepository.saveFullWidthOption(convertFullWidth);
             panelCache.values().forEach(p -> p.setFullWidthConversionEnabled(convertFullWidth));
+            availableStyles = styleRepository.listAll();
             dialog.getSelectedStyle().ifPresent(style -> {
-                currentStyle = style;
-                appStateRepository.saveCurrentStyleName(style.getName());
-                panelCache.values().forEach(p -> p.applyStyle(style));
+                currentStyle = findStyleByName(style.getName()).orElse(style);
+                appStateRepository.saveCurrentStyleName(currentStyle.getName());
+                panelCache.values().forEach(p -> {
+                    if (p.getNote().getStyleName() == null || p.getNote().getStyleName().isBlank()) {
+                        p.applyStyle(currentStyle);
+                    }
+                    refreshPanelStyleMenu(p);
+                });
             });
+            panelCache.values().forEach(this::refreshPanelStyleMenu);
         }
+    }
+
+    private EditorStyle resolveStyleForNote(Note note) {
+        if (note != null && note.getStyleName() != null && !note.getStyleName().isBlank()) {
+            return findStyleByName(note.getStyleName()).orElse(currentStyle);
+        }
+        return currentStyle;
+    }
+
+    private Optional<EditorStyle> findStyleByName(String name) {
+        if (name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        return availableStyles.stream()
+                .filter(s -> s.getName().equalsIgnoreCase(name))
+                .findFirst();
+    }
+
+    private void refreshPanelStyleMenu(EditorTabPanel panel) {
+        if (panel == null) return;
+        panel.refreshStyleMenu(availableStyles, currentStyle,
+                style -> applyStyleToPanel(panel, style),
+                () -> resetPanelStyle(panel));
+    }
+
+    private void applyStyleToPanel(EditorTabPanel panel, EditorStyle style) {
+        try {
+            panel.applyStyle(style);
+            noteRepository.updateStyleName(panel.getNote(), style.getName());
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "应用样式失败: " + ex.getMessage());
+        }
+    }
+
+    private void resetPanelStyle(EditorTabPanel panel) {
+        try {
+            noteRepository.updateStyleName(panel.getNote(), "");
+            panel.applyStyle(currentStyle);
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "重置样式失败: " + ex.getMessage());
+        }
+    }
+
+    private void ensureBuiltinStyles() {
+        List<EditorStyle> presets = List.of(
+                new EditorStyle("默认", 14, "#FFFFFF", "#000000", "#CCE8FF", "#000000", "#005CC5", "#032F62", "#6A737D", "#1C7C54", "#000000", "#6F42C1", "#005CC5", "#24292E", "#D73A49", "#F6F8FA", "#FFDD88"),
+                new EditorStyle("经典亮色", 14, "#FDFDFD", "#1E1E1E", "#CCE8FF", "#111111", "#0066BF", "#B03060", "#8A8A8A", "#1C7C54", "#1E1E1E", "#005F87", "#0F4C81", "#1E1E1E", "#AF00DB", "#F2F8FF", "#FFA657"),
+                new EditorStyle("柔和护眼", 14, "#F6FBF4", "#2E3B2E", "#D9F2E6", "#3B3B3B", "#2E7D32", "#2E7D6C", "#6D8B74", "#33691E", "#3E4C3E", "#1565C0", "#2E7D32", "#1B3C35", "#8E24AA", "#E8F5E9", "#81C784"),
+                new EditorStyle("暗夜海蓝", 14, "#1E1E2A", "#DADADA", "#2D3B55", "#A0A0A0", "#82AAFF", "#C3E88D", "#697098", "#F78C6C", "#E0E0E0", "#C792EA", "#7FDBCA", "#D0D0D0", "#FFCB6B", "#2A2E3F", "#89DDFF"),
+                new EditorStyle("Monokai 经典", 14, "#272822", "#F8F8F2", "#49483E", "#F8F8F0", "#F92672", "#E6DB74", "#75715E", "#AE81FF", "#F8F8F2", "#66D9EF", "#A6E22E", "#F8F8F2", "#FD971F", "#3E3D32", "#A6E22E"),
+                new EditorStyle("Solarized Dark", 14, "#002B36", "#839496", "#073642", "#93A1A1", "#268BD2", "#2AA198", "#586E75", "#D33682", "#93A1A1", "#B58900", "#859900", "#93A1A1", "#CB4B16", "#073642", "#6C71C4"),
+                new EditorStyle("终端绿黑", 14, "#0C0C0C", "#0EE676", "#1F1F1F", "#0EE676", "#1E90FF", "#7CFC00", "#3A9D23", "#66D9EF", "#E5E510", "#61AFEF", "#56B6C2", "#C5C8C6", "#98C379", "#1A1A1A", "#50FA7B")
+        );
+        for (EditorStyle style : presets) {
+            try {
+                styleRepository.upsert(style);
+            } catch (Exception ex) {
+                OperationLog.log("写入内置样式失败: " + ex.getMessage());
+            }
+        }
+    }
+
+    private void initTheme() {
+        List<ThemeOption> options = themeManager.getOptions();
+        if (options.isEmpty()) {
+            return;
+        }
+        String defaultId = options.get(0).getId();
+        String saved = appStateRepository.loadCurrentThemeName(defaultId);
+        currentTheme = themeManager.findById(saved).orElse(options.get(0));
+        themeManager.applyThemeAsync(currentTheme, null);
+    }
+
+    private void switchTheme(ThemeOption option) {
+        if (option == null) {
+            return;
+        }
+        if (currentTheme != null && currentTheme.getId().equals(option.getId())) {
+            return;
+        }
+        currentTheme = option;
+        appStateRepository.saveCurrentThemeName(option.getId());
+        themeManager.applyThemeAsync(option, () -> repaint());
     }
 
     private EditorTabPanel extractPanel(Component comp) {

@@ -11,10 +11,11 @@ public class Note {
     private boolean starred;
     private boolean trashed;
     private long deletedAt;
+    private String styleName;
 
     public Note(long id, String title, String content, DatabaseType databaseType,
                 long createdAt, long updatedAt, String tags, boolean starred,
-                boolean trashed, long deletedAt) {
+                boolean trashed, long deletedAt, String styleName) {
         this.id = id;
         this.title = title;
         this.content = content;
@@ -25,6 +26,7 @@ public class Note {
         this.starred = starred;
         this.trashed = trashed;
         this.deletedAt = deletedAt;
+        this.styleName = styleName == null ? "" : styleName;
     }
 
     public long getId() {
@@ -101,6 +103,14 @@ public class Note {
 
     public void setDeletedAt(long deletedAt) {
         this.deletedAt = deletedAt;
+    }
+
+    public String getStyleName() {
+        return styleName;
+    }
+
+    public void setStyleName(String styleName) {
+        this.styleName = styleName == null ? "" : styleName;
     }
 
     @Override
