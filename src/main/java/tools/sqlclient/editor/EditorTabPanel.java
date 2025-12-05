@@ -13,6 +13,7 @@ import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.SuggestionEngine;
 import tools.sqlclient.util.ThreadPools;
+import tools.sqlclient.util.SqlBlockDetector;
 
 import javax.swing.*;
 import javax.swing.text.BadLocationException;
@@ -498,6 +499,12 @@ public class EditorTabPanel extends JPanel {
         String selected = textArea.getSelectedText();
         String target;
         if (selected != null && !selected.isBlank()) {
+            SqlBlockDetector.DdlBlockDetectionResult detectionResult = SqlBlockDetector.detectSingleDdlBlock(selected);
+            if (detectionResult.isSingleDdlBlock()) {
+                java.util.List<String> list = new java.util.ArrayList<>();
+                list.add(selected);
+                return list;
+            }
             target = selected;
         } else if (blockMode) {
             target = extractBlockAroundCaret();
