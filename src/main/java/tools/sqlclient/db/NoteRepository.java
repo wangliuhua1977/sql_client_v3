@@ -18,6 +18,7 @@ import java.util.stream.Collectors;
  * 笔记存储，全部保存在本地 SQLite。
  */
 public class NoteRepository {
+    private static final String BASE_COLUMNS = "id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at, style_name";
     private final SQLiteManager sqliteManager;
 
     public NoteRepository(SQLiteManager sqliteManager) {
@@ -31,7 +32,7 @@ public class NoteRepository {
         long now = Instant.now().toEpochMilli();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(
-                     "INSERT INTO notes(title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at) VALUES(?,?,?,?,?,?,?,?,?) RETURNING id")) {
+                     "INSERT INTO notes(title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at, style_name) VALUES(?,?,?,?,?,?,?,?,?,?) RETURNING id")) {
             ps.setString(1, title);
             ps.setString(2, "");
             ps.setString(3, type.name());
@@ -41,9 +42,10 @@ public class NoteRepository {
             ps.setInt(7, 0);
             ps.setInt(8, 0);
             ps.setLong(9, 0);
+            ps.setString(10, "");
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    return new Note(rs.getLong(1), title, "", type, now, now, "", false, false, 0);
+                    return new Note(rs.getLong(1), title, "", type, now, now, "", false, false, 0, "");
                 }
             }
         } catch (Exception e) {
@@ -122,7 +124,7 @@ public class NoteRepository {
     }
 
     public Optional<Note> find(long id) {
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE id=?";
+        String sql = "SELECT " + BASE_COLUMNS + " FROM notes WHERE id=?";
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, id);
@@ -138,7 +140,7 @@ public class NoteRepository {
     }
 
     public List<Note> listAll() {
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes ORDER BY updated_at DESC, id DESC";
+        String sql = "SELECT " + BASE_COLUMNS + " FROM notes ORDER BY updated_at DESC, id DESC";
         List<Note> notes = new ArrayList<>();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql);
@@ -153,7 +155,7 @@ public class NoteRepository {
     }
 
     public List<Note> listByTrashed(boolean trashed) {
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE trashed=? ORDER BY updated_at DESC, id DESC";
+        String sql = "SELECT " + BASE_COLUMNS + " FROM notes WHERE trashed=? ORDER BY updated_at DESC, id DESC";
         List<Note> notes = new ArrayList<>();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -172,7 +174,7 @@ public class NoteRepository {
     public List<Note> listByIds(List<Long> ids) {
         if (ids == null || ids.isEmpty()) return List.of();
         String placeholders = ids.stream().map(i -> "?").collect(java.util.stream.Collectors.joining(","));
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE id IN (" + placeholders + ") ORDER BY updated_at DESC";
+        String sql = "SELECT " + BASE_COLUMNS + " FROM notes WHERE id IN (" + placeholders + ") ORDER BY updated_at DESC";
         List<Note> notes = new ArrayList<>();
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -196,7 +198,7 @@ public class NoteRepository {
             throw new IllegalArgumentException("标题不能为空");
         }
         String normalized = title.trim();
-        String sql = "SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE lower(title)=lower(?) ORDER BY updated_at DESC, id DESC LIMIT 1";
+        String sql = "SELECT " + BASE_COLUMNS + " FROM notes WHERE lower(title)=lower(?) ORDER BY updated_at DESC, id DESC LIMIT 1";
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, normalized);
@@ -303,7 +305,7 @@ public class NoteRepository {
     }
 
     public List<Note> search(String keyword, boolean fullText, boolean includeTrash) {
-        StringBuilder sql = new StringBuilder("SELECT id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at FROM notes WHERE 1=1");
+        StringBuilder sql = new StringBuilder("SELECT " + BASE_COLUMNS + " FROM notes WHERE 1=1");
         List<String> params = new ArrayList<>();
         if (!includeTrash) {
             sql.append(" AND trashed=0");
@@ -351,8 +353,24 @@ public class NoteRepository {
                 rs.getString("tags"),
                 rs.getInt("starred") == 1,
                 rs.getInt("trashed") == 1,
-                rs.getLong("deleted_at")
+                rs.getLong("deleted_at"),
+                rs.getString("style_name")
         );
+    }
+
+    public void updateStyleName(Note note, String styleName) {
+        long now = Instant.now().toEpochMilli();
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("UPDATE notes SET style_name=?, updated_at=? WHERE id=?")) {
+            ps.setString(1, styleName == null ? "" : styleName);
+            ps.setLong(2, now);
+            ps.setLong(3, note.getId());
+            ps.executeUpdate();
+            note.setStyleName(styleName);
+            note.setUpdatedAt(now);
+        } catch (Exception e) {
+            throw new RuntimeException("保存笔记样式失败", e);
+        }
     }
 
     public void moveToTrash(Note note) {

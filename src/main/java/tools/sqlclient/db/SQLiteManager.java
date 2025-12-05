@@ -60,7 +60,8 @@ public class SQLiteManager {
                     "tags TEXT DEFAULT '', " +
                     "starred INTEGER DEFAULT 0, " +
                     "trashed INTEGER DEFAULT 0, " +
-                    "deleted_at INTEGER DEFAULT 0"
+                    "deleted_at INTEGER DEFAULT 0, " +
+                    "style_name TEXT DEFAULT ''"
                     + ")");
             // 兼容旧版本：逐列补齐，避免缺失 created_at/updated_at 等字段导致查询失败
             // SQLite 不允许使用表达式默认值在 ALTER TABLE 里添加列，这里使用常量默认值并由上层插入逻辑填充实际时间戳
@@ -70,6 +71,7 @@ public class SQLiteManager {
             ensureColumn(conn, "notes", "starred", "INTEGER DEFAULT 0");
             ensureColumn(conn, "notes", "trashed", "INTEGER DEFAULT 0");
             ensureColumn(conn, "notes", "deleted_at", "INTEGER DEFAULT 0");
+            ensureColumn(conn, "notes", "style_name", "TEXT DEFAULT ''");
             normalizeNoteTitles(conn);
             ensureUniqueIndex(conn, "idx_notes_title_unique", "notes", "title");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS note_links (" +

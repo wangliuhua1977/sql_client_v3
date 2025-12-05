@@ -15,6 +15,7 @@ public class AppStateRepository {
     private static final String OPEN_NOTES_KEY = "open_notes";
     private static final String FULL_WIDTH_KEY = "convert_full_width";
     private static final String CURRENT_STYLE_KEY = "editor_style";
+    private static final String CURRENT_THEME_KEY = "app_theme";
     private final SQLiteManager sqliteManager;
 
     public AppStateRepository(SQLiteManager sqliteManager) {
@@ -89,6 +90,14 @@ public class AppStateRepository {
 
     public String loadCurrentStyleName(String defaultName) {
         return loadStringOption(CURRENT_STYLE_KEY, defaultName);
+    }
+
+    public void saveCurrentThemeName(String themeName) {
+        saveStringOption(CURRENT_THEME_KEY, themeName);
+    }
+
+    public String loadCurrentThemeName(String defaultName) {
+        return loadStringOption(CURRENT_THEME_KEY, defaultName);
     }
 
     public void saveStringOption(String key, String value) {
