@@ -26,6 +26,26 @@ public class SqlExecutionService {
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
 
+    /**
+     * 同步执行一条 SQL：提交后台任务，轮询至结束并返回结果集。
+     * 仍然复用异步接口的加密与 Header 逻辑。
+     */
+    public SqlExecResult executeSync(String sql) {
+        AsyncJobStatus submitted = submitJob(sql);
+        try {
+            AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
+            if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
+                throw new RuntimeException(finalStatus.getMessage() != null
+                        ? finalStatus.getMessage()
+                        : ("任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus()));
+            }
+            return requestResult(submitted.getJobId(), sql);
+        } catch (Exception e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
+        }
+    }
+
     public CompletableFuture<Void> execute(String sql,
                                            Consumer<SqlExecResult> onSuccess,
                                            Consumer<Exception> onError) {
@@ -165,29 +185,71 @@ public class SqlExecutionService {
 
         JsonArray rowsJson = resp.has("resultRows") && resp.get("resultRows").isJsonArray()
                 ? resp.getAsJsonArray("resultRows") : new JsonArray();
-        List<String> columns = new ArrayList<>();
-        List<List<String>> rows = new ArrayList<>();
-        if (rowsJson.size() > 0) {
-            JsonObject first = rowsJson.get(0).getAsJsonObject();
-            for (Map.Entry<String, JsonElement> entry : first.entrySet()) {
-                columns.add(entry.getKey());
-            }
-            for (JsonElement el : rowsJson) {
-                if (el != null && el.isJsonObject()) {
-                    JsonObject obj = el.getAsJsonObject();
-                    List<String> row = new ArrayList<>();
-                    for (String col : columns) {
-                        JsonElement v = obj.get(col);
-                        row.add(v == null || v.isJsonNull() ? "" : v.getAsString());
-                    }
-                    rows.add(row);
-                }
-            }
-        }
+        List<String> columns = extractColumns(resp, rowsJson);
+        List<List<String>> rows = extractRows(rowsJson, columns);
         int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
         OperationLog.log("[" + jobId + "] 任务完成，行数 " + rowCount);
         return new SqlExecResult(sql, columns, rows, rowCount, true, message, jobId, status, progress,
                 null, duration, rowsAffected, returnedRowCount, hasResultSet);
+    }
+
+    private List<String> extractColumns(JsonObject resp, JsonArray rowsJson) {
+        List<String> columns = new ArrayList<>();
+        for (String key : List.of("columns", "resultColumns", "columnNames")) {
+            if (resp.has(key) && resp.get(key).isJsonArray()) {
+                for (JsonElement el : resp.getAsJsonArray(key)) {
+                    if (el != null && el.isJsonPrimitive()) {
+                        columns.add(el.getAsString());
+                    }
+                }
+                if (!columns.isEmpty()) {
+                    return columns;
+                }
+            }
+        }
+
+        if (rowsJson.size() > 0) {
+            JsonElement first = rowsJson.get(0);
+            if (first.isJsonObject()) {
+                // JsonObject 在 Gson 中保持插入顺序，避免依赖 HashMap
+                for (Map.Entry<String, JsonElement> entry : first.getAsJsonObject().entrySet()) {
+                    columns.add(entry.getKey());
+                }
+            } else if (first.isJsonArray()) {
+                JsonArray arr = first.getAsJsonArray();
+                for (int i = 0; i < arr.size(); i++) {
+                    columns.add("col_" + (i + 1));
+                }
+            }
+        }
+        return columns;
+    }
+
+    private List<List<String>> extractRows(JsonArray rowsJson, List<String> columns) {
+        List<List<String>> rows = new ArrayList<>();
+        for (JsonElement el : rowsJson) {
+            if (el == null || el.isJsonNull()) {
+                continue;
+            }
+            if (el.isJsonArray()) {
+                JsonArray arr = el.getAsJsonArray();
+                List<String> row = new ArrayList<>();
+                for (int i = 0; i < arr.size(); i++) {
+                    JsonElement v = arr.get(i);
+                    row.add(v == null || v.isJsonNull() ? "" : v.getAsString());
+                }
+                rows.add(row);
+            } else if (el.isJsonObject()) {
+                JsonObject obj = el.getAsJsonObject();
+                List<String> row = new ArrayList<>();
+                for (String col : columns) {
+                    JsonElement v = obj.get(col);
+                    row.add(v == null || v.isJsonNull() ? "" : v.getAsString());
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
     }
 
     private AsyncJobStatus doCancel(String jobId, String reason) {
