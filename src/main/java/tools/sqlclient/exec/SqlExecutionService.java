@@ -5,388 +5,296 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import tools.sqlclient.network.TrustAllHttpClient;
+import tools.sqlclient.util.AesEncryptor;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.SecretKeySpec;
-import java.net.URI;
-import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
 /**
- * SQL 远程执行服务：调用 HTTPS 接口获取结果集。
+ * 基于异步任务接口的 SQL 执行服务：提交任务、轮询状态、获取结果。
  */
 public class SqlExecutionService {
-    // 一定要用你真实的域名，不要写成带 ... 的鬼畜版本
-    private static final String EXEC_API =
-            "https://leshan.paas.sc.ctc.com/waf-dev/api?api_id=sql_exec&api_token=xxfs&sql_memo=";
-
-    /**
-     * AES 密钥（示例值），务必改成你自己的 16/24/32 字节秘钥，并且不要提交到仓库。
-     * 例如 32 字节 = AES-256
-     */
-    private static final String AES_KEY = "a1B2c3D4e5F6g7H8i9J0kLmNoPqRsTuv";
-
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
 
     public CompletableFuture<Void> execute(String sql,
                                            Consumer<SqlExecResult> onSuccess,
                                            Consumer<Exception> onError) {
-        String trimmed = (sql == null) ? "" : sql.trim();
+        return execute(sql, onSuccess, onError, null);
+    }
+
+    public CompletableFuture<Void> execute(String sql,
+                                           Consumer<SqlExecResult> onSuccess,
+                                           Consumer<Exception> onError,
+                                           Consumer<AsyncJobStatus> onStatus) {
+        String trimmed = sql == null ? "" : sql.trim();
         if (trimmed.isEmpty()) {
             return CompletableFuture.completedFuture(null);
         }
 
-        // 先输出本次将要执行的完整 SQL（可能是一整块，多行）
-        OperationLog.log("即将执行 SQL（本次 Ctrl+Enter 文本，未拆分）:\n" + trimmed);
+        OperationLog.log("即将提交异步 SQL:\n" + abbreviate(trimmed));
 
-        // === 原始 SQL -> base64 -> AES 加密 -> hex 密文 ===
-        String cipherHex;
-        try {
-            cipherHex = encryptSqlToHex(trimmed);
-        } catch (Exception e) {
-            // 加密失败就直接报错，不再尝试明文发送
-            CompletableFuture<Void> f = new CompletableFuture<>();
-            f.completeExceptionally(new RuntimeException("SQL 加密失败", e));
-            return f;
-        }
-
-        // 再做 URL 编码，只为合法挂到 query 参数里
-        String encoded = URLEncoder.encode(cipherHex, StandardCharsets.UTF_8);
-
-        URI uri;
-        try {
-            // 最终 URL：EXEC_API 已经包含前半截 &sql_memo=
-            // 形如：https://.../api?api_id=sql_exec&api_token=xxfs&sql_memo=<encoded>
-            uri = URI.create(EXEC_API + encoded);
-        } catch (IllegalArgumentException ex) {
-            // 这里理论上不会再出事，除非你手动改坏 EXEC_API
-            CompletableFuture<Void> f = new CompletableFuture<>();
-            f.completeExceptionally(ex);
-            return f;
-        }
-
-        HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
-
-        // 输出请求 URL（已经是密文，看个寂寞，但好歹能排查）
-        OperationLog.log("SQL 执行请求: " + uri);
-
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-                .thenApplyAsync(resp -> {
-                    OperationLog.log("SQL 执行响应: " + OperationLog.abbreviate(resp.body(), 400));
-                    // 这里仍然用原始 trimmed 作为“本条 SQL 文本”，方便结果面板展示
-                    return parseResponse(trimmed, resp.body());
-                }, ThreadPools.NETWORK_POOL)
-                .thenAcceptAsync(onSuccess, ThreadPools.NETWORK_POOL)
+        return CompletableFuture.supplyAsync(() -> submitJob(trimmed), ThreadPools.NETWORK_POOL)
+                .thenCompose(submit -> {
+                    notifyStatus(onStatus, submit);
+                    return pollJobUntilDone(submit.getJobId(), onStatus);
+                })
+                .thenCompose(status -> {
+                    if ("SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
+                        return CompletableFuture.supplyAsync(() -> requestResult(status.getJobId(), trimmed), ThreadPools.NETWORK_POOL)
+                                .thenAccept(res -> {
+                                    notifyStatus(onStatus, status);
+                                    if (onSuccess != null) {
+                                        onSuccess.accept(res);
+                                    }
+                                });
+                    }
+                    RuntimeException failure = new RuntimeException(status.getMessage() != null
+                            ? status.getMessage()
+                            : ("任务" + status.getJobId() + " 状态 " + status.getStatus()));
+                    if (onError != null) {
+                        onError.accept(failure);
+                    }
+                    return CompletableFuture.completedFuture(null);
+                })
                 .exceptionally(ex -> {
                     if (onError != null) {
-                        if (ex instanceof java.util.concurrent.CancellationException) {
-                            onError.accept(new RuntimeException("执行已取消"));
-                        } else {
-                            onError.accept(new RuntimeException(ex));
-                        }
+                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                        onError.accept(new RuntimeException(cause));
                     }
                     return null;
                 });
     }
 
-    /**
-     * 原始 SQL 文本：
-     *   1）UTF-8 -> 字节
-     *   2）Base64 编码成字符串
-     *   3）AES(ECB/PKCS5Padding) 加密
-     *   4）密文转为十六进制字符串
-     *
-     * PG 侧：把 sql_memo 当作 hex 字符串，先 decode，再用 pgcrypto 解密，然后再从 base64 还原 SQL。
-     */
-    private String encryptSqlToHex(String rawSql) throws Exception {
-        if (rawSql == null) {
-            rawSql = "";
-        }
-
-        // 1) SQL -> base64（文本形式，便于以后扩展）
-        String sqlBase64 = Base64.getEncoder()
-                .encodeToString(rawSql.getBytes(StandardCharsets.UTF_8));
-
-        // 2) 准备 AES 秘钥
-        byte[] keyBytes = AES_KEY.getBytes(StandardCharsets.UTF_8);
-        int len = keyBytes.length;
-        if (len != 16 && len != 24 && len != 32) {
-            throw new IllegalStateException("AES_KEY 长度必须为 16/24/32 字节，目前为: " + len);
-        }
-        SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
-
-        // 3) AES/ECB/PKCS5Padding 加密（PG 侧可用 aes-ecb/pad:pkcs 解密）
-        Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
-        cipher.init(Cipher.ENCRYPT_MODE, keySpec);
-        byte[] encrypted = cipher.doFinal(sqlBase64.getBytes(StandardCharsets.UTF_8));
-
-        // 4) 密文转十六进制，便于在 URL 中传输，PG 侧 decode(..., 'hex')
-        return bytesToHex(encrypted);
+    public CompletableFuture<AsyncJobStatus> cancelJob(String jobId, String reason) {
+        return CompletableFuture.supplyAsync(() -> doCancel(jobId, reason), ThreadPools.NETWORK_POOL);
     }
 
-    private String bytesToHex(byte[] bytes) {
-        if (bytes == null) return "";
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            int v = b & 0xFF;
-            if (v < 16) {
-                sb.append('0');
-            }
-            sb.append(Integer.toHexString(v));
-        }
-        return sb.toString();
+    public CompletableFuture<List<AsyncJobStatus>> listJobs() {
+        return CompletableFuture.supplyAsync(this::doList, ThreadPools.NETWORK_POOL);
     }
 
-    private SqlExecResult parseResponse(String sql, String body) {
-        JsonElement parsed;
-        try {
-            parsed = gson.fromJson(body, JsonElement.class);
-        } catch (Exception parseEx) {
-            return messageResult(sql, "执行响应解析失败: " + safeSnippet(body));
-        }
+    private AsyncJobStatus submitJob(String sql) {
+        JsonObject body = new JsonObject();
+        body.addProperty("encryptedSql", AesEncryptor.encryptSqlToBase64(sql));
+        body.addProperty("maxResultRows", 100);
+        OperationLog.log("提交 /jobs/submit ...");
+        JsonObject resp = postJson("/jobs/submit", body);
+        AsyncJobStatus status = parseStatus(resp);
+        OperationLog.log("[" + status.getJobId() + "] 已提交，状态 " + status.getStatus());
+        return status;
+    }
 
-        if (parsed == null || !parsed.isJsonObject()) {
-            return messageResult(sql, "执行响应不是合法的 JSON 对象: " + safeSnippet(body));
-        }
-
-        JsonObject obj = parsed.getAsJsonObject();
-
-        // rows_count 仍按接口返回为准
-        int rowsCount = 0;
-        if (obj.has("rows_count") && !obj.get("rows_count").isJsonNull()) {
-            try {
-                rowsCount = Integer.parseInt(obj.get("rows_count").getAsString());
-            } catch (NumberFormatException ignore) {
-                rowsCount = 0;
-            }
-        }
-
-        JsonElement dataElement = findDataElement(obj);
-        JsonObject dataContainer = dataElement != null && dataElement.isJsonObject()
-                ? dataElement.getAsJsonObject()
-                : null;
-
-        JsonArray data = new JsonArray();
-        if (dataElement != null) {
-            if (dataElement.isJsonArray()) {
-                data = dataElement.getAsJsonArray();
-            } else if (dataContainer != null) {
-                // 常见格式：{"msg":"Success", "data": {"columns": [...], "rows": [...]}}
-                JsonArray nested = extractDataArray(dataContainer);
-                data = nested != null ? nested : new JsonArray();
-
-                if (rowsCount == 0 && dataContainer.has("rows_count") && !dataContainer.get("rows_count").isJsonNull()) {
+    private CompletableFuture<AsyncJobStatus> pollJobUntilDone(String jobId, Consumer<AsyncJobStatus> onStatus) {
+        return CompletableFuture.supplyAsync(() -> {
+            AsyncJobStatus latest = null;
+            boolean finished = false;
+            while (!finished) {
+                latest = requestStatus(jobId);
+                notifyStatus(onStatus, latest);
+                finished = isTerminal(latest.getStatus());
+                if (!finished) {
                     try {
-                        rowsCount = Integer.parseInt(dataContainer.get("rows_count").getAsString());
-                    } catch (NumberFormatException ignore) {
-                        rowsCount = 0;
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("轮询中断", e);
                     }
                 }
             }
+            return latest;
+        }, ThreadPools.NETWORK_POOL);
+    }
+
+    private AsyncJobStatus requestStatus(String jobId) {
+        JsonObject body = new JsonObject();
+        body.addProperty("jobId", jobId);
+        JsonObject resp = postJson("/jobs/status", body);
+        AsyncJobStatus status = parseStatus(resp);
+        Integer progress = status.getProgressPercent();
+        String progressText = progress != null ? progress + "%" : "-";
+        OperationLog.log("[" + jobId + "] 状态 " + status.getStatus() + " 进度 " + progressText);
+        return status;
+    }
+
+    private SqlExecResult requestResult(String jobId, String sql) {
+        JsonObject body = new JsonObject();
+        body.addProperty("jobId", jobId);
+        body.addProperty("removeAfterFetch", true);
+        JsonObject resp = postJson("/jobs/result", body);
+        boolean success = resp.has("success") && resp.get("success").getAsBoolean();
+        String status = resp.has("status") && !resp.get("status").isJsonNull() ? resp.get("status").getAsString() : "";
+        Integer progress = resp.has("progressPercent") && !resp.get("progressPercent").isJsonNull()
+                ? resp.get("progressPercent").getAsInt() : null;
+        Long duration = resp.has("durationMillis") && !resp.get("durationMillis").isJsonNull()
+                ? resp.get("durationMillis").getAsLong() : null;
+        Integer rowsAffected = resp.has("rowsAffected") && !resp.get("rowsAffected").isJsonNull()
+                ? resp.get("rowsAffected").getAsInt() : null;
+        Integer returnedRowCount = resp.has("returnedRowCount") && !resp.get("returnedRowCount").isJsonNull()
+                ? resp.get("returnedRowCount").getAsInt() : null;
+        Boolean hasResultSet = resp.has("hasResultSet") && !resp.get("hasResultSet").isJsonNull()
+                ? resp.get("hasResultSet").getAsBoolean() : null;
+        String message = extractMessage(resp);
+
+        if (!success) {
+            OperationLog.log("[" + jobId + "] 任务失败/未完成: " + message);
+            throw new RuntimeException(message);
         }
+
+        if (hasResultSet != null && !hasResultSet) {
+            List<String> columns = List.of("消息");
+            List<List<String>> rows = new ArrayList<>();
+            String info = rowsAffected != null ? ("影响行数: " + rowsAffected) : (message != null ? message : "执行成功");
+            rows.add(List.of(info));
+            return new SqlExecResult(sql, columns, rows, rows.size(), true, message, jobId, status, progress,
+                    null, duration, rowsAffected, returnedRowCount, hasResultSet);
+        }
+
+        JsonArray rowsJson = resp.has("resultRows") && resp.get("resultRows").isJsonArray()
+                ? resp.getAsJsonArray("resultRows") : new JsonArray();
         List<String> columns = new ArrayList<>();
         List<List<String>> rows = new ArrayList<>();
-
-        if (data != null && data.size() > 0) {
-            // 找到第一条真正的对象行，后面所有“魔法”都围绕它展开
-            JsonObject firstRow = null;
-            for (JsonElement el : data) {
+        if (rowsJson.size() > 0) {
+            JsonObject first = rowsJson.get(0).getAsJsonObject();
+            for (Map.Entry<String, JsonElement> entry : first.entrySet()) {
+                columns.add(entry.getKey());
+            }
+            for (JsonElement el : rowsJson) {
                 if (el != null && el.isJsonObject()) {
-                    firstRow = el.getAsJsonObject();
-                    break;
-                }
-            }
-
-            // ========== 1) 优先：使用第一行的 __col_meta 决定列顺序 ==========
-            if (firstRow != null && firstRow.has("__col_meta") && !firstRow.get("__col_meta").isJsonNull()) {
-                JsonElement metaEl = firstRow.get("__col_meta");
-                JsonArray metaArr = null;
-
-                // 兼容两种情况：
-                // 1) __col_meta 本身就是 JSON 数组
-                // 2) __col_meta 是字符串，里面是 JSON 数组文本
-                if (metaEl.isJsonArray()) {
-                    metaArr = metaEl.getAsJsonArray();
-                } else if (metaEl.isJsonPrimitive() && metaEl.getAsJsonPrimitive().isString()) {
-                    try {
-                        metaArr = gson.fromJson(metaEl.getAsString(), JsonArray.class);
-                    } catch (Exception ignore) {
-                        metaArr = null;
-                    }
-                }
-
-                if (metaArr != null) {
-                    class ColMeta {
-                        final String name;
-                        final int seq;
-
-                        ColMeta(String name, int seq) {
-                            this.name = name;
-                            this.seq = seq;
-                        }
-                    }
-
-                    List<ColMeta> metaList = new ArrayList<>();
-                    for (JsonElement mEl : metaArr) {
-                        if (mEl == null || !mEl.isJsonObject()) {
-                            continue;
-                        }
-                        JsonObject mObj = mEl.getAsJsonObject();
-                        if (!mObj.has("col_name") || mObj.get("col_name").isJsonNull()) {
-                            continue;
-                        }
-                        String name = mObj.get("col_name").getAsString();
-                        if (name == null || name.isEmpty() || shouldSkip(name)) {
-                            continue;
-                        }
-
-                        int seq = 0;
-                        if (mObj.has("col_seq") && !mObj.get("col_seq").isJsonNull()) {
-                            try {
-                                seq = mObj.get("col_seq").getAsInt();
-                            } catch (Exception ignore) {
-                                seq = 0;
-                            }
-                        }
-                        metaList.add(new ColMeta(name, seq));
-                    }
-
-                    // 按 col_seq 排序（从 1 开始的自然顺序）
-                    metaList.sort((a, b) -> Integer.compare(a.seq, b.seq));
-
-                    for (ColMeta cm : metaList) {
-                        if (!columns.contains(cm.name)) {
-                            columns.add(cm.name);
-                        }
-                    }
-                }
-            }
-
-            // ========== 2) 兜底：没有 __col_meta 或解析失败时的旧逻辑 ==========
-            if (columns.isEmpty() && firstRow != null) {
-                // (a) 看根对象是否有 "columns" 数组
-                JsonArray colsArr = null;
-                if (obj.has("columns") && obj.get("columns").isJsonArray()) {
-                    colsArr = obj.getAsJsonArray("columns");
-                } else if (dataContainer != null && dataContainer.has("columns") && dataContainer.get("columns").isJsonArray()) {
-                    colsArr = dataContainer.getAsJsonArray("columns");
-                }
-
-                if (colsArr != null) {
-                    for (JsonElement colEl : colsArr) {
-                        if (colEl == null || colEl.isJsonNull()) continue;
-                        String colName = colEl.getAsString();
-                        if (shouldSkip(colName)) continue;
-                        columns.add(colName);
-                    }
-                } else {
-                    // (b) 否则就按第一行 JSON 字段出现的顺序
-                    for (Map.Entry<String, JsonElement> entry : firstRow.entrySet()) {
-                        String key = entry.getKey();
-                        if (shouldSkip(key)) {
-                            continue;
-                        }
-                        columns.add(key);
-                    }
-                }
-            }
-
-            // ========== 3) 按确定好的列顺序，构造所有行的数据 ==========
-            if (!columns.isEmpty()) {
-                for (JsonElement el : data) {
-                    if (el == null || !el.isJsonObject()) {
-                        continue;
-                    }
-                    JsonObject rowObj = el.getAsJsonObject();
-                    List<String> row = new ArrayList<>(columns.size());
-                    for (String col : columns) {
-                        JsonElement value = rowObj.get(col);
-                        if (value == null || value.isJsonNull()) {
-                            row.add("");
-                        } else {
-                            row.add(value.getAsString());
-                        }
-                    }
-                    rows.add(row);
-                }
-            } else {
-                // Data 有内容但没拿到任何有效列的极端情况：
-                // 把整行 JSON 当成一列文本交给前端，至少不至于全空。
-                for (JsonElement el : data) {
-                    String text = (el == null || el.isJsonNull()) ? "" : el.toString();
+                    JsonObject obj = el.getAsJsonObject();
                     List<String> row = new ArrayList<>();
-                    row.add(text);
+                    for (String col : columns) {
+                        JsonElement v = obj.get(col);
+                        row.add(v == null || v.isJsonNull() ? "" : v.getAsString());
+                    }
                     rows.add(row);
                 }
-                columns.add("结果");
             }
         }
-
-        // 如果没有任何列，但有 msg，就当成提示消息
-        if (columns.isEmpty() && obj.has("msg") && !obj.get("msg").isJsonNull()) {
-            return messageResult(sql, obj.get("msg").getAsString());
-        }
-
-        // 再兜个底：什么都没有，就给一条“无数据返回”的提示
-        if (columns.isEmpty()) {
-            return messageResult(sql, "无数据返回");
-        }
-
-        return new SqlExecResult(sql, columns, rows, rowsCount);
+        int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
+        OperationLog.log("[" + jobId + "] 任务完成，行数 " + rowCount);
+        return new SqlExecResult(sql, columns, rows, rowCount, true, message, jobId, status, progress,
+                null, duration, rowsAffected, returnedRowCount, hasResultSet);
     }
 
-    private SqlExecResult messageResult(String sql, String message) {
-        List<String> columns = new ArrayList<>();
-        columns.add("消息");
-        List<List<String>> rows = new ArrayList<>();
-        rows.add(List.of(message));
-        return new SqlExecResult(sql, columns, rows, 1);
-    }
-
-    private String safeSnippet(String body) {
-        if (body == null) {
-            return "<空响应>";
+    private AsyncJobStatus doCancel(String jobId, String reason) {
+        JsonObject body = new JsonObject();
+        body.addProperty("jobId", jobId);
+        if (reason != null) {
+            body.addProperty("reason", reason);
         }
-        String t = body.strip();
-        return t.length() > 240 ? t.substring(0, 240) + "..." : t;
+        JsonObject resp = postJson("/jobs/cancel", body);
+        AsyncJobStatus status = parseStatus(resp);
+        OperationLog.log("[" + jobId + "] 取消请求已发送，状态 " + status.getStatus());
+        return status;
     }
 
-    private JsonElement findDataElement(JsonObject obj) {
+    private List<AsyncJobStatus> doList() {
+        JsonObject body = new JsonObject();
+        JsonObject resp = postJson("/jobs/list", body);
+        List<AsyncJobStatus> list = new ArrayList<>();
+        if (resp.has("jobs") && resp.get("jobs").isJsonArray()) {
+            for (JsonElement el : resp.get("jobs").getAsJsonArray()) {
+                if (el != null && el.isJsonObject()) {
+                    list.add(parseStatus(el.getAsJsonObject()));
+                }
+            }
+        }
+        return list;
+    }
+
+    private boolean isTerminal(String status) {
+        if (status == null) return true;
+        String s = status.toUpperCase();
+        return "SUCCEEDED".equals(s) || "FAILED".equals(s) || "CANCELLED".equals(s);
+    }
+
+    private AsyncJobStatus parseStatus(JsonObject obj) {
+        String jobId = obj.has("jobId") && !obj.get("jobId").isJsonNull() ? obj.get("jobId").getAsString() : "";
+        String status = obj.has("status") && !obj.get("status").isJsonNull() ? obj.get("status").getAsString() : "";
+        Integer progress = obj.has("progressPercent") && !obj.get("progressPercent").isJsonNull()
+                ? obj.get("progressPercent").getAsInt() : null;
+        Long elapsed = obj.has("elapsedMillis") && !obj.get("elapsedMillis").isJsonNull()
+                ? obj.get("elapsedMillis").getAsLong() : null;
+        String label = obj.has("label") && !obj.get("label").isJsonNull() ? obj.get("label").getAsString() : null;
+        String sqlSummary = obj.has("sqlSummary") && !obj.get("sqlSummary").isJsonNull() ? obj.get("sqlSummary").getAsString() : null;
+        Integer rowsAffected = obj.has("rowsAffected") && !obj.get("rowsAffected").isJsonNull()
+                ? obj.get("rowsAffected").getAsInt() : null;
+        Integer returnedRowCount = obj.has("returnedRowCount") && !obj.get("returnedRowCount").isJsonNull()
+                ? obj.get("returnedRowCount").getAsInt() : null;
+        Boolean hasResultSet = obj.has("hasResultSet") && !obj.get("hasResultSet").isJsonNull()
+                ? obj.get("hasResultSet").getAsBoolean() : null;
+        String message = extractMessage(obj);
+        return new AsyncJobStatus(jobId, status, progress, elapsed, label, sqlSummary, rowsAffected, returnedRowCount, hasResultSet, message);
+    }
+
+    private JsonObject postJson(String path, JsonObject payload) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder(AsyncSqlConfig.buildUri(path))
+                    .header("Content-Type", "application/json;charset=UTF-8")
+                    .header("X-Request-Token", AsyncSqlConfig.REQUEST_TOKEN)
+                    .timeout(Duration.ofSeconds(30))
+                    .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)))
+                    .build();
+            HttpResponse<String> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            String body = resp.body();
+            if (resp.statusCode() != 200) {
+                String message = safeExtractMessage(body);
+                OperationLog.log("调用 " + path + " 失败: HTTP " + resp.statusCode() + " " + message);
+                throw new RuntimeException("HTTP " + resp.statusCode() + (message.isEmpty() ? "" : (": " + message)));
+            }
+            return gson.fromJson(body, JsonObject.class);
+        } catch (Exception e) {
+            throw new RuntimeException("请求失败: " + e.getMessage(), e);
+        }
+    }
+
+    private void notifyStatus(Consumer<AsyncJobStatus> onStatus, AsyncJobStatus status) {
+        if (onStatus != null && status != null) {
+            onStatus.accept(status);
+        }
+    }
+
+    private String safeExtractMessage(String body) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        try {
+            JsonObject obj = gson.fromJson(body, JsonObject.class);
+            return extractMessage(obj);
+        } catch (Exception ignored) {
+            return body.length() > 200 ? body.substring(0, 200) + "..." : body;
+        }
+    }
+
+    private String extractMessage(JsonObject obj) {
         if (obj == null) return null;
-        for (String key : List.of("Data", "data", "rows", "list", "items", "result")) {
-            if (obj.has(key) && !obj.get(key).isJsonNull()) {
-                return obj.get(key);
-            }
+        if (obj.has("message") && !obj.get("message").isJsonNull()) {
+            return obj.get("message").getAsString();
+        }
+        if (obj.has("note") && !obj.get("note").isJsonNull()) {
+            return obj.get("note").getAsString();
+        }
+        if (obj.has("errorMessage") && !obj.get("errorMessage").isJsonNull()) {
+            return obj.get("errorMessage").getAsString();
         }
         return null;
     }
 
-    private JsonArray extractDataArray(JsonObject obj) {
-        if (obj == null) return new JsonArray();
-        if (obj.has("Data") && obj.get("Data").isJsonArray()) {
-            return obj.getAsJsonArray("Data");
+    private String abbreviate(String text) {
+        if (text == null) {
+            return "";
         }
-        for (String key : List.of("data", "rows", "list", "items", "result")) {
-            if (obj.has(key) && obj.get(key).isJsonArray()) {
-                return obj.getAsJsonArray(key);
-            }
-        }
-        return new JsonArray();
-    }
-
-    private boolean shouldSkip(String key) {
-        return "sn_".equalsIgnoreCase(key);
+        String t = text.strip();
+        return t.length() > 600 ? t.substring(0, 600) + "..." : t;
     }
 }

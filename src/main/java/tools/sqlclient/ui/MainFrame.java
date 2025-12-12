@@ -7,6 +7,7 @@ import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.db.SqlHistoryRepository;
 import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
+import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.metadata.MetadataService;
@@ -76,7 +77,7 @@ public class MainFrame extends JFrame {
     private final ThemeManager themeManager = new ThemeManager();
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
-    private final Map<Long, java.util.List<CompletableFuture<?>>> runningExecutions = new ConcurrentHashMap<>();
+    private final Map<Long, java.util.List<RunningJobHandle>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
     // 笔记图标持久化：noteId -> 图标规格
@@ -865,6 +866,14 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        view.add(new JMenuItem(new AbstractAction("异步任务列表") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                AsyncJobListDialog dialog = new AsyncJobListDialog(MainFrame.this, sqlExecutionService);
+                dialog.setVisible(true);
+            }
+        }));
+
         JMenu themeMenu = new JMenu("主题");
         ButtonGroup themeGroup = new ButtonGroup();
         for (ThemeOption option : themeManager.getOptions()) {
@@ -1284,7 +1293,7 @@ public class MainFrame extends JFrame {
 
         // 按笔记 ID 记录运行中的 Future
         runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
-        List<CompletableFuture<?>> execList = runningExecutions.get(noteId);
+        List<RunningJobHandle> execList = runningExecutions.get(noteId);
 
         // 串行执行每一条 SQL
         java.util.concurrent.CompletableFuture<Void> chain =
@@ -1293,18 +1302,25 @@ public class MainFrame extends JFrame {
         for (String stmt : statements) {
             final String sqlStmt = stmt;
             chain = chain.thenCompose(v -> {
+                QueryResultPanel pendingPanel = addPendingResultPanel(noteId, panel, sqlStmt);
+                RunningJobHandle handle = new RunningJobHandle();
+                handle.panel = pendingPanel;
+                handle.sql = sqlStmt;
+
                 CompletableFuture<Void> future = sqlExecutionService.execute(
                         sqlStmt,
-                        res -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res)),
-                        ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage()))
+                        res -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res, pendingPanel)),
+                        ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage(), pendingPanel)),
+                        status -> SwingUtilities.invokeLater(() -> handleStatusUpdate(handle, status, panel))
                 );
 
-                execList.add(future);
+                handle.future = future;
+                execList.add(handle);
 
                 future.whenComplete((vv, ex) -> SwingUtilities.invokeLater(() -> {
-                    java.util.List<CompletableFuture<?>> list = runningExecutions.get(noteId);
+                    java.util.List<RunningJobHandle> list = runningExecutions.get(noteId);
                     if (list != null) {
-                        list.remove(future);
+                        list.remove(handle);
                         if (list.isEmpty()) {
                             runningExecutions.remove(noteId);
                             panel.setExecutionRunning(false);
@@ -1321,16 +1337,19 @@ public class MainFrame extends JFrame {
         updateExecutionButtons();
     }
 
-    private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result) {
-        int idx = nextResultIndex(noteId);
-        String tabTitle = windowMode ? "结果" + idx : panel.getNote().getTitle() + "-结果" + idx;
-        QueryResultPanel qp = new QueryResultPanel(result, result.getSql());
-        if (windowMode) {
-            panel.addLocalResultPanel(tabTitle, qp, result.getSql());
-        } else {
-            SharedResultView view = ensureSharedView();
-            view.addResultTab(tabTitle, qp, result.getSql());
-            expandSharedResults();
+    private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result, QueryResultPanel existingPanel) {
+        QueryResultPanel target = existingPanel != null ? existingPanel : new QueryResultPanel(result, result.getSql());
+        target.render(result);
+        if (existingPanel == null) {
+            int idx = nextResultIndex(noteId);
+            String tabTitle = windowMode ? "结果" + idx : panel.getNote().getTitle() + "-结果" + idx;
+            if (windowMode) {
+                panel.addLocalResultPanel(tabTitle, target, result.getSql());
+            } else {
+                SharedResultView view = ensureSharedView();
+                view.addResultTab(tabTitle, target, result.getSql());
+                expandSharedResults();
+            }
         }
     }
 
@@ -1338,19 +1357,53 @@ public class MainFrame extends JFrame {
         return resultTabCounters.computeIfAbsent(noteId, k -> new AtomicInteger(1)).getAndIncrement();
     }
 
-    private void renderError(long noteId, EditorTabPanel panel, String sql, String message) {
-        JPanel error = new JPanel(new BorderLayout());
-        error.setBorder(javax.swing.BorderFactory.createTitledBorder("执行失败"));
-        error.setToolTipText(sql);
-        error.add(new JLabel(message), BorderLayout.CENTER);
-        String tabTitle = windowMode ? "错误" + nextResultIndex(noteId)
-                : panel.getNote().getTitle() + "-错误" + nextResultIndex(noteId);
+    private QueryResultPanel addPendingResultPanel(long noteId, EditorTabPanel panel, String sql) {
+        QueryResultPanel qp = QueryResultPanel.pending(sql);
+        int idx = nextResultIndex(noteId);
+        String tabTitle = windowMode ? "结果" + idx : panel.getNote().getTitle() + "-结果" + idx;
         if (windowMode) {
-            panel.addLocalResultPanel(tabTitle, error, sql);
+            panel.addLocalResultPanel(tabTitle, qp, sql);
         } else {
             SharedResultView view = ensureSharedView();
-            view.addResultTab(tabTitle, error, sql);
+            view.addResultTab(tabTitle, qp, sql);
             expandSharedResults();
+        }
+        return qp;
+    }
+
+    private void handleStatusUpdate(RunningJobHandle handle, AsyncJobStatus status, EditorTabPanel panel) {
+        if (handle == null || status == null) return;
+        handle.jobId = status.getJobId();
+        if (handle.panel != null) {
+            handle.panel.updateProgress(status);
+        }
+        String progress = status.getProgressPercent() != null ? status.getProgressPercent() + "%" : "-";
+        statusLabel.setText("任务 " + status.getStatus() + " " + progress);
+        if ("SUCCEEDED".equalsIgnoreCase(status.getStatus())
+                || "FAILED".equalsIgnoreCase(status.getStatus())
+                || "CANCELLED".equalsIgnoreCase(status.getStatus())) {
+            panel.setExecutionRunning(false);
+        }
+        updateExecutionButtons();
+    }
+
+    private void renderError(long noteId, EditorTabPanel panel, String sql, String message, QueryResultPanel existingPanel) {
+        if (existingPanel != null) {
+            existingPanel.renderError(message);
+        } else {
+            JPanel error = new JPanel(new BorderLayout());
+            error.setBorder(javax.swing.BorderFactory.createTitledBorder("执行失败"));
+            error.setToolTipText(sql);
+            error.add(new JLabel(message), BorderLayout.CENTER);
+            String tabTitle = windowMode ? "错误" + nextResultIndex(noteId)
+                    : panel.getNote().getTitle() + "-错误" + nextResultIndex(noteId);
+            if (windowMode) {
+                panel.addLocalResultPanel(tabTitle, error, sql);
+            } else {
+                SharedResultView view = ensureSharedView();
+                view.addResultTab(tabTitle, error, sql);
+                expandSharedResults();
+            }
         }
         OperationLog.log("SQL 执行失败: " + OperationLog.abbreviate(sql, 120) + " | " + message);
     }
@@ -1389,6 +1442,13 @@ public class MainFrame extends JFrame {
         SwingUtilities.invokeLater(() -> mainSplitPane.setDividerLocation(collapsePos));
     }
 
+    private static class RunningJobHandle {
+        CompletableFuture<Void> future;
+        String jobId;
+        QueryResultPanel panel;
+        String sql;
+    }
+
     private static class SharedResultView {
         final JPanel wrapper = new JPanel(new BorderLayout());
         final JTabbedPane tabs = new JTabbedPane();
@@ -1421,15 +1481,17 @@ public class MainFrame extends JFrame {
         EditorTabPanel panel = getCurrentPanel();
         if (panel == null) return;
         long noteId = panel.getNote().getId();
-        java.util.List<CompletableFuture<?>> list = runningExecutions.remove(noteId);
+        java.util.List<RunningJobHandle> list = runningExecutions.get(noteId);
         if (list != null) {
-            for (CompletableFuture<?> f : list) {
-                f.cancel(true);
+            for (RunningJobHandle handle : list) {
+                if (handle.jobId != null) {
+                    sqlExecutionService.cancelJob(handle.jobId, "用户取消");
+                }
             }
         }
         panel.setExecutionRunning(false);
+        statusLabel.setText("已发送取消请求");
         updateExecutionButtons();
-        statusLabel.setText("就绪");
         OperationLog.log("停止执行: " + panel.getNote().getTitle());
     }
 
