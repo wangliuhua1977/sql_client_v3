@@ -246,10 +246,13 @@ public class SqlExecutionService {
                     .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)))
                     .build();
             HttpResponse<String> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            String body = resp.body();
             if (resp.statusCode() != 200) {
-                throw new RuntimeException("HTTP " + resp.statusCode());
+                String message = safeExtractMessage(body);
+                OperationLog.log("调用 " + path + " 失败: HTTP " + resp.statusCode() + " " + message);
+                throw new RuntimeException("HTTP " + resp.statusCode() + (message.isEmpty() ? "" : (": " + message)));
             }
-            return gson.fromJson(resp.body(), JsonObject.class);
+            return gson.fromJson(body, JsonObject.class);
         } catch (Exception e) {
             throw new RuntimeException("请求失败: " + e.getMessage(), e);
         }
@@ -258,6 +261,18 @@ public class SqlExecutionService {
     private void notifyStatus(Consumer<AsyncJobStatus> onStatus, AsyncJobStatus status) {
         if (onStatus != null && status != null) {
             onStatus.accept(status);
+        }
+    }
+
+    private String safeExtractMessage(String body) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        try {
+            JsonObject obj = gson.fromJson(body, JsonObject.class);
+            return extractMessage(obj);
+        } catch (Exception ignored) {
+            return body.length() > 200 ? body.substring(0, 200) + "..." : body;
         }
     }
 
