@@ -87,12 +87,16 @@ public class SqlExecutionService {
         JsonObject body = new JsonObject();
         body.addProperty("encryptedSql", AesEncryptor.encryptSqlToBase64(sql));
         body.addProperty("maxResultRows", 100);
+
         OperationLog.log("提交 /jobs/submit ...");
         JsonObject resp = postJson("/jobs/submit", body);
+
         AsyncJobStatus status = parseStatus(resp);
         OperationLog.log("[" + status.getJobId() + "] 已提交，状态 " + status.getStatus());
         return status;
     }
+
+
 
     private CompletableFuture<AsyncJobStatus> pollJobUntilDone(String jobId, Consumer<AsyncJobStatus> onStatus) {
         return CompletableFuture.supplyAsync(() -> {
@@ -245,15 +249,22 @@ public class SqlExecutionService {
                     .timeout(Duration.ofSeconds(30))
                     .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)))
                     .build();
+
             HttpResponse<String> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() != 200) {
-                throw new RuntimeException("HTTP " + resp.statusCode());
+            int sc = resp.statusCode();
+
+            // 任何 2xx 都视为成功（包括 202 Accepted）
+            if (sc / 100 != 2) {
+                String body = resp.body();
+                throw new RuntimeException("HTTP " + sc + " | " + body);
             }
+
             return gson.fromJson(resp.body(), JsonObject.class);
         } catch (Exception e) {
             throw new RuntimeException("请求失败: " + e.getMessage(), e);
         }
     }
+
 
     private void notifyStatus(Consumer<AsyncJobStatus> onStatus, AsyncJobStatus status) {
         if (onStatus != null && status != null) {
