@@ -1,25 +1,13 @@
 package tools.sqlclient.metadata;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.reflect.TypeToken;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.SQLiteManager;
-import tools.sqlclient.network.TrustAllHttpClient;
+import tools.sqlclient.exec.SqlExecResult;
+import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.util.OperationLog;
 
 import javax.swing.*;
-import java.io.InputStreamReader;
-import java.lang.reflect.Type;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -37,14 +25,12 @@ import java.util.stream.Collectors;
  */
 public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
-    private static final String OBJ_API = "https://leshan.paas.sc.ctc.com/waf-dev/api?api_id=sql_obj&api_token=jtc3r&p_type=1";
-    private static final String COL_API_TEMPLATE = "https://leshan.paas.sc.ctc.com/waf-dev/api?api_id=sql_obj&api_token=jtc3r&p_type=2&p_obj=%s";
+    private static final String DEFAULT_SCHEMA = "leshan";
 
     private final SQLiteManager sqliteManager;
     private final ExecutorService metadataPool = Executors.newFixedThreadPool(4, r -> new Thread(r, "metadata-pool"));
     private final ExecutorService networkPool = Executors.newFixedThreadPool(6, r -> new Thread(r, "network-pool"));
-    private final Gson gson = new Gson();
-    private final HttpClient httpClient = TrustAllHttpClient.create();
+    private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
     private final Object dbWriteLock = new Object();
     private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
 
@@ -261,14 +247,136 @@ public class MetadataService {
     }
 
     private List<RemoteObject> fetchObjects() throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(OBJ_API)).GET().build();
-        HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        OperationLog.log("对象列表请求: " + request.uri());
-        Type listType = new TypeToken<List<RemoteObject>>(){}.getType();
-        try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
-            JsonElement root = gson.fromJson(reader, JsonElement.class);
-            OperationLog.log("对象列表响应: " + OperationLog.abbreviate(String.valueOf(root), 300));
-            return parseListFromJson(root, listType);
+        List<RemoteObject> objects = new ArrayList<>();
+        objects.addAll(queryObjectsByType("table"));
+        objects.addAll(queryObjectsByType("view"));
+        return objects;
+    }
+
+    private List<RemoteObject> queryObjectsByType(String type) throws Exception {
+        String sql;
+        if ("table".equalsIgnoreCase(type)) {
+            sql = String.format("""
+                    SELECT table_schema AS schema_name, table_name AS object_name, 'table' AS object_type
+                    FROM information_schema.tables
+                    WHERE table_schema = '%s' AND table_type = 'BASE TABLE'
+                    ORDER BY table_name
+                    """, DEFAULT_SCHEMA);
+        } else {
+            sql = String.format("""
+                    SELECT table_schema AS schema_name, table_name AS object_name, 'view' AS object_type
+                    FROM information_schema.views
+                    WHERE table_schema = '%s'
+                    ORDER BY table_name
+                    """, DEFAULT_SCHEMA);
+        }
+        SqlExecResult result = runMetadataSql(sql);
+        return toObjects(result);
+    }
+
+    private SqlExecResult runMetadataSql(String sql) throws Exception {
+        OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
+        return sqlExecutionService.executeSync(sql);
+    }
+
+    private List<RemoteObject> toObjects(SqlExecResult result) {
+        if (result == null || result.getRows() == null || result.getColumns() == null) {
+            return List.of();
+        }
+        Map<String, Integer> idx = indexColumns(result.getColumns());
+        int schemaIdx = idx.getOrDefault("schema_name", -1);
+        int nameIdx = idx.getOrDefault("object_name", -1);
+        int typeIdx = idx.getOrDefault("object_type", -1);
+        List<RemoteObject> list = new ArrayList<>();
+        for (List<String> row : result.getRows()) {
+            String schema = valueAt(row, schemaIdx);
+            String name = valueAt(row, nameIdx);
+            String type = valueAt(row, typeIdx);
+            if (name != null && type != null) {
+                list.add(new RemoteObject(schema != null ? schema : DEFAULT_SCHEMA, name, type));
+            }
+        }
+        return list;
+    }
+
+    private List<RemoteColumn> fetchColumnsBySql(String objectName) throws Exception {
+        String safeName = sanitizeObjectName(objectName);
+        if (safeName == null) {
+            return List.of();
+        }
+        String sql = String.format("""
+                SELECT table_schema AS schema_name, table_name AS object_name, column_name, data_type, ordinal_position, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_schema='%s' AND table_name = '%s'
+                ORDER BY ordinal_position
+                """, DEFAULT_SCHEMA, safeName);
+        SqlExecResult result = runMetadataSql(sql);
+        return toColumns(result);
+    }
+
+    private String sanitizeObjectName(String objectName) {
+        if (!isLikelyTableName(objectName)) {
+            return null;
+        }
+        return objectName.replace("'", "''");
+    }
+
+    private List<RemoteColumn> toColumns(SqlExecResult result) {
+        if (result == null || result.getRows() == null || result.getColumns() == null) {
+            return List.of();
+        }
+        Map<String, Integer> idx = indexColumns(result.getColumns());
+        int schemaIdx = idx.getOrDefault("schema_name", -1);
+        int objIdx = idx.getOrDefault("object_name", -1);
+        int nameIdx = idx.getOrDefault("column_name", -1);
+        int typeIdx = idx.getOrDefault("data_type", -1);
+        int ordinalIdx = idx.getOrDefault("ordinal_position", -1);
+        int nullableIdx = idx.getOrDefault("is_nullable", -1);
+        int defaultIdx = idx.getOrDefault("column_default", -1);
+
+        List<RemoteColumn> list = new ArrayList<>();
+        for (List<String> row : result.getRows()) {
+            String name = valueAt(row, nameIdx);
+            if (name == null) continue;
+            String schema = valueAt(row, schemaIdx);
+            String object = valueAt(row, objIdx);
+            int ordinal = parseInt(valueAt(row, ordinalIdx), list.size() + 1);
+            String dataType = valueAt(row, typeIdx);
+            String nullable = valueAt(row, nullableIdx);
+            String columnDefault = valueAt(row, defaultIdx);
+            list.add(new RemoteColumn(schema != null ? schema : DEFAULT_SCHEMA, objectNameOrDefault(object), name, dataType, ordinal, nullable, columnDefault));
+        }
+        return list;
+    }
+
+    private Map<String, Integer> indexColumns(List<String> columns) {
+        Map<String, Integer> idx = new HashMap<>();
+        if (columns == null) return idx;
+        for (int i = 0; i < columns.size(); i++) {
+            idx.put(columns.get(i).toLowerCase(Locale.ROOT), i);
+        }
+        return idx;
+    }
+
+    private String valueAt(List<String> row, int idx) {
+        if (row == null || idx < 0 || idx >= row.size()) {
+            return null;
+        }
+        return row.get(idx);
+    }
+
+    private String objectNameOrDefault(String name) {
+        return name != null ? name : "";
+    }
+
+    private int parseInt(String value, int fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
         }
     }
 
@@ -278,17 +386,7 @@ public class MetadataService {
         while (attempts < 3) {
             try {
                 attempts++;
-                String encodedName = URLEncoder.encode(objectName, StandardCharsets.UTF_8);
-                HttpRequest request = HttpRequest.newBuilder(URI.create(COL_API_TEMPLATE.formatted(encodedName))).GET().build();
-                OperationLog.log("字段列表请求: " + request.uri());
-                HttpResponse<java.io.InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-                Type listType = new TypeToken<List<RemoteColumn>>(){}.getType();
-                List<RemoteColumn> columns;
-                try (InputStreamReader reader = new InputStreamReader(response.body(), StandardCharsets.UTF_8)) {
-                    JsonElement root = gson.fromJson(reader, JsonElement.class);
-                    OperationLog.log("字段列表响应: " + OperationLog.abbreviate(String.valueOf(root), 300));
-                    columns = parseListFromJson(root, listType);
-                }
+                List<RemoteColumn> columns = fetchColumnsBySql(objectName);
                 if (columns == null || columns.isEmpty()) return;
                 synchronized (dbWriteLock) {
                     try (Connection conn = sqliteManager.getConnection()) {
@@ -322,8 +420,8 @@ public class MetadataService {
                             if (!changed) {
                                 for (RemoteColumn col : columns) {
                                     Integer localSort = localCols.get(col.column_name);
-                                    int remoteSort = parseSortNo(col.sort_no, -1);
-                                    if (localSort == null || (remoteSort >= 0 && localSort != remoteSort)) {
+                                    int remoteSort = col.ordinal_position;
+                                    if (localSort == null || localSort != remoteSort) {
                                         changed = true;
                                         break;
                                     }
@@ -340,8 +438,7 @@ public class MetadataService {
                                         ins.setString(1, col.schema_name);
                                         ins.setString(2, objectName);
                                         ins.setString(3, col.column_name);
-                                        int sort = parseSortNo(col.sort_no, i++);
-                                        ins.setInt(4, sort);
+                                        ins.setInt(4, col.ordinal_position > 0 ? col.ordinal_position : i++);
                                         ins.addBatch();
                                     }
                                     ins.executeBatch();
@@ -551,31 +648,6 @@ public class MetadataService {
         }
     }
 
-    /**
-     * 兼容 API 返回值既可能是数组，也可能是包装对象（如 {"data": [...]}）。
-     */
-    private <T> List<T> parseListFromJson(JsonElement root, Type listType) {
-        if (root == null || root.isJsonNull()) {
-            return List.of();
-        }
-        if (root.isJsonArray()) {
-            return gson.fromJson(root, listType);
-        }
-        if (root.isJsonObject()) {
-            JsonObject obj = root.getAsJsonObject();
-            for (String key : List.of("Data", "data", "rows", "list", "items", "result")) {
-                JsonElement maybeArray = obj.get(key);
-                if (maybeArray != null && maybeArray.isJsonArray()) {
-                    JsonArray arr = maybeArray.getAsJsonArray();
-                    return gson.fromJson(arr, listType);
-                }
-            }
-        }
-        // fallback: 返回空列表，避免抛出解析异常
-        log.warn("未能从 JSON 解析出数组结构: {}", root);
-        return List.of();
-    }
-
     public record SuggestionContext(SuggestionType type, String tableHint, boolean showTableHint, String alias, List<String> scopedTables) {}
 
     public record TableEntry(String name, String type) {}
@@ -593,21 +665,31 @@ public class MetadataService {
         String schema_name;
         String object_name;
         String object_type;
+
+        RemoteObject(String schema_name, String object_name, String object_type) {
+            this.schema_name = schema_name;
+            this.object_name = object_name;
+            this.object_type = object_type;
+        }
     }
 
     static class RemoteColumn {
         String schema_name;
         String object_name;
         String column_name;
-        String sort_no;
-    }
+        String data_type;
+        int ordinal_position;
+        String is_nullable;
+        String column_default;
 
-    private int parseSortNo(String value, int fallback) {
-        if (value == null) return fallback;
-        try {
-            return Integer.parseInt(value.trim());
-        } catch (NumberFormatException e) {
-            return fallback;
+        RemoteColumn(String schema_name, String object_name, String column_name, String data_type, int ordinal_position, String is_nullable, String column_default) {
+            this.schema_name = schema_name;
+            this.object_name = object_name;
+            this.column_name = column_name;
+            this.data_type = data_type;
+            this.ordinal_position = ordinal_position;
+            this.is_nullable = is_nullable;
+            this.column_default = column_default;
         }
     }
 }

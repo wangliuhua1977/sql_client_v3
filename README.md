@@ -66,3 +66,23 @@
 - 操作日志（OperationLog）会输出 jobId、提交/状态轮询/完成时的进度记录，便于排查长任务。
 - 若响应 `success:false` 或 HTTP 非 200，客户端会在结果面板展示错误提示且不中断 UI。
 - Token 错误或网络异常时，日志与状态栏会提示失败原因；SQL 本身失败会在结果面板呈现后端返回的 errorMessage。
+
+## 前端开发技术文档：元数据获取与列顺序
+
+### 元数据获取方式
+- 统一通过 POST 提交 SQL 方式获取，复用 `AsyncSqlConfig` 的 BASE_URL、`X-Request-Token` Header 与忽略证书的 HttpClient 封装。
+- 使用 `SqlExecutionService.executeSync(sql)` 同步执行信息_schema 查询，返回的列名与行数据保持服务端顺序。
+- 默认 schema 固定为 `leshan`，不再从远端枚举 schema，树形结构的根 schema 亦固定。
+
+### 拉取的元数据 SQL
+- 表（BASE TABLE）：`information_schema.tables` 按 `table_name` 排序。
+- 视图：`information_schema.views` 按 `table_name` 排序。
+- 字段：`information_schema.columns`，按 `ordinal_position` 排序并写入本地 SQLite 的 `sort_no` 字段，用于 UI 展示与差分比较。
+
+### 列顺序保证策略
+- 元数据字段列表：查询 SQL 已按 `ordinal_position` 排序，写入本地缓存的 `sort_no` 与该顺序一致，浏览器与联想均按此顺序读取。
+- 查询结果展示：`SqlExecutionService` 优先读取响应中的 `columns`/`resultColumns` 数组作为列顺序；若缺失，则按后端返回的行对象顺序构建列清单，并用该顺序渲染 `QueryResultPanel`，避免 HashMap/JSONObject 打乱顺序。
+
+### 配置与排错
+- 相关配置集中在 `AsyncSqlConfig`，包含 BASE_URL、Token、AES Key/IV 等；证书忽略逻辑在 `TrustAllHttpClient`。
+- 元数据或查询列顺序异常时，可开启操作日志观察“执行元数据 SQL”与任务完成日志，确认返回的列名顺序；必要时清空本地 SQLite（工具-重置元数据）后重试。
