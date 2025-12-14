@@ -86,3 +86,29 @@
 ### 配置与排错
 - 相关配置集中在 `AsyncSqlConfig`，包含 BASE_URL、Token、AES Key/IV 等；证书忽略逻辑在 `TrustAllHttpClient`。
 - 元数据或查询列顺序异常时，可开启操作日志观察“执行元数据 SQL”与任务完成日志，确认返回的列名顺序；必要时清空本地 SQLite（工具-重置元数据）后重试。
+
+## 日志与元数据修复补充说明
+
+### 操作日志降噪
+- 笔记链接同步的成功日志已降级为 DEBUG，不再通过右侧“操作日志”面板输出“更新链接/Update link”等文案；如需排查可改用文件日志（`NoteRepository`）。
+- 仍保留解析/保存失败的提示，且改为“保存笔记关联失败”以便快速定位异常。
+
+### 本地 SQLite 存储路径与迁移
+- 本地缓存数据库统一存放在 `%USERPROFILE%\\.Sql_client_v3\\metadata.db`（Windows 为 `C:\\Users\\<用户名>\\.Sql_client_v3\\metadata.db`）。
+- 启动时若目录不存在会自动创建；若发现旧的工作目录下仍有 `metadata.db` 且新目录为空，会自动复制至新位置并在日志中提示已迁移。
+- 若新旧文件同时存在，优先使用用户目录版本，不会自动删除旧文件；可手动检查/清理旧的 `metadata.db`。
+- 常见问题排查：
+  - 权限不足/路径中包含空格时请确认有写权限，并使用绝对路径启动应用；
+  - 如遇“无法创建本地数据库目录”异常，可手动创建 `%USERPROFILE%\\.Sql_client_v3` 后重试；
+  - 迁移失败会在日志中提示“迁移本地数据库失败”，可手动复制旧文件至新目录再启动。
+
+### 元数据 175 条问题
+- 根因：元数据查询沿用异步接口的默认 `maxResultRows=100`，表与视图分两次查询后被截断，最大仅拿到约 175 条（如 100 张表 + 75 个视图）。
+- 修复：元数据请求单独放宽结果上限（5000 行），并在刷新流程中输出分层计数日志：
+  - 源端返回数：`元数据源对象数`（OperationLog + INFO 日志）。
+  - 写入 SQLite：`写入本地元数据: 新增/删除/总计`（OperationLog + INFO 日志）。
+  - UI 展示：`UI 展示元数据计数`（OperationLog + INFO 日志）。
+- 对账方式：
+  1. 在 PostgreSQL 中分别执行 `SELECT count(*) FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE';` 与 `SELECT count(*) FROM information_schema.views WHERE table_schema='leshan';` 获取真实总数。
+  2. 刷新元数据后查看操作日志/INFO 日志中的三组计数，确认源端、入库与 UI 展示一致。
+  3. 如仍有差异，可删除 `%USERPROFILE%\\.Sql_client_v3\\metadata.db` 重新拉取或通过“工具-重置元数据”触发全量同步。

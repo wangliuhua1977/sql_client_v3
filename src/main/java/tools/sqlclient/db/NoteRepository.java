@@ -1,5 +1,7 @@
 package tools.sqlclient.db;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.util.OperationLog;
@@ -19,6 +21,7 @@ import java.util.stream.Collectors;
  */
 public class NoteRepository {
     private static final String BASE_COLUMNS = "id, title, content, db_type, created_at, updated_at, tags, starred, trashed, deleted_at, style_name";
+    private static final Logger log = LoggerFactory.getLogger(NoteRepository.class);
     private final SQLiteManager sqliteManager;
 
     public NoteRepository(SQLiteManager sqliteManager) {
@@ -280,7 +283,7 @@ public class NoteRepository {
             }
 
             conn.commit();
-            OperationLog.log("更新链接: from " + fromNoteId + " -> " + toNoteIds);
+            log.debug("已同步笔记引用关系 from {} -> {}", fromNoteId, toNoteIds);
         } catch (Exception e) {
             throw new RuntimeException("更新笔记链接失败", e);
         }
