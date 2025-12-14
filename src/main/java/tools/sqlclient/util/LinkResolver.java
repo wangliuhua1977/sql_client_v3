@@ -170,7 +170,7 @@ public class LinkResolver {
         try {
             noteRepo.updateNoteLinks(currentNote.getId(), targets);
         } catch (Exception ex) {
-            OperationLog.log("更新链接表失败: " + ex.getMessage());
+            OperationLog.log("保存笔记关联失败: " + ex.getMessage());
         }
         return targets;
     }

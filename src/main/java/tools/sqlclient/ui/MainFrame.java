@@ -1,7 +1,10 @@
 package tools.sqlclient.ui;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.AppStateRepository;
 import tools.sqlclient.db.EditorStyleRepository;
+import tools.sqlclient.db.LocalDatabasePathProvider;
 import tools.sqlclient.db.NoteRepository;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.db.SqlHistoryRepository;
@@ -56,6 +59,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 主窗口，符合 Windows 11 扁平化风格，全部中文。
  */
 public class MainFrame extends JFrame {
+    private static final Logger log = LoggerFactory.getLogger(MainFrame.class);
     private final CardLayout centerLayout = new CardLayout();
     private final JPanel centerPanel = new JPanel(centerLayout);
     private final JDesktopPane desktopPane = new JDesktopPane();
@@ -122,7 +126,7 @@ public class MainFrame extends JFrame {
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
 
-        java.nio.file.Path dbPath = java.nio.file.Path.of("metadata.db");
+        java.nio.file.Path dbPath = LocalDatabasePathProvider.resolveMetadataDbPath();
         this.sqliteManager = new SQLiteManager(dbPath);
         this.metadataService = new MetadataService(dbPath);
         this.noteRepository = new NoteRepository(sqliteManager);
@@ -1854,6 +1858,8 @@ public class MainFrame extends JFrame {
                 text += " (变动 " + result.changedObjects() + ")";
             }
             metadataLabel.setText(text);
+            log.info("UI 展示元数据计数: {}", result.totalObjects());
+            OperationLog.log("UI 展示元数据计数: " + result.totalObjects());
             if (!hasRunningExecutions()) {
                 statusLabel.setText("元数据已更新");
             }

@@ -26,6 +26,7 @@ import java.util.stream.Collectors;
 public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
+    private static final int METADATA_MAX_ROWS = 5000;
 
     private final SQLiteManager sqliteManager;
     private final ExecutorService metadataPool = Executors.newFixedThreadPool(4, r -> new Thread(r, "metadata-pool"));
@@ -98,6 +99,8 @@ public class MetadataService {
         try {
             OperationLog.log("开始刷新对象元数据");
             List<RemoteObject> remoteObjects = fetchObjects();
+            log.info("元数据源返回 {} 条对象", remoteObjects.size());
+            OperationLog.log("元数据源对象数: " + remoteObjects.size());
             Set<String> remoteNames = remoteObjects.stream().map(o -> o.object_name).collect(Collectors.toSet());
 
             int added = 0;
@@ -143,8 +146,11 @@ public class MetadataService {
             }
 
             // 更新列信息
+            int totalInDb = countCachedObjects();
+            log.info("本地元数据写入完成：新增 {}，删除 {}，总计 {}", added, removed, totalInDb);
+            OperationLog.log("写入本地元数据: 新增 " + added + " 删除 " + removed + " 总计 " + totalInDb);
             OperationLog.log("对象同步完成，共 " + remoteObjects.size() + " 个");
-            return new MetadataRefreshResult(true, countCachedObjects(), added + removed, "刷新成功");
+            return new MetadataRefreshResult(true, totalInDb, added + removed, "刷新成功");
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
@@ -276,7 +282,7 @@ public class MetadataService {
 
     private SqlExecResult runMetadataSql(String sql) throws Exception {
         OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        return sqlExecutionService.executeSync(sql);
+        return sqlExecutionService.executeSync(sql, METADATA_MAX_ROWS);
     }
 
     private List<RemoteObject> toObjects(SqlExecResult result) {

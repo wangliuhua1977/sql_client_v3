@@ -23,6 +23,7 @@ import java.util.function.Consumer;
  * 基于异步任务接口的 SQL 执行服务：提交任务、轮询状态、获取结果。
  */
 public class SqlExecutionService {
+    private static final int DEFAULT_MAX_RESULT_ROWS = 100;
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
 
@@ -31,7 +32,11 @@ public class SqlExecutionService {
      * 仍然复用异步接口的加密与 Header 逻辑。
      */
     public SqlExecResult executeSync(String sql) {
-        AsyncJobStatus submitted = submitJob(sql);
+        return executeSync(sql, DEFAULT_MAX_RESULT_ROWS);
+    }
+
+    public SqlExecResult executeSync(String sql, Integer maxResultRows) {
+        AsyncJobStatus submitted = submitJob(sql, maxResultRows);
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
             if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
@@ -104,9 +109,15 @@ public class SqlExecutionService {
     }
 
     private AsyncJobStatus submitJob(String sql) {
+        return submitJob(sql, DEFAULT_MAX_RESULT_ROWS);
+    }
+
+    private AsyncJobStatus submitJob(String sql, Integer maxResultRows) {
         JsonObject body = new JsonObject();
         body.addProperty("encryptedSql", AesEncryptor.encryptSqlToBase64(sql));
-        body.addProperty("maxResultRows", 100);
+        if (maxResultRows != null && maxResultRows > 0) {
+            body.addProperty("maxResultRows", maxResultRows);
+        }
 
         OperationLog.log("提交 /jobs/submit ...");
         JsonObject resp = postJson("/jobs/submit", body);
