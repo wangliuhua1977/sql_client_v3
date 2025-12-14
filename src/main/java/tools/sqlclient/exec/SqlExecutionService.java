@@ -35,6 +35,10 @@ public class SqlExecutionService {
         return executeSync(sql, DEFAULT_MAX_RESULT_ROWS);
     }
 
+    public SqlExecResult executeSyncWithoutLimit(String sql) {
+        return executeSync(sql, null);
+    }
+
     public SqlExecResult executeSync(String sql, Integer maxResultRows) {
         AsyncJobStatus submitted = submitJob(sql, maxResultRows);
         try {
