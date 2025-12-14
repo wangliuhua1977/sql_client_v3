@@ -102,13 +102,10 @@
   - 如遇“无法创建本地数据库目录”异常，可手动创建 `%USERPROFILE%\\.Sql_client_v3` 后重试；
   - 迁移失败会在日志中提示“迁移本地数据库失败”，可手动复制旧文件至新目录再启动。
 
-### 元数据 175 条问题
-- 根因：元数据查询沿用异步接口的默认 `maxResultRows=100`，表与视图分两次查询后被截断，最大仅拿到约 175 条（如 100 张表 + 75 个视图）。
-- 修复：元数据请求单独放宽结果上限（5000 行），并在刷新流程中输出分层计数日志：
-  - 源端返回数：`元数据源对象数`（OperationLog + INFO 日志）。
-  - 写入 SQLite：`写入本地元数据: 新增/删除/总计`（OperationLog + INFO 日志）。
-  - UI 展示：`UI 展示元数据计数`（OperationLog + INFO 日志）。
-- 对账方式：
-  1. 在 PostgreSQL 中分别执行 `SELECT count(*) FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE';` 与 `SELECT count(*) FROM information_schema.views WHERE table_schema='leshan';` 获取真实总数。
-  2. 刷新元数据后查看操作日志/INFO 日志中的三组计数，确认源端、入库与 UI 展示一致。
-  3. 如仍有差异，可删除 `%USERPROFILE%\\.Sql_client_v3\\metadata.db` 重新拉取或通过“工具-重置元数据”触发全量同步。
+### 结果集行数限制策略
+- 普通用户 SQL：提交到 `/jobs/submit` 时显式传入 `maxResultRows=200`，防止大结果集拖慢 UI 或导致内存压力；同步与异步执行共用这一默认值。
+- 元数据刷新 SQL：由 `MetadataService` 发起时不再传递 `maxResultRows` 字段，完全交由后端返回全量结果，避免对象/字段被截断。
+- 调整方式：如需修改 200 的上限，可在 `tools.sqlclient.exec.SqlExecutionService` 中的 `DEFAULT_MAX_RESULT_ROWS` 常量调整。数值增大可能带来 UI 渲染卡顿或 JVM 内存占用升高，需结合数据量评估。
+- 排错提示：
+  - 若元数据仍不全，优先检查后端服务是否设置了自身的行数上限；客户端现已不做截断。
+  - 刷新元数据时的操作日志会输出源端数量、写入 SQLite 的计数与 UI 展示计数，可据此核对是否一致。

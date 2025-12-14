@@ -23,7 +23,7 @@ import java.util.function.Consumer;
  * 基于异步任务接口的 SQL 执行服务：提交任务、轮询状态、获取结果。
  */
 public class SqlExecutionService {
-    private static final int DEFAULT_MAX_RESULT_ROWS = 100;
+    private static final int DEFAULT_MAX_RESULT_ROWS = 200;
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
 
@@ -33,6 +33,10 @@ public class SqlExecutionService {
      */
     public SqlExecResult executeSync(String sql) {
         return executeSync(sql, DEFAULT_MAX_RESULT_ROWS);
+    }
+
+    public SqlExecResult executeSyncWithoutLimit(String sql) {
+        return executeSync(sql, null);
     }
 
     public SqlExecResult executeSync(String sql, Integer maxResultRows) {

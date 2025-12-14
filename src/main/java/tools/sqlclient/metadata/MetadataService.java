@@ -26,7 +26,6 @@ import java.util.stream.Collectors;
 public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
-    private static final int METADATA_MAX_ROWS = 5000;
 
     private final SQLiteManager sqliteManager;
     private final ExecutorService metadataPool = Executors.newFixedThreadPool(4, r -> new Thread(r, "metadata-pool"));
@@ -282,7 +281,7 @@ public class MetadataService {
 
     private SqlExecResult runMetadataSql(String sql) throws Exception {
         OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        return sqlExecutionService.executeSync(sql, METADATA_MAX_ROWS);
+        return sqlExecutionService.executeSyncWithoutLimit(sql);
     }
 
     private List<RemoteObject> toObjects(SqlExecResult result) {
