@@ -24,6 +24,10 @@ import tools.sqlclient.ui.ManageNotesDialog.SearchNavigation;
 import tools.sqlclient.util.IconFactory;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
+import tools.sqlclient.ui.DockManager;
+import tools.sqlclient.ui.DockPosition;
+import tools.sqlclient.ui.LayoutState;
+import tools.sqlclient.ui.LogPanel;
 
 import javax.swing.*;
 import javax.swing.BorderFactory;
@@ -98,11 +102,29 @@ public class MainFrame extends JFrame {
     private EditorTabPanel activePanel;
     private JButton executeButton;
     private JButton stopButton;
-    private JSplitPane mainSplitPane;
-    private JSplitPane horizontalSplit;
+    private JSplitPane leftSplit;
+    private JSplitPane centerRightSplit;
+    private JSplitPane verticalSplit;
     private int sharedDividerLocation = -1;
     private JScrollPane sharedResultsScroll;
-    private OperationLogPanel logPanel;
+    private LogPanel logPanel;
+    private DockManager dockManager;
+    private LayoutState layoutState;
+    private JTabbedPane bottomTabbedPane;
+    private JTabbedPane rightTabbedPane;
+    private JPanel leftPanel;
+    private JPanel rightPanel;
+    private boolean leftVisible = true;
+    private boolean rightVisible = false;
+    private boolean bottomVisible = true;
+    private boolean editorMaximized = false;
+    private Rectangle floatingLogBounds;
+    private int lastLeftDividerLocation = -1;
+    private int lastRightDividerLocation = -1;
+    private int lastBottomDividerLocation = -1;
+    private boolean savedLeftVisibleForMax = true;
+    private boolean savedRightVisibleForMax = false;
+    private boolean savedBottomVisibleForMax = true;
     private boolean debugMode = false;
     private static final String DEBUG_SECRET = "yy181911a";
     private static final String RESTORE_SECRET = "我决定今天请小胖哥吃饭喝咖啡";
@@ -125,6 +147,16 @@ public class MainFrame extends JFrame {
         setSize(1200, 800);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout());
+        this.layoutState = new LayoutState();
+        Rectangle restored = layoutState.loadWindowBounds(getBounds());
+        if (restored != null) {
+            setBounds(restored);
+        }
+        editorMaximized = layoutState.isEditorMaximized(false);
+        leftVisible = layoutState.isLeftVisible(true);
+        rightVisible = layoutState.isRightVisible(false);
+        bottomVisible = layoutState.isBottomVisible(true);
+        floatingLogBounds = layoutState.loadLogFloatingBounds();
 
         java.nio.file.Path dbPath = LocalDatabasePathProvider.resolveMetadataDbPath();
         this.sqliteManager = new SQLiteManager(dbPath);
@@ -192,6 +224,7 @@ public class MainFrame extends JFrame {
                 persistOpenFrames();
                 cancelScheduledBackup();
                 scheduledBackupExecutor.shutdownNow();
+                persistLayoutState();
             }
         });
         updateExecutionButtons();
@@ -862,6 +895,40 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        view.add(new JMenuItem(new AbstractAction("切换左侧面板") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                toggleLeftPanel();
+            }
+        }));
+        view.add(new JMenuItem(new AbstractAction("切换底部面板") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                toggleBottomPanel();
+            }
+        }));
+        view.add(new JMenuItem(new AbstractAction("切换右侧面板") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                toggleRightPanel();
+            }
+        }));
+
+        JMenu logDockMenu = new JMenu("日志停靠位置");
+        ButtonGroup logGroup = new ButtonGroup();
+        DockPosition currentDock = layoutState.getLogDockPosition(DockPosition.BOTTOM);
+        addDockMenuItem(logDockMenu, logGroup, "底部", DockPosition.BOTTOM, currentDock == DockPosition.BOTTOM);
+        addDockMenuItem(logDockMenu, logGroup, "右侧", DockPosition.RIGHT, currentDock == DockPosition.RIGHT);
+        addDockMenuItem(logDockMenu, logGroup, "浮动窗口", DockPosition.FLOATING, currentDock == DockPosition.FLOATING);
+        view.add(logDockMenu);
+
+        view.add(new JMenuItem(new AbstractAction("重置布局") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                resetLayout();
+            }
+        }));
+
         view.add(new JMenuItem(new AbstractAction("对象浏览器") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -940,6 +1007,17 @@ public class MainFrame extends JFrame {
         styleToolbarButton(stopButton);
         toolBar.add(executeButton);
         toolBar.add(stopButton);
+        JButton logButton = new JButton("日志");
+        logButton.setToolTipText("打开日志面板");
+        logButton.addActionListener(e -> focusLogPanel());
+        styleToolbarButton(logButton);
+        JButton layoutButton = new JButton("专注");
+        layoutButton.setToolTipText("编辑器区域最大化/恢复");
+        layoutButton.addActionListener(e -> toggleEditorMaximize());
+        styleToolbarButton(layoutButton);
+        toolBar.addSeparator();
+        toolBar.add(logButton);
+        toolBar.add(layoutButton);
         add(toolBar, BorderLayout.NORTH);
     }
 
@@ -948,10 +1026,8 @@ public class MainFrame extends JFrame {
         centerPanel.add(desktopPane, "window");
         centerPanel.add(tabbedPane, "panel");
         sharedResultsScroll = new JScrollPane(sharedResultView.wrapper);
-        sharedResultsScroll.setVisible(false);
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
         sharedResultsWrapper.setMinimumSize(new Dimension(100, 180));
-        sharedResultsWrapper.setVisible(false);
         desktopPane.addPropertyChangeListener("selectedFrame", evt -> {
             syncActivePanelWithSelection();
             updateExecutionButtons();
@@ -960,33 +1036,325 @@ public class MainFrame extends JFrame {
             syncActivePanelWithSelection();
             updateExecutionButtons();
         });
-        mainSplitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, sharedResultsWrapper);
-        mainSplitPane.setResizeWeight(1.0);
-        mainSplitPane.setDividerSize(10);
-        mainSplitPane.setOneTouchExpandable(false);
-        mainSplitPane.setContinuousLayout(true);
-        mainSplitPane.setBorder(BorderFactory.createEmptyBorder());
-        mainSplitPane.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
-            if (mainSplitPane.getHeight() <= 0) return;
-            int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
-            int minBottom = sharedResultsWrapper.getMinimumSize().height;
-            int location = Math.max(minTop, Math.min(mainSplitPane.getDividerLocation(),
-                    mainSplitPane.getHeight() - minBottom));
+
+        bottomTabbedPane = new JTabbedPane();
+        bottomTabbedPane.addTab("结果", sharedResultsWrapper);
+        logPanel = new LogPanel();
+        bottomTabbedPane.addTab("日志", logPanel);
+        bottomTabbedPane.addTab("任务", createJobsShortcutPanel());
+        bottomTabbedPane.addTab("历史", createHistoryShortcutPanel());
+        bottomTabbedPane.setMinimumSize(new Dimension(200, 160));
+
+        rightTabbedPane = new JTabbedPane();
+        rightPanel = new JPanel(new BorderLayout());
+        rightPanel.add(rightTabbedPane, BorderLayout.CENTER);
+        rightTabbedPane.addTab("Inspector", createInspectorPlaceholder());
+        rightTabbedPane.setMinimumSize(new Dimension(220, 240));
+
+        leftPanel = buildNavigatorPanel();
+        centerRightSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, centerPanel, rightPanel);
+        centerRightSplit.setResizeWeight(1.0);
+        centerRightSplit.setDividerSize(8);
+        centerRightSplit.setContinuousLayout(true);
+
+        leftSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, centerRightSplit);
+        leftSplit.setResizeWeight(0.18);
+        leftSplit.setDividerSize(8);
+        leftSplit.setContinuousLayout(true);
+
+        verticalSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, leftSplit, bottomTabbedPane);
+        verticalSplit.setResizeWeight(0.78);
+        verticalSplit.setDividerSize(10);
+        verticalSplit.setContinuousLayout(true);
+        verticalSplit.setBorder(BorderFactory.createEmptyBorder());
+        verticalSplit.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
+            if (verticalSplit.getHeight() <= 0) return;
+            int minTop = leftSplit.getMinimumSize() != null ? leftSplit.getMinimumSize().height : 200;
+            int minBottom = bottomTabbedPane.getMinimumSize().height;
+            int location = Math.max(minTop, Math.min(verticalSplit.getDividerLocation(),
+                    verticalSplit.getHeight() - minBottom));
             sharedDividerLocation = location;
         });
-        logPanel = new OperationLogPanel();
-        horizontalSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, mainSplitPane, logPanel);
-        horizontalSplit.setResizeWeight(0.78);
-        horizontalSplit.setDividerSize(8);
-        horizontalSplit.setContinuousLayout(true);
-        horizontalSplit.setOneTouchExpandable(true);
-        // 默认右侧日志整体加入主界面，Debug 模式再打开
-        add(horizontalSplit, BorderLayout.CENTER);
 
-        SwingUtilities.invokeLater(this::collapseSharedResults);
-        SwingUtilities.invokeLater(() -> horizontalSplit.setDividerLocation(1.0));
+        dockManager = new DockManager(this, bottomTabbedPane, rightTabbedPane);
+        add(verticalSplit, BorderLayout.CENTER);
+
+        SwingUtilities.invokeLater(this::applyInitialLayoutState);
         centerLayout.show(centerPanel, "window");
         restoreSession();
+    }
+
+    private void applyInitialLayoutState() {
+        DockPosition dock = layoutState.getLogDockPosition(DockPosition.BOTTOM);
+        moveLogTo(dock);
+        if (!leftVisible) {
+            hideLeftPanel();
+        } else {
+            showLeftPanel();
+        }
+        if (!bottomVisible) {
+            hideBottomPanel();
+        } else {
+            showBottomPanel();
+        }
+        if (rightVisible || dock == DockPosition.RIGHT) {
+            showRightPanel();
+        } else {
+            hideRightPanel();
+        }
+        applyEditorMaximizedState();
+        SwingUtilities.invokeLater(() -> {
+            int left = layoutState.getLeftDivider(leftSplit.getDividerLocation());
+            int right = layoutState.getRightDivider(centerRightSplit.getDividerLocation());
+            int bottom = layoutState.getBottomDivider(verticalSplit.getDividerLocation());
+            if (left > 0) leftSplit.setDividerLocation(left);
+            if (right > 0) centerRightSplit.setDividerLocation(right);
+            if (bottom > 0) verticalSplit.setDividerLocation(bottom);
+        });
+    }
+
+    private JPanel buildNavigatorPanel() {
+        JPanel panel = new JPanel(new BorderLayout(4, 4));
+        panel.setBorder(BorderFactory.createTitledBorder("对象/笔记"));
+        JTextField filter = new JTextField();
+        filter.setToolTipText("输入关键字并回车可按标题打开笔记");
+        filter.addActionListener(e -> {
+            String keyword = filter.getText();
+            if (keyword != null && !keyword.isBlank()) {
+                openNoteByTitle(keyword.trim());
+            }
+        });
+        JButton manage = new JButton("管理");
+        manage.addActionListener(e -> openManageDialog());
+        JButton browse = new JButton("浏览器");
+        browse.addActionListener(e -> {
+            ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
+            dialog.setVisible(true);
+        });
+        JPanel headerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        headerActions.add(manage);
+        headerActions.add(browse);
+        JPanel header = new JPanel(new BorderLayout(4, 4));
+        header.add(filter, BorderLayout.CENTER);
+        header.add(headerActions, BorderLayout.EAST);
+        panel.add(header, BorderLayout.NORTH);
+
+        JTextArea hint = new JTextArea("使用左上角搜索快速定位笔记或打开对象浏览器。");
+        hint.setEditable(false);
+        hint.setLineWrap(true);
+        hint.setWrapStyleWord(true);
+        hint.setOpaque(false);
+        hint.setFont(hint.getFont().deriveFont(Font.PLAIN, 12f));
+        panel.add(new JScrollPane(hint), BorderLayout.CENTER);
+        return panel;
+    }
+
+    private JComponent createInspectorPlaceholder() {
+        JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(new EmptyBorder(8, 8, 8, 8));
+        JLabel label = new JLabel("右侧 Inspector 可显示字段说明或执行提示。");
+        label.setHorizontalAlignment(SwingConstants.LEFT);
+        JTextArea desc = new JTextArea("在此区域可以扩展显示元数据详情、执行参数或任务说明。当前版本提供简要提示。");
+        desc.setEditable(false);
+        desc.setLineWrap(true);
+        desc.setWrapStyleWord(true);
+        desc.setOpaque(false);
+        panel.add(label, BorderLayout.NORTH);
+        panel.add(new JScrollPane(desc), BorderLayout.CENTER);
+        return panel;
+    }
+
+    private JComponent createJobsShortcutPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        JButton openJobs = new JButton("打开异步任务列表");
+        openJobs.addActionListener(e -> {
+            AsyncJobListDialog dialog = new AsyncJobListDialog(MainFrame.this, sqlExecutionService);
+            dialog.setVisible(true);
+        });
+        panel.add(new JLabel("任务列表将展示正在运行或已完成的后台任务。"), BorderLayout.NORTH);
+        panel.add(openJobs, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private JComponent createHistoryShortcutPanel() {
+        JPanel panel = new JPanel(new BorderLayout());
+        JButton openHistory = new JButton("打开执行历史");
+        openHistory.addActionListener(e -> getExecutionHistoryDialog().toggleVisible());
+        panel.add(new JLabel("查看历史可以帮助回溯最近执行的 SQL。"), BorderLayout.NORTH);
+        panel.add(openHistory, BorderLayout.CENTER);
+        return panel;
+    }
+
+    private void toggleLeftPanel() {
+        if (leftVisible) {
+            hideLeftPanel();
+        } else {
+            showLeftPanel();
+        }
+    }
+
+    private void showLeftPanel() {
+        leftVisible = true;
+        layoutState.setLeftVisible(true);
+        leftPanel.setVisible(true);
+        int divider = layoutState.getLeftDivider(lastLeftDividerLocation > 0 ? lastLeftDividerLocation : (int) (getWidth() * 0.2));
+        SwingUtilities.invokeLater(() -> leftSplit.setDividerLocation(Math.max(160, divider)));
+    }
+
+    private void hideLeftPanel() {
+        if (leftSplit != null) {
+            lastLeftDividerLocation = leftSplit.getDividerLocation();
+            SwingUtilities.invokeLater(() -> leftSplit.setDividerLocation(0));
+        }
+        leftVisible = false;
+        layoutState.setLeftVisible(false);
+        leftPanel.setVisible(false);
+    }
+
+    private void toggleRightPanel() {
+        if (rightVisible) {
+            hideRightPanel();
+        } else {
+            showRightPanel();
+        }
+    }
+
+    private void showRightPanel() {
+        rightVisible = true;
+        layoutState.setRightVisible(true);
+        rightPanel.setVisible(true);
+        int divider = layoutState.getRightDivider(lastRightDividerLocation > 0 ? lastRightDividerLocation : (int) (getWidth() * 0.78));
+        SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(divider));
+    }
+
+    private void hideRightPanel() {
+        if (centerRightSplit != null) {
+            lastRightDividerLocation = centerRightSplit.getDividerLocation();
+            SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(centerRightSplit.getWidth()));
+        }
+        rightVisible = false;
+        layoutState.setRightVisible(false);
+        rightPanel.setVisible(false);
+    }
+
+    private void toggleBottomPanel() {
+        if (bottomVisible) {
+            hideBottomPanel();
+        } else {
+            showBottomPanel();
+        }
+    }
+
+    private void showBottomPanel() {
+        bottomVisible = true;
+        layoutState.setBottomVisible(true);
+        bottomTabbedPane.setVisible(true);
+        int divider = layoutState.getBottomDivider(lastBottomDividerLocation > 0 ? lastBottomDividerLocation : (int) (getHeight() * 0.72));
+        SwingUtilities.invokeLater(() -> verticalSplit.setDividerLocation(divider));
+    }
+
+    private void hideBottomPanel() {
+        if (verticalSplit != null) {
+            lastBottomDividerLocation = verticalSplit.getDividerLocation();
+            SwingUtilities.invokeLater(() -> verticalSplit.setDividerLocation(1.0));
+        }
+        bottomVisible = false;
+        layoutState.setBottomVisible(false);
+        bottomTabbedPane.setVisible(false);
+    }
+
+    private void toggleEditorMaximize() {
+        if (!editorMaximized) {
+            savedLeftVisibleForMax = leftVisible;
+            savedRightVisibleForMax = rightVisible;
+            savedBottomVisibleForMax = bottomVisible;
+            hideLeftPanel();
+            hideRightPanel();
+            hideBottomPanel();
+            editorMaximized = true;
+        } else {
+            if (savedLeftVisibleForMax) showLeftPanel();
+            if (savedRightVisibleForMax) showRightPanel();
+            if (savedBottomVisibleForMax) showBottomPanel();
+            editorMaximized = false;
+        }
+        layoutState.setEditorMaximized(editorMaximized);
+    }
+
+    private void applyEditorMaximizedState() {
+        if (editorMaximized) {
+            savedLeftVisibleForMax = leftVisible;
+            savedRightVisibleForMax = rightVisible;
+            savedBottomVisibleForMax = bottomVisible;
+            hideLeftPanel();
+            hideRightPanel();
+            hideBottomPanel();
+        }
+    }
+
+    private void moveLogTo(DockPosition position) {
+        if (dockManager == null || logPanel == null) return;
+        if (dockManager.getCurrentPosition(logPanel) == DockPosition.FLOATING) {
+            floatingLogBounds = dockManager.captureFloatingBounds(logPanel);
+            layoutState.saveLogFloatingBounds(floatingLogBounds);
+        }
+        dockManager.dock(logPanel, position, "日志", floatingLogBounds);
+        layoutState.setLogDockPosition(position);
+        if (position == DockPosition.BOTTOM) {
+            showBottomPanel();
+            bottomTabbedPane.setSelectedComponent(logPanel);
+        } else if (position == DockPosition.RIGHT) {
+            showRightPanel();
+            rightTabbedPane.setSelectedComponent(logPanel);
+        }
+    }
+
+    private void focusLogPanel() {
+        DockPosition position = dockManager != null ? dockManager.getCurrentPosition(logPanel) : DockPosition.BOTTOM;
+        moveLogTo(position);
+        if (position == DockPosition.FLOATING) {
+            dockManager.undockToDialog(logPanel, "操作日志", floatingLogBounds);
+        }
+    }
+
+    private void persistLayoutState() {
+        if (leftSplit != null) {
+            layoutState.setLeftDivider(leftSplit.getDividerLocation());
+        }
+        if (centerRightSplit != null) {
+            layoutState.setRightDivider(centerRightSplit.getDividerLocation());
+        }
+        if (verticalSplit != null) {
+            layoutState.setBottomDivider(verticalSplit.getDividerLocation());
+        }
+        layoutState.saveWindowBounds(getBounds());
+        layoutState.setLeftVisible(leftVisible);
+        layoutState.setRightVisible(rightVisible);
+        layoutState.setBottomVisible(bottomVisible);
+        layoutState.setEditorMaximized(editorMaximized);
+        if (dockManager != null) {
+            layoutState.setLogDockPosition(dockManager.getCurrentPosition(logPanel));
+            Rectangle bounds = dockManager.captureFloatingBounds(logPanel);
+            if (bounds != null) {
+                layoutState.saveLogFloatingBounds(bounds);
+            }
+        }
+    }
+
+    private void addDockMenuItem(JMenu menu, ButtonGroup group, String label, DockPosition position, boolean selected) {
+        JRadioButtonMenuItem item = new JRadioButtonMenuItem(label, selected);
+        item.addActionListener(e -> moveLogTo(position));
+        group.add(item);
+        menu.add(item);
+    }
+
+    private void resetLayout() {
+        layoutState.reset();
+        leftVisible = true;
+        rightVisible = false;
+        bottomVisible = true;
+        editorMaximized = false;
+        applyInitialLayoutState();
     }
 
     private void restoreSession() {
@@ -1417,33 +1785,14 @@ public class MainFrame extends JFrame {
     }
 
     private void expandSharedResults() {
-        if (sharedResultsScroll != null) {
-            sharedResultsScroll.setVisible(true);
-        }
-        sharedResultsWrapper.setVisible(true);
-        if (mainSplitPane == null) return;
-        int height = mainSplitPane.getHeight();
-        int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
-        int minBottom = sharedResultsWrapper.getMinimumSize().height;
-        int target = sharedDividerLocation > 0 ? sharedDividerLocation : (int) (height * 0.7);
-        int maxLocation = Math.max(minTop, height - minBottom);
-        int clamped = Math.max(minTop, Math.min(target, maxLocation));
-        SwingUtilities.invokeLater(() -> mainSplitPane.setDividerLocation(clamped));
+        showBottomPanel();
+        bottomTabbedPane.setSelectedComponent(sharedResultsWrapper);
     }
 
     private void collapseSharedResults() {
-        if (mainSplitPane == null) return;
-        if (sharedResultsScroll != null) {
-            sharedResultsScroll.setVisible(false);
+        if (bottomTabbedPane != null) {
+            bottomTabbedPane.setSelectedComponent(sharedResultsWrapper);
         }
-        sharedResultsWrapper.setVisible(false);
-        int height = mainSplitPane.getHeight();
-        int minTop = centerPanel.getMinimumSize() != null ? centerPanel.getMinimumSize().height : 200;
-        int minBottom = sharedResultsWrapper.getMinimumSize().height;
-        int collapsePos = sharedResultsWrapper.isVisible()
-                ? Math.max(minTop, height - minBottom)
-                : height;
-        SwingUtilities.invokeLater(() -> mainSplitPane.setDividerLocation(collapsePos));
     }
 
     private static class RunningJobHandle {
@@ -1914,11 +2263,7 @@ public class MainFrame extends JFrame {
     }
 
     private void revealLogPanel() {
-        if (horizontalSplit == null) return;
-        SwingUtilities.invokeLater(() -> {
-            horizontalSplit.setDividerLocation(0.78);
-            horizontalSplit.setResizeWeight(0.78);
-        });
+        focusLogPanel();
     }
 
     private Path resolveDbPath() {
