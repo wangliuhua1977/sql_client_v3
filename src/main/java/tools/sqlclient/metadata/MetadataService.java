@@ -27,13 +27,6 @@ public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
 
-    /**
-     * 注意：后端在“未传 maxResultRows”时仍可能默认返回 200 行；
-     * 为保证“元数据总量不设上限”，这里用分页把全量搬回本地。
-     * 单页大小可调，但建议与后端默认/常用上限一致，避免一次返回过大。
-     */
-    private static final int METADATA_PAGE_SIZE = 5000;
-
     private final SQLiteManager sqliteManager;
     private final ExecutorService metadataPool = Executors.newFixedThreadPool(4, r -> new Thread(r, "metadata-pool"));
     private final ExecutorService networkPool = Executors.newFixedThreadPool(6, r -> new Thread(r, "network-pool"));
@@ -107,7 +100,6 @@ public class MetadataService {
             List<RemoteObject> remoteObjects = fetchObjects();
             log.info("元数据源返回 {} 条对象", remoteObjects.size());
             OperationLog.log("元数据源对象数: " + remoteObjects.size());
-
             Set<String> remoteNames = remoteObjects.stream().map(o -> o.object_name).collect(Collectors.toSet());
 
             int added = 0;
@@ -125,8 +117,7 @@ public class MetadataService {
                         }
                     }
                     // 插入新增
-                    try (PreparedStatement ps = conn.prepareStatement(
-                            "INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)")) {
+                    try (PreparedStatement ps = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)")) {
                         for (RemoteObject obj : remoteObjects) {
                             ps.setString(1, obj.schema_name);
                             ps.setString(2, obj.object_name);
@@ -153,6 +144,7 @@ public class MetadataService {
                 }
             }
 
+            // 更新列信息
             int totalInDb = countCachedObjects();
             log.info("本地元数据写入完成：新增 {}，删除 {}，总计 {}", added, removed, totalInDb);
             OperationLog.log("写入本地元数据: 新增 " + added + " 删除 " + removed + " 总计 " + totalInDb);
@@ -196,6 +188,9 @@ public class MetadataService {
         return 0;
     }
 
+    /**
+     * 在用户选择表名或输入别名时，后台补齐字段元数据，避免列联想时出现空列表。
+     */
     /**
      * 异步补齐字段缓存，可在完成后回调刷新 UI。
      * @param tableName 目标表/视图
@@ -263,80 +258,30 @@ public class MetadataService {
         return objects;
     }
 
-    /**
-     * 关键修复：元数据对象列表全量拉取（分页循环），避免“行数 200”这种被默认截断的情况。
-     * 单次请求仍然不传 maxResultRows（executeSyncWithoutLimit），但后端可能默认 200，因此在 SQL 侧分页。
-     */
     private List<RemoteObject> queryObjectsByType(String type) throws Exception {
-        final int pageSize = METADATA_PAGE_SIZE;
-        List<RemoteObject> all = new ArrayList<>();
-
-        String lastName = null;
-        int pageNo = 0;
-
-        while (true) {
-            pageNo++;
-
-            String cond = (lastName == null || lastName.isBlank())
-                    ? ""
-                    : (" AND table_name > '" + escapeSqlLiteral(lastName) + "'");
-
-            String sql;
-            if ("table".equalsIgnoreCase(type)) {
-                sql = String.format("""
-                        SELECT table_schema AS schema_name, table_name AS object_name, 'table' AS object_type
-                        FROM information_schema.tables
-                        WHERE table_schema = '%s' AND table_type = 'BASE TABLE'%s
-                        ORDER BY table_name
-                        LIMIT %d
-                        """, DEFAULT_SCHEMA, cond, pageSize);
-            } else {
-                sql = String.format("""
-                        SELECT table_schema AS schema_name, table_name AS object_name, 'view' AS object_type
-                        FROM information_schema.views
-                        WHERE table_schema = '%s'%s
-                        ORDER BY table_name
-                        LIMIT %d
-                        """, DEFAULT_SCHEMA, cond, pageSize);
-            }
-
-            // 只在第一页打印 SQL，后续用分页进度日志避免刷屏
-            SqlExecResult result = runMetadataSql(sql, pageNo == 1);
-            List<RemoteObject> page = toObjects(result);
-
-            if (page.isEmpty()) {
-                break;
-            }
-
-            all.addAll(page);
-            OperationLog.log("元数据分页拉取: type=" + type + " page=" + pageNo + " 本页=" + page.size() + " 累计=" + all.size());
-
-            // 本页不足 pageSize => 已取完
-            if (page.size() < pageSize) {
-                break;
-            }
-
-            // 更新 lastName，防止死循环
-            String newLast = page.get(page.size() - 1).object_name;
-            if (newLast == null || newLast.equals(lastName)) {
-                break;
-            }
-            lastName = newLast;
+        String sql;
+        if ("table".equalsIgnoreCase(type)) {
+            sql = String.format("""
+                    SELECT table_schema AS schema_name, table_name AS object_name, 'table' AS object_type
+                    FROM information_schema.tables
+                    WHERE table_schema = '%s' AND table_type = 'BASE TABLE'
+                    ORDER BY table_name
+                    """, DEFAULT_SCHEMA);
+        } else {
+            sql = String.format("""
+                    SELECT table_schema AS schema_name, table_name AS object_name, 'view' AS object_type
+                    FROM information_schema.views
+                    WHERE table_schema = '%s'
+                    ORDER BY table_name
+                    """, DEFAULT_SCHEMA);
         }
-
-        return all;
+        SqlExecResult result = runMetadataSql(sql);
+        return toObjects(result);
     }
 
     private SqlExecResult runMetadataSql(String sql) throws Exception {
-        return runMetadataSql(sql, true);
-    }
-
-    private SqlExecResult runMetadataSql(String sql, boolean logSql) throws Exception {
-        if (logSql) {
-            OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        }
-        // 不传 maxResultRows，让请求体层面“不设上限”
-        return sqlExecutionService.executeSyncWithoutLimit(sql);
+        OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
+        return sqlExecutionService.executeSyncAllPages(sql);
     }
 
     private List<RemoteObject> toObjects(SqlExecResult result) {
@@ -359,66 +304,26 @@ public class MetadataService {
         return list;
     }
 
-    /**
-     * 字段查询也做分页，避免某些极端表列数 > 200 时被截断。
-     */
     private List<RemoteColumn> fetchColumnsBySql(String objectName) throws Exception {
         String safeName = sanitizeObjectName(objectName);
         if (safeName == null) {
             return List.of();
         }
-
-        final int pageSize = METADATA_PAGE_SIZE;
-        List<RemoteColumn> all = new ArrayList<>();
-        int lastOrdinal = 0;
-        int pageNo = 0;
-
-        while (true) {
-            pageNo++;
-
-            String sql = String.format("""
-                    SELECT table_schema AS schema_name, table_name AS object_name, column_name, data_type, ordinal_position, is_nullable, column_default
-                    FROM information_schema.columns
-                    WHERE table_schema='%s' AND table_name = '%s' AND ordinal_position > %d
-                    ORDER BY ordinal_position
-                    LIMIT %d
-                    """, DEFAULT_SCHEMA, safeName, lastOrdinal, pageSize);
-
-            SqlExecResult result = runMetadataSql(sql, pageNo == 1);
-            List<RemoteColumn> page = toColumns(result);
-
-            if (page.isEmpty()) {
-                break;
-            }
-
-            all.addAll(page);
-            OperationLog.log("字段分页拉取: table=" + safeName + " page=" + pageNo + " 本页=" + page.size() + " 累计=" + all.size());
-
-            if (page.size() < pageSize) {
-                break;
-            }
-
-            int newLast = page.get(page.size() - 1).ordinal_position;
-            if (newLast <= lastOrdinal) {
-                break;
-            }
-            lastOrdinal = newLast;
-        }
-
-        return all;
+        String sql = String.format("""
+                SELECT table_schema AS schema_name, table_name AS object_name, column_name, data_type, ordinal_position, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_schema='%s' AND table_name = '%s'
+                ORDER BY ordinal_position
+                """, DEFAULT_SCHEMA, safeName);
+        SqlExecResult result = runMetadataSql(sql);
+        return toColumns(result);
     }
 
     private String sanitizeObjectName(String objectName) {
         if (!isLikelyTableName(objectName)) {
             return null;
         }
-        String n = objectName.trim();
-        // 支持 "leshan.xxx" 这种输入：只取对象名部分（遵循默认 schema 策略）
-        int dot = n.lastIndexOf('.');
-        if (dot >= 0 && dot + 1 < n.length()) {
-            n = n.substring(dot + 1);
-        }
-        return n.replace("'", "''");
+        return objectName.replace("'", "''");
     }
 
     private List<RemoteColumn> toColumns(SqlExecResult result) {
@@ -444,8 +349,7 @@ public class MetadataService {
             String dataType = valueAt(row, typeIdx);
             String nullable = valueAt(row, nullableIdx);
             String columnDefault = valueAt(row, defaultIdx);
-            list.add(new RemoteColumn(schema != null ? schema : DEFAULT_SCHEMA, objectNameOrDefault(object), name,
-                    dataType, ordinal, nullable, columnDefault));
+            list.add(new RemoteColumn(schema != null ? schema : DEFAULT_SCHEMA, objectNameOrDefault(object), name, dataType, ordinal, nullable, columnDefault));
         }
         return list;
     }
@@ -489,7 +393,6 @@ public class MetadataService {
                 attempts++;
                 List<RemoteColumn> columns = fetchColumnsBySql(objectName);
                 if (columns == null || columns.isEmpty()) return;
-
                 synchronized (dbWriteLock) {
                     try (Connection conn = sqliteManager.getConnection()) {
                         boolean auto = conn.getAutoCommit();
@@ -534,8 +437,7 @@ public class MetadataService {
                                     del.setString(1, objectName);
                                     del.executeUpdate();
                                 }
-                                try (PreparedStatement ins = conn.prepareStatement(
-                                        "INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
+                                try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
                                     int i = 0;
                                     for (RemoteColumn col : columns) {
                                         ins.setString(1, col.schema_name);
@@ -710,8 +612,7 @@ public class MetadataService {
 
     public List<String> loadColumnsFromCache(String tableName) {
         try (Connection conn = sqliteManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement(
-                     "SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no ASC, column_name ASC")) {
+             PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no ASC, column_name ASC")) {
             ps.setString(1, tableName);
             try (ResultSet rs = ps.executeQuery()) {
                 List<String> cols = new ArrayList<>();
@@ -750,10 +651,6 @@ public class MetadataService {
                 log.warn("更新使用次数失败: {}", item.name(), e);
             }
         }
-    }
-
-    private String escapeSqlLiteral(String s) {
-        return s == null ? "" : s.replace("'", "''");
     }
 
     public record SuggestionContext(SuggestionType type, String tableHint, boolean showTableHint, String alias, List<String> scopedTables) {}

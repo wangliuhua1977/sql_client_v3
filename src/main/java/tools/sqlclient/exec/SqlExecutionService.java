@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import tools.sqlclient.network.TrustAllHttpClient;
+import tools.sqlclient.util.Config;
 import tools.sqlclient.util.AesEncryptor;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
@@ -23,7 +24,11 @@ import java.util.function.Consumer;
  * 基于异步任务接口的 SQL 执行服务：提交任务、轮询状态、获取结果。
  */
 public class SqlExecutionService {
-    private static final int DEFAULT_MAX_RESULT_ROWS = 200;
+    private static final int DEFAULT_MAX_RESULT_ROWS = 0; // 分页模式下不再按总行数截断
+    private static final int DEFAULT_PAGE_SIZE = 2000;
+    private static final int MAX_PAGE_SIZE = 5000;
+    private static final int MAX_ACCUMULATED_PAGES = 20;
+    private static final int MAX_ACCUMULATED_ROWS = 100_000;
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
 
@@ -39,7 +44,15 @@ public class SqlExecutionService {
         return executeSync(sql, null);
     }
 
+    public SqlExecResult executeSyncAllPages(String sql) {
+        return executeSync(sql, null, true);
+    }
+
     public SqlExecResult executeSync(String sql, Integer maxResultRows) {
+        return executeSync(sql, maxResultRows, false);
+    }
+
+    private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages) {
         AsyncJobStatus submitted = submitJob(sql, maxResultRows);
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
@@ -48,7 +61,7 @@ public class SqlExecutionService {
                         ? finalStatus.getMessage()
                         : ("任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus()));
             }
-            return requestResult(submitted.getJobId(), sql);
+            return requestResultPaged(submitted.getJobId(), sql, fetchAllPages);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
@@ -79,7 +92,7 @@ public class SqlExecutionService {
                 })
                 .thenCompose(status -> {
                     if ("SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
-                        return CompletableFuture.supplyAsync(() -> requestResult(status.getJobId(), trimmed), ThreadPools.NETWORK_POOL)
+                        return CompletableFuture.supplyAsync(() -> requestResultPaged(status.getJobId(), trimmed, false), ThreadPools.NETWORK_POOL)
                                 .thenAccept(res -> {
                                     notifyStatus(onStatus, status);
                                     if (onSuccess != null) {
@@ -165,10 +178,71 @@ public class SqlExecutionService {
         return status;
     }
 
-    private SqlExecResult requestResult(String jobId, String sql) {
+    public SqlExecResult requestResultPaged(String jobId, String sql, boolean fetchAllPages) {
+        int pageSize = resolvePageSize();
+        int currentPage = 1;
+        boolean keepForPaging = Config.allowPagingAfterFirstFetch();
+        boolean removeAfterFetch = fetchAllPages ? false : !keepForPaging;
+
+        SqlExecResult firstPage = requestResultPage(jobId, sql, currentPage, pageSize, removeAfterFetch);
+        if (!fetchAllPages || firstPage == null) {
+            return firstPage;
+        }
+
+        List<List<String>> allRows = new ArrayList<>();
+        if (firstPage.getRows() != null) {
+            allRows.addAll(firstPage.getRows());
+        }
+
+        boolean hasNext = Boolean.TRUE.equals(firstPage.getHasNext());
+        boolean truncated = Boolean.TRUE.equals(firstPage.getTruncated());
+        String note = firstPage.getNote();
+        boolean stoppedByLimit = false;
+
+        while (hasNext && currentPage < MAX_ACCUMULATED_PAGES && allRows.size() < MAX_ACCUMULATED_ROWS) {
+            currentPage++;
+            boolean stopAfterThisPage = currentPage >= MAX_ACCUMULATED_PAGES || allRows.size() >= MAX_ACCUMULATED_ROWS;
+            SqlExecResult pageResult = requestResultPage(jobId, sql, currentPage, pageSize, stopAfterThisPage);
+            if (pageResult.getRows() != null) {
+                allRows.addAll(pageResult.getRows());
+            }
+            if (pageResult.getTruncated() != null && pageResult.getTruncated()) {
+                truncated = true;
+            }
+            if (pageResult.getNote() != null && !pageResult.getNote().isBlank()) {
+                note = pageResult.getNote();
+            }
+            hasNext = Boolean.TRUE.equals(pageResult.getHasNext());
+            if (stopAfterThisPage && hasNext) {
+                stoppedByLimit = true;
+                break;
+            }
+            if (allRows.size() >= MAX_ACCUMULATED_ROWS) {
+                stoppedByLimit = true;
+                break;
+            }
+        }
+
+        if (stoppedByLimit && hasNext) {
+            OperationLog.log("[" + jobId + "] 达到分页累积上限，已停止继续拉取剩余数据");
+        }
+
+        if (!removeAfterFetch && (!hasNext || stoppedByLimit)) {
+            cleanupResult(jobId, currentPage, pageSize);
+        }
+
+        return new SqlExecResult(sql, firstPage.getColumns(), allRows, allRows.size(), true, firstPage.getMessage(), jobId,
+                firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
+                firstPage.getRowsAffected(), allRows.size(), firstPage.getHasResultSet(), currentPage, pageSize, hasNext,
+                truncated, note);
+    }
+
+    private SqlExecResult requestResultPage(String jobId, String sql, int page, int pageSize, boolean removeAfterFetch) {
         JsonObject body = new JsonObject();
         body.addProperty("jobId", jobId);
-        body.addProperty("removeAfterFetch", true);
+        body.addProperty("removeAfterFetch", removeAfterFetch);
+        body.addProperty("page", page);
+        body.addProperty("pageSize", Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE));
         JsonObject resp = postJson("/jobs/result", body);
         boolean success = resp.has("success") && resp.get("success").getAsBoolean();
         String status = resp.has("status") && !resp.get("status").isJsonNull() ? resp.get("status").getAsString() : "";
@@ -182,11 +256,20 @@ public class SqlExecutionService {
                 ? resp.get("returnedRowCount").getAsInt() : null;
         Boolean hasResultSet = resp.has("hasResultSet") && !resp.get("hasResultSet").isJsonNull()
                 ? resp.get("hasResultSet").getAsBoolean() : null;
+        Boolean hasNext = resp.has("hasNext") && !resp.get("hasNext").isJsonNull()
+                ? resp.get("hasNext").getAsBoolean() : false;
+        Boolean truncated = resp.has("truncated") && !resp.get("truncated").isJsonNull()
+                ? resp.get("truncated").getAsBoolean() : null;
+        Integer respPage = resp.has("page") && !resp.get("page").isJsonNull()
+                ? resp.get("page").getAsInt() : page;
+        Integer respPageSize = resp.has("pageSize") && !resp.get("pageSize").isJsonNull()
+                ? resp.get("pageSize").getAsInt() : pageSize;
+        String note = resp.has("note") && !resp.get("note").isJsonNull() ? resp.get("note").getAsString() : null;
         String message = extractMessage(resp);
 
         if (!success) {
             OperationLog.log("[" + jobId + "] 任务失败/未完成: " + message);
-            throw new RuntimeException(message);
+            throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
         }
 
         if (hasResultSet != null && !hasResultSet) {
@@ -195,7 +278,7 @@ public class SqlExecutionService {
             String info = rowsAffected != null ? ("影响行数: " + rowsAffected) : (message != null ? message : "执行成功");
             rows.add(List.of(info));
             return new SqlExecResult(sql, columns, rows, rows.size(), true, message, jobId, status, progress,
-                    null, duration, rowsAffected, returnedRowCount, hasResultSet);
+                    null, duration, rowsAffected, returnedRowCount, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
         }
 
         JsonArray rowsJson = resp.has("resultRows") && resp.get("resultRows").isJsonArray()
@@ -203,9 +286,35 @@ public class SqlExecutionService {
         List<String> columns = extractColumns(resp, rowsJson);
         List<List<String>> rows = extractRows(rowsJson, columns);
         int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
-        OperationLog.log("[" + jobId + "] 任务完成，行数 " + rowCount);
+        OperationLog.log("[" + jobId + "] 任务完成，page " + respPage + "/size " + respPageSize
+                + "，本页行数 " + rowCount + (hasNext ? "，还有下一页" : ""));
+        if (Boolean.TRUE.equals(truncated)) {
+            OperationLog.log("[" + jobId + "] 后端返回结果被截断（truncated=true）");
+        }
+        if (note != null && !note.isBlank()) {
+            OperationLog.log("[" + jobId + "] note: " + note);
+        }
         return new SqlExecResult(sql, columns, rows, rowCount, true, message, jobId, status, progress,
-                null, duration, rowsAffected, returnedRowCount, hasResultSet);
+                null, duration, rowsAffected, returnedRowCount, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
+    }
+
+    private void cleanupResult(String jobId, int page, int pageSize) {
+        try {
+            JsonObject body = new JsonObject();
+            body.addProperty("jobId", jobId);
+            body.addProperty("removeAfterFetch", true);
+            body.addProperty("page", page);
+            body.addProperty("pageSize", pageSize);
+            postJson("/jobs/result", body);
+            OperationLog.log("[" + jobId + "] 已清理后端结果缓存");
+        } catch (Exception e) {
+            OperationLog.log("[" + jobId + "] 清理结果缓存失败: " + e.getMessage());
+        }
+    }
+
+    private int resolvePageSize() {
+        int configured = Config.getResultPageSizeOrDefault(DEFAULT_PAGE_SIZE);
+        return Math.min(Math.max(configured, 1), MAX_PAGE_SIZE);
     }
 
     private List<String> extractColumns(JsonObject resp, JsonArray rowsJson) {
