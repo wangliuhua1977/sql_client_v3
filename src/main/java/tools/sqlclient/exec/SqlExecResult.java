@@ -21,9 +21,15 @@ public class SqlExecResult {
     private final Integer rowsAffected;
     private final Integer returnedRowCount;
     private final Boolean hasResultSet;
+    private final Integer page;
+    private final Integer pageSize;
+    private final Boolean hasNext;
+    private final Boolean truncated;
+    private final String note;
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
-        this(sql, columns, rows, rowsCount, true, null, null, null, null, null, null, null, null, null);
+        this(sql, columns, rows, rowsCount, true, null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null);
     }
 
     public SqlExecResult(String sql,
@@ -39,7 +45,12 @@ public class SqlExecResult {
                          Long durationMillis,
                          Integer rowsAffected,
                          Integer returnedRowCount,
-                         Boolean hasResultSet) {
+                         Boolean hasResultSet,
+                         Integer page,
+                         Integer pageSize,
+                         Boolean hasNext,
+                         Boolean truncated,
+                         String note) {
         this.sql = Objects.requireNonNullElse(sql, "");
         this.columns = columns;
         this.rows = rows;
@@ -54,6 +65,11 @@ public class SqlExecResult {
         this.rowsAffected = rowsAffected;
         this.returnedRowCount = returnedRowCount;
         this.hasResultSet = hasResultSet;
+        this.page = page;
+        this.pageSize = pageSize;
+        this.hasNext = hasNext;
+        this.truncated = truncated;
+        this.note = note;
     }
 
     public String getSql() {
@@ -110,5 +126,25 @@ public class SqlExecResult {
 
     public Boolean getHasResultSet() {
         return hasResultSet;
+    }
+
+    public Integer getPage() {
+        return page;
+    }
+
+    public Integer getPageSize() {
+        return pageSize;
+    }
+
+    public Boolean getHasNext() {
+        return hasNext;
+    }
+
+    public Boolean getTruncated() {
+        return truncated;
+    }
+
+    public String getNote() {
+        return note;
     }
 }
