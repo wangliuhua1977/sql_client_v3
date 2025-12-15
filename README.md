@@ -102,10 +102,10 @@
   - 如遇“无法创建本地数据库目录”异常，可手动创建 `%USERPROFILE%\\.Sql_client_v3` 后重试；
   - 迁移失败会在日志中提示“迁移本地数据库失败”，可手动复制旧文件至新目录再启动。
 
-### 结果集行数限制策略
-- 普通用户 SQL：提交到 `/jobs/submit` 时显式传入 `maxResultRows=200`，防止大结果集拖慢 UI 或导致内存压力；同步与异步执行共用这一默认值。
-- 元数据刷新 SQL：由 `MetadataService` 发起时不再传递 `maxResultRows` 字段，完全交由后端返回全量结果，避免对象/字段被截断。
-- 调整方式：如需修改 200 的上限，可在 `tools.sqlclient.exec.SqlExecutionService` 中的 `DEFAULT_MAX_RESULT_ROWS` 常量调整。数值增大可能带来 UI 渲染卡顿或 JVM 内存占用升高，需结合数据量评估。
-- 排错提示：
-  - 若元数据仍不全，优先检查后端服务是否设置了自身的行数上限；客户端现已不做截断。
-  - 刷新元数据时的操作日志会输出源端数量、写入 SQLite 的计数与 UI 展示计数，可据此核对是否一致。
+### 结果集分页协议与配置
+- 默认使用 `/api/jobs/result` 的分页参数：`page` 从 1 开始，`pageSize` 默认 2000，客户端会将配置值裁剪到 1~5000。
+- 响应中的 `hasNext`、`truncated`、`note` 会在操作日志中输出，便于判断是否还有下一页、是否被截断以及后端裁剪提示。
+- 普通 SQL 执行：仅拉取第 1 页并立即 `removeAfterFetch=true` 清理后端缓存，避免一次性加载超大结果；若需要保留分页能力，可在 `config.properties` 中设置 `allowPagingAfterFirstFetch=true`，但当前 UI 仍只展示首批数据。
+- 元数据刷新：通过 `SqlExecutionService.executeSyncAllPages` 循环翻页直至 `hasNext=false`，并在最后一次请求后清理缓存，确保对象/字段抓取完整。
+- 用户可在根目录或 classpath 的 `config.properties` 中编辑 `result.pageSize`，小于 1 时回退 2000，大于 5000 会在日志提示并裁剪到 5000。必要时可手动修改 `allowPagingAfterFirstFetch` 以便后端保留结果缓存供后续分页使用。
+- 结果过期或 TTL 失效时会提示“结果已过期，请重新执行 SQL”，不会导致客户端崩溃；如需排查分页问题，可查看操作日志中的 page/pageSize/hasNext 信息。

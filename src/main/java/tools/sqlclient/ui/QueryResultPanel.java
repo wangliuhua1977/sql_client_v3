@@ -88,7 +88,8 @@ public class QueryResultPanel extends JPanel {
         List<String> cols = List.of("消息");
         List<List<String>> rows = List.of(List.of("任务已提交，等待执行..."));
         SqlExecResult res = new SqlExecResult(sqlText, cols, rows, rows.size(), false,
-                "任务已提交", null, "QUEUED", 0, null, null, null, null, true);
+                "任务已提交", null, "QUEUED", 0, null, null, null, null, true,
+                null, null, null, null, null);
         return new QueryResultPanel(res, sqlText);
     }
 

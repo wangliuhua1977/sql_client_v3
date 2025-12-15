@@ -281,7 +281,7 @@ public class MetadataService {
 
     private SqlExecResult runMetadataSql(String sql) throws Exception {
         OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        return sqlExecutionService.executeSyncWithoutLimit(sql);
+        return sqlExecutionService.executeSyncAllPages(sql);
     }
 
     private List<RemoteObject> toObjects(SqlExecResult result) {
