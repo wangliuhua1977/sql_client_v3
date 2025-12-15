@@ -20,6 +20,7 @@ import javax.swing.text.BadLocationException;
 import java.awt.*;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
+import java.awt.geom.Rectangle2D;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -48,7 +49,7 @@ public class EditorTabPanel extends JPanel {
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
     private JPanel editorPanel;
     private JSplitPane splitPane;
-    private JPanel tabbedModePanel;
+    private JTabbedPane tabbedModePanel;
     private CardLayout centerCards;
     private JPanel centerContainer;
     private final ResultArea resultArea = new ResultArea();
@@ -674,8 +675,10 @@ public class EditorTabPanel extends JPanel {
         textArea.setCaretPosition(target);
         textArea.select(target, end);
         try {
-            Rectangle view = textArea.modelToView(target);
-            textArea.scrollRectToVisible(view);
+            Rectangle2D view = textArea.modelToView2D(target);
+            if (view != null) {
+                textArea.scrollRectToVisible(view.getBounds());
+            }
         } catch (Exception ignored) {
         }
     }
