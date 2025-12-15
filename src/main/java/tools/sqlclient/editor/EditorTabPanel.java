@@ -25,7 +25,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
-import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,16 +38,24 @@ public class EditorTabPanel extends JPanel {
     private final SuggestionEngine suggestionEngine;
     private final JLabel lastSaveLabel = new JLabel("自动保存: -");
     private final JLabel execStatusLabel = new JLabel("空闲");
+    private final JLabel layoutLabel = new JLabel("布局: 分屏");
+    private final JLabel datasetLabel = new JLabel("结果集: -");
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
     private final Consumer<String> linkOpener;
     private final FullWidthFilter fullWidthFilter;
-    private final JTabbedPane resultTabs = new JTabbedPane();
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
     private JPanel editorPanel;
     private JSplitPane splitPane;
+    private JPanel tabbedModePanel;
+    private CardLayout centerCards;
+    private JPanel centerContainer;
+    private final ResultArea resultArea = new ResultArea();
     private int lastDividerLocation = -1;
+    private boolean resultMaximized;
+    private boolean editorMaximized;
+    private EditorLayoutMode layoutMode = EditorLayoutMode.SPLIT;
     private javax.swing.Timer execTimer;
     private Runnable executeHandler;
     private EditorStyle currentStyle;
@@ -143,7 +150,7 @@ public class EditorTabPanel extends JPanel {
             }
         };
         textArea.addFocusListener(adapter);
-        resultTabs.addFocusListener(adapter);
+        resultArea.addFocusListener(adapter);
         this.addFocusListener(adapter);
     }
 
@@ -349,19 +356,16 @@ public class EditorTabPanel extends JPanel {
         status.add(execStatusLabel);
         editorPanel.add(status, BorderLayout.SOUTH);
 
-        resultTabs.setBorder(BorderFactory.createEmptyBorder());
-        JScrollPane resultScroll = new JScrollPane(resultTabs);
-        resultScroll.setPreferredSize(new Dimension(100, 220));
-        resultWrapper.add(resultScroll, BorderLayout.CENTER);
-        resultWrapper.setMinimumSize(new Dimension(100, 160));
-        resultWrapper.setVisible(false);
+        resultWrapper.add(resultArea, BorderLayout.CENTER);
+        resultWrapper.setMinimumSize(new Dimension(120, 200));
+        resultWrapper.setVisible(true);
 
         editorPanel.setMinimumSize(new Dimension(120, 200));
 
 
         splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
         splitPane.setResizeWeight(1.0);
-        splitPane.setDividerSize(10);
+        splitPane.setDividerSize(8);
         splitPane.setOneTouchExpandable(false);
         splitPane.setContinuousLayout(true);
         splitPane.setBorder(BorderFactory.createEmptyBorder());
@@ -372,8 +376,157 @@ public class EditorTabPanel extends JPanel {
             int location = Math.max(minTop, Math.min(splitPane.getDividerLocation(), splitPane.getHeight() - minBottom));
             lastDividerLocation = location;
         });
-        add(splitPane, BorderLayout.CENTER);
-        SwingUtilities.invokeLater(this::collapseResultArea);
+
+        tabbedModePanel = new JTabbedPane();
+        tabbedModePanel.addTab("编辑器", editorPanel);
+        tabbedModePanel.addTab("结果", resultWrapper);
+
+        centerCards = new CardLayout();
+        centerContainer = new JPanel(centerCards);
+        centerContainer.add(splitPane, EditorLayoutMode.SPLIT.name());
+        centerContainer.add(tabbedModePanel, EditorLayoutMode.TABBED.name());
+
+        add(buildToolbar(), BorderLayout.NORTH);
+        add(centerContainer, BorderLayout.CENTER);
+        add(buildStatusBar(), BorderLayout.SOUTH);
+
+        SwingUtilities.invokeLater(() -> {
+            centerCards.show(centerContainer, layoutMode.name());
+            applySplitPreset(LayoutPreset.MEDIUM);
+        });
+    }
+
+    private JComponent buildToolbar() {
+        JToolBar toolBar = new JToolBar();
+        toolBar.setFloatable(false);
+        toolBar.setRollover(true);
+
+        JButton maximizeResult = new JButton("结果最大化");
+        maximizeResult.setToolTipText("Ctrl+Alt+R");
+        maximizeResult.addActionListener(e -> toggleResultMaximize());
+
+        JButton maximizeEditor = new JButton("编辑器最大化");
+        maximizeEditor.setToolTipText("Ctrl+Alt+E");
+        maximizeEditor.addActionListener(e -> toggleEditorMaximize());
+
+        JButton modeSwitch = new JButton("切换视图");
+        modeSwitch.setToolTipText("分屏/标签切换");
+        modeSwitch.addActionListener(e -> toggleLayoutMode());
+
+        JButton presetLargeEditor = new JButton("70/30");
+        presetLargeEditor.setToolTipText("编辑器优先");
+        presetLargeEditor.addActionListener(e -> applySplitPreset(LayoutPreset.LARGE_EDITOR));
+
+        JButton presetBalanced = new JButton("60/40");
+        presetBalanced.setToolTipText("平衡");
+        presetBalanced.addActionListener(e -> applySplitPreset(LayoutPreset.MEDIUM));
+
+        JButton presetLargeResult = new JButton("40/60");
+        presetLargeResult.setToolTipText("结果优先");
+        presetLargeResult.addActionListener(e -> applySplitPreset(LayoutPreset.LARGE_RESULT));
+
+        toolBar.add(modeSwitch);
+        toolBar.addSeparator();
+        toolBar.add(presetLargeEditor);
+        toolBar.add(presetBalanced);
+        toolBar.add(presetLargeResult);
+        toolBar.addSeparator();
+        toolBar.add(maximizeResult);
+        toolBar.add(maximizeEditor);
+
+        installLayoutShortcuts(toolBar);
+        return toolBar;
+    }
+
+    private JComponent buildStatusBar() {
+        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 4));
+        bar.add(layoutLabel);
+        bar.add(datasetLabel);
+        bar.add(execStatusLabel);
+        bar.add(lastSaveLabel);
+        return bar;
+    }
+
+    private void installLayoutShortcuts(JComponent component) {
+        registerShortcut(component, KeyStroke.getKeyStroke(KeyEvent.VK_R,
+                InputEvent.CTRL_DOWN_MASK | InputEvent.ALT_DOWN_MASK), this::toggleResultMaximize);
+        registerShortcut(component, KeyStroke.getKeyStroke(KeyEvent.VK_E,
+                InputEvent.CTRL_DOWN_MASK | InputEvent.ALT_DOWN_MASK), this::toggleEditorMaximize);
+    }
+
+    private void registerShortcut(JComponent comp, KeyStroke stroke, Runnable action) {
+        comp.registerKeyboardAction(e -> action.run(), stroke, JComponent.WHEN_IN_FOCUSED_WINDOW);
+        this.registerKeyboardAction(e -> action.run(), stroke, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
+    }
+
+    private void toggleLayoutMode() {
+        layoutMode = layoutMode == EditorLayoutMode.SPLIT ? EditorLayoutMode.TABBED : EditorLayoutMode.SPLIT;
+        centerCards.show(centerContainer, layoutMode.name());
+        resultMaximized = false;
+        editorMaximized = false;
+        updateLayoutLabel();
+    }
+
+    private void toggleResultMaximize() {
+        if (layoutMode != EditorLayoutMode.SPLIT) {
+            layoutMode = EditorLayoutMode.SPLIT;
+            centerCards.show(centerContainer, layoutMode.name());
+        }
+        if (resultMaximized) {
+            resultMaximized = false;
+            applySplitPreset(LayoutPreset.MEDIUM);
+        } else {
+            resultMaximized = true;
+            editorMaximized = false;
+            int minTop = editorPanel.getMinimumSize().height;
+            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(minTop));
+        }
+        updateLayoutLabel();
+    }
+
+    private void toggleEditorMaximize() {
+        if (layoutMode != EditorLayoutMode.SPLIT) {
+            layoutMode = EditorLayoutMode.SPLIT;
+            centerCards.show(centerContainer, layoutMode.name());
+        }
+        if (editorMaximized) {
+            editorMaximized = false;
+            applySplitPreset(LayoutPreset.MEDIUM);
+        } else {
+            editorMaximized = true;
+            resultMaximized = false;
+            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(splitPane.getHeight()));
+        }
+        updateLayoutLabel();
+    }
+
+    private void applySplitPreset(LayoutPreset preset) {
+        if (splitPane == null || layoutMode != EditorLayoutMode.SPLIT) {
+            return;
+        }
+        resultMaximized = false;
+        editorMaximized = false;
+        SwingUtilities.invokeLater(() -> {
+            int height = splitPane.getHeight();
+            if (height <= 0) {
+                height = getHeight() > 0 ? getHeight() : 800;
+            }
+            int location = (int) (height * preset.ratio);
+            splitPane.setDividerLocation(location);
+            lastDividerLocation = location;
+        });
+        updateLayoutLabel();
+    }
+
+    private void updateLayoutLabel() {
+        String mode = layoutMode == EditorLayoutMode.SPLIT ? "分屏" : "标签";
+        if (resultMaximized) {
+            layoutLabel.setText("布局: 结果最大化");
+        } else if (editorMaximized) {
+            layoutLabel.setText("布局: 编辑器最大化");
+        } else {
+            layoutLabel.setText("布局: " + mode);
+        }
     }
 
     public void saveNow() {
@@ -635,28 +788,106 @@ public class EditorTabPanel extends JPanel {
         }
     }
 
-    public JTabbedPane getResultTabs() {
-        return resultTabs;
-    }
-
     public void clearLocalResults() {
-        resultTabs.removeAll();
-        resultTabs.setVisible(false);
-        resultWrapper.setVisible(false);
+        resultArea.clear();
+        resultWrapper.setVisible(true);
         collapseResultArea();
     }
 
     public void addLocalResultPanel(String title, JComponent panel, String hint) {
-        resultTabs.addTab(title, panel);
-        int idx = resultTabs.indexOfComponent(panel);
-        if (idx >= 0) {
-            resultTabs.setToolTipTextAt(idx, hint);
-        }
-        resultTabs.setVisible(true);
-        resultTabs.setSelectedComponent(panel);
+        resultArea.addResult(title, panel, hint);
         resultWrapper.setVisible(true);
         expandResultArea();
     }
+
+    private class ResultArea extends JPanel {
+        private final java.util.List<ResultEntry> entries = new ArrayList<>();
+        private final CardLayout cards = new CardLayout();
+        private final JPanel cardPanel = new JPanel(cards);
+        private final JComboBox<String> selector = new JComboBox<>();
+        private final JLabel summaryLabel = new JLabel("无结果");
+
+        ResultArea() {
+            super(new BorderLayout());
+            JPanel navigator = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
+            JButton prev = new JButton("上一结果");
+            JButton next = new JButton("下一结果");
+            JButton fit = new JButton("适配列宽");
+            JButton reset = new JButton("重置列宽");
+
+            prev.addActionListener(e -> showIndex(currentIndex() - 1));
+            next.addActionListener(e -> showIndex(currentIndex() + 1));
+            selector.addActionListener(e -> showIndex(selector.getSelectedIndex()));
+            fit.addActionListener(e -> applyToCurrent(QueryResultPanel::fitColumns));
+            reset.addActionListener(e -> applyToCurrent(QueryResultPanel::resetColumns));
+
+            navigator.add(new JLabel("结果集"));
+            navigator.add(prev);
+            navigator.add(selector);
+            navigator.add(next);
+            navigator.add(fit);
+            navigator.add(reset);
+            navigator.add(summaryLabel);
+
+            add(navigator, BorderLayout.NORTH);
+            add(cardPanel, BorderLayout.CENTER);
+        }
+
+        void clear() {
+            entries.clear();
+            selector.removeAllItems();
+            cardPanel.removeAll();
+            summaryLabel.setText("无结果");
+            datasetLabel.setText("结果集: -");
+        }
+
+        void addResult(String title, JComponent comp, String hint) {
+            ResultEntry entry = new ResultEntry(title, comp, hint);
+            entries.add(entry);
+            selector.addItem(title);
+            cardPanel.add(comp, title);
+            showIndex(entries.size() - 1);
+        }
+
+        private void showIndex(int index) {
+            if (entries.isEmpty()) {
+                summaryLabel.setText("无结果");
+                return;
+            }
+            int clamped = Math.max(0, Math.min(index, entries.size() - 1));
+            selector.setSelectedIndex(clamped);
+            ResultEntry entry = entries.get(clamped);
+            cards.show(cardPanel, entry.title);
+            updateSummary(entry);
+        }
+
+        private void updateSummary(ResultEntry entry) {
+            StringBuilder sb = new StringBuilder(entry.title);
+            if (entry.component instanceof QueryResultPanel qp) {
+                sb.append(" | 行 ").append(qp.getVisibleRowCount())
+                        .append(" 列 ").append(qp.getVisibleColumnCount());
+            }
+            if (entry.hint != null) {
+                sb.append(" | ").append(OperationLog.abbreviate(entry.hint, 60));
+            }
+            summaryLabel.setText(sb.toString());
+            datasetLabel.setText("结果集: " + entry.title);
+        }
+
+        private int currentIndex() {
+            return selector.getSelectedIndex();
+        }
+
+        private void applyToCurrent(java.util.function.Consumer<QueryResultPanel> action) {
+            if (entries.isEmpty()) return;
+            ResultEntry entry = entries.get(currentIndex());
+            if (entry.component instanceof QueryResultPanel qp) {
+                action.accept(qp);
+            }
+        }
+    }
+
+    private record ResultEntry(String title, JComponent component, String hint) { }
 
     private void expandResultArea() {
         if (splitPane == null) return;
@@ -708,6 +939,20 @@ public class EditorTabPanel extends JPanel {
                 execTimer.stop();
             }
         }
+    }
+
+    private enum LayoutPreset {
+        LARGE_EDITOR(0.7), MEDIUM(0.6), LARGE_RESULT(0.4);
+
+        final double ratio;
+
+        LayoutPreset(double ratio) {
+            this.ratio = ratio;
+        }
+    }
+
+    private enum EditorLayoutMode {
+        SPLIT, TABBED
     }
 
     /**
