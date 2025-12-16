@@ -4,21 +4,29 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import tools.sqlclient.db.LocalDatabasePathProvider;
+import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.network.TrustAllHttpClient;
-import tools.sqlclient.util.Config;
 import tools.sqlclient.util.AesEncryptor;
+import tools.sqlclient.util.Config;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
 
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 基于异步任务接口的 SQL 执行服务：提交任务、轮询状态、获取结果。
@@ -31,6 +39,7 @@ public class SqlExecutionService {
     private static final int MAX_ACCUMULATED_ROWS = 100_000;
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
+    private SQLiteManager metadataReader;
 
     /**
      * 同步执行一条 SQL：提交后台任务，轮询至结束并返回结果集。
@@ -283,7 +292,7 @@ public class SqlExecutionService {
 
         JsonArray rowsJson = resp.has("resultRows") && resp.get("resultRows").isJsonArray()
                 ? resp.getAsJsonArray("resultRows") : new JsonArray();
-        List<String> columns = extractColumns(resp, rowsJson);
+        List<String> columns = extractColumns(resp, rowsJson, sql);
         List<List<String>> rows = extractRows(rowsJson, columns);
         int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
         OperationLog.log("[" + jobId + "] 任务完成，page " + respPage + "/size " + respPageSize
@@ -317,7 +326,7 @@ public class SqlExecutionService {
         return Math.min(Math.max(configured, 1), MAX_PAGE_SIZE);
     }
 
-    private List<String> extractColumns(JsonObject resp, JsonArray rowsJson) {
+    private List<String> extractColumns(JsonObject resp, JsonArray rowsJson, String sql) {
         List<String> columns = new ArrayList<>();
         for (String key : List.of("columns", "resultColumns", "columnNames")) {
             if (resp.has(key) && resp.get(key).isJsonArray()) {
@@ -332,18 +341,20 @@ public class SqlExecutionService {
             }
         }
 
-        if (rowsJson.size() > 0) {
-            JsonElement first = rowsJson.get(0);
-            if (first.isJsonObject()) {
-                // JsonObject 在 Gson 中保持插入顺序，避免依赖 HashMap
-                for (Map.Entry<String, JsonElement> entry : first.getAsJsonObject().entrySet()) {
-                    columns.add(entry.getKey());
-                }
-            } else if (first.isJsonArray()) {
-                JsonArray arr = first.getAsJsonArray();
-                for (int i = 0; i < arr.size(); i++) {
-                    columns.add("col_" + (i + 1));
-                }
+        JsonElement first = rowsJson.size() > 0 ? rowsJson.get(0) : null;
+        if (first != null && first.isJsonObject()) {
+            List<String> ordered = resolveColumnsFromSql(sql, first.getAsJsonObject());
+            if (ordered != null && !ordered.isEmpty()) {
+                return ordered;
+            }
+            // JsonObject 在 Gson 中保持插入顺序，避免依赖 HashMap
+            for (Map.Entry<String, JsonElement> entry : first.getAsJsonObject().entrySet()) {
+                columns.add(entry.getKey());
+            }
+        } else if (first != null && first.isJsonArray()) {
+            JsonArray arr = first.getAsJsonArray();
+            for (int i = 0; i < arr.size(); i++) {
+                columns.add("col_" + (i + 1));
             }
         }
         return columns;
@@ -374,6 +385,207 @@ public class SqlExecutionService {
             }
         }
         return rows;
+    }
+
+    private List<String> resolveColumnsFromSql(String sql, JsonObject firstRow) {
+        String normalized = normalizeSql(sql);
+        if (normalized.isEmpty()) {
+            return null;
+        }
+        List<String> star = tryResolveStarColumns(normalized);
+        if (star != null && !star.isEmpty()) {
+            return star;
+        }
+        if (firstRow == null) {
+            return null;
+        }
+        List<String> explicit = tryResolveExplicitColumns(normalized);
+        return explicit != null && !explicit.isEmpty() ? explicit : null;
+    }
+
+    private List<String> tryResolveStarColumns(String sql) {
+        String compact = sql.replaceAll("\\s+", " ").trim();
+        Pattern pattern = Pattern.compile("^select \\\* from ([A-Za-z0-9_\\.]+)\\s*;?$", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(compact);
+        if (!matcher.matches()) {
+            return null;
+        }
+        if (containsComplexKeyword(compact)) {
+            return null;
+        }
+        String tableToken = matcher.group(1);
+        String objectName = tableToken.contains(".")
+                ? tableToken.substring(tableToken.lastIndexOf('.') + 1)
+                : tableToken;
+        return loadCachedColumns(objectName);
+    }
+
+    private boolean containsComplexKeyword(String sql) {
+        Pattern forbidden = Pattern.compile("\\b(join|where|group\\s+by|order\\s+by|limit|union|with|having)\\b",
+                Pattern.CASE_INSENSITIVE);
+        return forbidden.matcher(sql).find();
+    }
+
+    private List<String> tryResolveExplicitColumns(String sql) {
+        Matcher selectMatcher = Pattern.compile("\\bselect\\b", Pattern.CASE_INSENSITIVE).matcher(sql);
+        if (!selectMatcher.find()) {
+            return null;
+        }
+        Matcher fromMatcher = Pattern.compile("\\bfrom\\b", Pattern.CASE_INSENSITIVE).matcher(sql);
+        if (!fromMatcher.find(selectMatcher.end())) {
+            return null;
+        }
+        int fromIdx = fromMatcher.start();
+        String selectPart = sql.substring(selectMatcher.end(), fromIdx).trim();
+        if (selectPart.toLowerCase(Locale.ROOT).startsWith("distinct ")) {
+            selectPart = selectPart.substring("distinct".length()).trim();
+        }
+        if (selectPart.isEmpty()) {
+            return null;
+        }
+        List<String> tokens = splitColumns(selectPart);
+        if (tokens.isEmpty()) {
+            return null;
+        }
+        List<String> columns = new ArrayList<>();
+        for (String token : tokens) {
+            String trimmed = token.trim();
+            if (isComplexToken(trimmed)) {
+                return null;
+            }
+            String alias = extractAlias(trimmed);
+            if (alias != null && !alias.isBlank()) {
+                columns.add(alias);
+                continue;
+            }
+            String stripped = stripQualifier(trimmed);
+            columns.add(stripped);
+        }
+        return columns;
+    }
+
+    private List<String> splitColumns(String selectPart) {
+        List<String> tokens = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        int depth = 0;
+        boolean inQuote = false;
+        for (int i = 0; i < selectPart.length(); i++) {
+            char ch = selectPart.charAt(i);
+            if (ch == '\'' || ch == '"') {
+                inQuote = !inQuote;
+            }
+            if (!inQuote) {
+                if (ch == '(') depth++;
+                if (ch == ')') depth = Math.max(0, depth - 1);
+                if (ch == ',' && depth == 0) {
+                    tokens.add(current.toString());
+                    current.setLength(0);
+                    continue;
+                }
+            }
+            current.append(ch);
+        }
+        if (current.length() > 0) {
+            tokens.add(current.toString());
+        }
+        return tokens;
+    }
+
+    private boolean isComplexToken(String token) {
+        String lower = token.toLowerCase(Locale.ROOT);
+        if (lower.contains(" select ") || lower.contains(" case ")) {
+            return true;
+        }
+        for (char c : new char[]{'(', ')', '+', '/', '-'}) {
+            if (token.indexOf(c) >= 0) {
+                return true;
+            }
+        }
+        int starIdx = token.indexOf('*');
+        return starIdx > 0 || (lower.contains("*") && token.trim().length() != 1);
+    }
+
+    private String extractAlias(String token) {
+        String lower = token.toLowerCase(Locale.ROOT);
+        int asIdx = lower.lastIndexOf(" as ");
+        if (asIdx >= 0) {
+            return stripQuotes(token.substring(asIdx + 4).trim());
+        }
+        String[] parts = token.trim().split("\\s+");
+        if (parts.length >= 2) {
+            return stripQuotes(parts[parts.length - 1]);
+        }
+        return null;
+    }
+
+    private String stripQualifier(String token) {
+        String stripped = token.trim();
+        int dot = stripped.lastIndexOf('.');
+        if (dot >= 0 && dot < stripped.length() - 1) {
+            stripped = stripped.substring(dot + 1);
+        }
+        return stripQuotes(stripped);
+    }
+
+    private String stripQuotes(String text) {
+        if (text == null || text.isBlank()) {
+            return text;
+        }
+        String trimmed = text.trim();
+        if ((trimmed.startsWith("\"") && trimmed.endsWith("\""))
+                || (trimmed.startsWith("`") && trimmed.endsWith("`"))
+                || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+            return trimmed.substring(1, trimmed.length() - 1);
+        }
+        return trimmed;
+    }
+
+    private List<String> loadCachedColumns(String objectName) {
+        String name = sanitizeObjectName(objectName);
+        if (name.isEmpty()) {
+            return List.of();
+        }
+        List<String> cols = new ArrayList<>();
+        try (Connection conn = metadataDb().getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no")) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    cols.add(rs.getString(1));
+                }
+            }
+        } catch (Exception e) {
+            OperationLog.log("读取本地列缓存失败: " + e.getMessage());
+        }
+        return cols;
+    }
+
+    private String sanitizeObjectName(String objectName) {
+        if (objectName == null) {
+            return "";
+        }
+        String trimmed = objectName.trim();
+        if (trimmed.contains(".")) {
+            trimmed = trimmed.substring(trimmed.lastIndexOf('.') + 1);
+        }
+        return trimmed.replace("'", "");
+    }
+
+    private SQLiteManager metadataDb() {
+        if (metadataReader == null) {
+            metadataReader = new SQLiteManager(LocalDatabasePathProvider.resolveMetadataDbPath());
+            metadataReader.initSchema();
+        }
+        return metadataReader;
+    }
+
+    private String normalizeSql(String sql) {
+        if (sql == null) {
+            return "";
+        }
+        String withoutBlock = sql.replaceAll("(?s)/\\*.*?\\*/", " ");
+        String withoutLine = withoutBlock.replaceAll("(?m)^\\s*--.*?$", " ");
+        return withoutLine.trim();
     }
 
     private AsyncJobStatus doCancel(String jobId, String reason) {
