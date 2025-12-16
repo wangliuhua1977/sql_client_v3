@@ -127,6 +127,23 @@ public class QueryResultPanel extends JPanel {
         resizeColumns();
     }
 
+    public void fitColumns() {
+        resizeColumns();
+    }
+
+    public void resetColumns() {
+        table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        resizeColumns();
+    }
+
+    public int getVisibleRowCount() {
+        return model.getRowCount();
+    }
+
+    public int getVisibleColumnCount() {
+        return model.getColumnCount();
+    }
+
     public void renderError(String message) {
         model.setColumnCount(0);
         model.setRowCount(0);
@@ -162,10 +179,11 @@ public class QueryResultPanel extends JPanel {
         // 计算列宽，确保内容不被压缩，并触发横向滚动条
         FontMetrics fm = table.getFontMetrics(table.getFont());
         int padding = 16; // 避免文字贴边
+        int sampleRows = Math.min(table.getRowCount(), 200);
         for (int col = 0; col < table.getColumnCount(); col++) {
             int headerWidth = fm.stringWidth(table.getColumnName(col)) + padding;
             int cellWidth = headerWidth;
-            for (int row = 0; row < Math.min(table.getRowCount(), 50); row++) {
+            for (int row = 0; row < sampleRows; row++) {
                 Object value = table.getValueAt(row, col);
                 if (value != null) {
                     cellWidth = Math.max(cellWidth, fm.stringWidth(value.toString()) + padding);
