@@ -50,14 +50,10 @@ public class EditorTabPanel extends JPanel {
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
     private JPanel editorPanel;
     private JSplitPane splitPane;
-    private JTabbedPane tabbedModePanel;
-    private CardLayout centerCards;
-    private JPanel centerContainer;
     private final ResultArea resultArea = new ResultArea();
     private int lastDividerLocation = -1;
     private boolean resultMaximized;
     private boolean editorMaximized;
-    private EditorLayoutMode layoutMode = EditorLayoutMode.SPLIT;
     private javax.swing.Timer execTimer;
     private Runnable executeHandler;
     private EditorStyle currentStyle;
@@ -366,7 +362,7 @@ public class EditorTabPanel extends JPanel {
 
 
         splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, editorPanel, resultWrapper);
-        splitPane.setResizeWeight(1.0);
+        splitPane.setResizeWeight(0.65);
         splitPane.setDividerSize(8);
         splitPane.setOneTouchExpandable(false);
         splitPane.setContinuousLayout(true);
@@ -378,22 +374,11 @@ public class EditorTabPanel extends JPanel {
             int location = Math.max(minTop, Math.min(splitPane.getDividerLocation(), splitPane.getHeight() - minBottom));
             lastDividerLocation = location;
         });
-
-        tabbedModePanel = new JTabbedPane();
-        tabbedModePanel.addTab("编辑器", editorPanel);
-        tabbedModePanel.addTab("结果", resultWrapper);
-
-        centerCards = new CardLayout();
-        centerContainer = new JPanel(centerCards);
-        centerContainer.add(splitPane, EditorLayoutMode.SPLIT.name());
-        centerContainer.add(tabbedModePanel, EditorLayoutMode.TABBED.name());
-
         add(buildToolbar(), BorderLayout.NORTH);
-        add(centerContainer, BorderLayout.CENTER);
+        add(splitPane, BorderLayout.CENTER);
         add(buildStatusBar(), BorderLayout.SOUTH);
 
         SwingUtilities.invokeLater(() -> {
-            centerCards.show(centerContainer, layoutMode.name());
             applySplitPreset(LayoutPreset.MEDIUM);
         });
     }
@@ -411,10 +396,6 @@ public class EditorTabPanel extends JPanel {
         maximizeEditor.setToolTipText("Ctrl+Alt+E");
         maximizeEditor.addActionListener(e -> toggleEditorMaximize());
 
-        JButton modeSwitch = new JButton("切换视图");
-        modeSwitch.setToolTipText("分屏/标签切换");
-        modeSwitch.addActionListener(e -> toggleLayoutMode());
-
         JButton presetLargeEditor = new JButton("70/30");
         presetLargeEditor.setToolTipText("编辑器优先");
         presetLargeEditor.addActionListener(e -> applySplitPreset(LayoutPreset.LARGE_EDITOR));
@@ -427,8 +408,7 @@ public class EditorTabPanel extends JPanel {
         presetLargeResult.setToolTipText("结果优先");
         presetLargeResult.addActionListener(e -> applySplitPreset(LayoutPreset.LARGE_RESULT));
 
-        toolBar.add(modeSwitch);
-        toolBar.addSeparator();
+        toolBar.add(new JLabel("布局:"));
         toolBar.add(presetLargeEditor);
         toolBar.add(presetBalanced);
         toolBar.add(presetLargeResult);
@@ -461,53 +441,60 @@ public class EditorTabPanel extends JPanel {
         this.registerKeyboardAction(e -> action.run(), stroke, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
     }
 
-    private void toggleLayoutMode() {
-        layoutMode = layoutMode == EditorLayoutMode.SPLIT ? EditorLayoutMode.TABBED : EditorLayoutMode.SPLIT;
-        centerCards.show(centerContainer, layoutMode.name());
-        resultMaximized = false;
-        editorMaximized = false;
-        updateLayoutLabel();
-    }
-
     private void toggleResultMaximize() {
-        if (layoutMode != EditorLayoutMode.SPLIT) {
-            layoutMode = EditorLayoutMode.SPLIT;
-            centerCards.show(centerContainer, layoutMode.name());
-        }
         if (resultMaximized) {
             resultMaximized = false;
-            applySplitPreset(LayoutPreset.MEDIUM);
+            restoreSplitLayout();
         } else {
             resultMaximized = true;
             editorMaximized = false;
-            int minTop = editorPanel.getMinimumSize().height;
-            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(minTop));
+            lastDividerLocation = splitPane.getDividerLocation();
+            editorPanel.setVisible(false);
+            splitPane.setDividerSize(0);
+            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(1.0d));
         }
         updateLayoutLabel();
+        splitPane.revalidate();
+        splitPane.repaint();
     }
 
     private void toggleEditorMaximize() {
-        if (layoutMode != EditorLayoutMode.SPLIT) {
-            layoutMode = EditorLayoutMode.SPLIT;
-            centerCards.show(centerContainer, layoutMode.name());
-        }
         if (editorMaximized) {
             editorMaximized = false;
-            applySplitPreset(LayoutPreset.MEDIUM);
+            restoreSplitLayout();
         } else {
             editorMaximized = true;
             resultMaximized = false;
-            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(splitPane.getHeight()));
+            lastDividerLocation = splitPane.getDividerLocation();
+            resultWrapper.setVisible(false);
+            splitPane.setDividerSize(0);
+            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(0.0d));
         }
         updateLayoutLabel();
+        splitPane.revalidate();
+        splitPane.repaint();
+    }
+
+    private void restoreSplitLayout() {
+        editorPanel.setVisible(true);
+        resultWrapper.setVisible(true);
+        splitPane.setDividerSize(8);
+        if (lastDividerLocation > 0) {
+            SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(lastDividerLocation));
+        } else {
+            applySplitPreset(LayoutPreset.MEDIUM);
+        }
     }
 
     private void applySplitPreset(LayoutPreset preset) {
-        if (splitPane == null || layoutMode != EditorLayoutMode.SPLIT) {
+        if (splitPane == null) {
             return;
         }
         resultMaximized = false;
         editorMaximized = false;
+        editorPanel.setVisible(true);
+        resultWrapper.setVisible(true);
+        splitPane.setDividerSize(8);
         SwingUtilities.invokeLater(() -> {
             int height = splitPane.getHeight();
             if (height <= 0) {
@@ -521,13 +508,12 @@ public class EditorTabPanel extends JPanel {
     }
 
     private void updateLayoutLabel() {
-        String mode = layoutMode == EditorLayoutMode.SPLIT ? "分屏" : "标签";
         if (resultMaximized) {
             layoutLabel.setText("布局: 结果最大化");
         } else if (editorMaximized) {
             layoutLabel.setText("布局: 编辑器最大化");
         } else {
-            layoutLabel.setText("布局: " + mode);
+            layoutLabel.setText("布局: 分屏");
         }
     }
 
@@ -895,6 +881,11 @@ public class EditorTabPanel extends JPanel {
 
     private void expandResultArea() {
         if (splitPane == null) return;
+        resultMaximized = false;
+        editorMaximized = false;
+        splitPane.setDividerSize(8);
+        resultWrapper.setVisible(true);
+        editorPanel.setVisible(true);
         int height = splitPane.getHeight();
         int minTop = editorPanel.getMinimumSize().height;
         int minBottom = resultWrapper.getMinimumSize().height;
@@ -902,15 +893,19 @@ public class EditorTabPanel extends JPanel {
         int maxLocation = Math.max(minTop, height - minBottom);
         int clamped = Math.max(minTop, Math.min(target, maxLocation));
         SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(clamped));
+        updateLayoutLabel();
     }
 
     private void collapseResultArea() {
         if (splitPane == null) return;
+        resultMaximized = false;
+        splitPane.setDividerSize(8);
         int height = splitPane.getHeight();
         int minTop = editorPanel.getMinimumSize().height;
         int minBottom = resultWrapper.getMinimumSize().height;
         int collapsePos = resultWrapper.isVisible() ? Math.max(minTop, height - minBottom) : height;
         SwingUtilities.invokeLater(() -> splitPane.setDividerLocation(collapsePos));
+        updateLayoutLabel();
     }
 
     public void setExecutionRunning(boolean running) {
@@ -953,10 +948,6 @@ public class EditorTabPanel extends JPanel {
         LayoutPreset(double ratio) {
             this.ratio = ratio;
         }
-    }
-
-    private enum EditorLayoutMode {
-        SPLIT, TABBED
     }
 
     /**
