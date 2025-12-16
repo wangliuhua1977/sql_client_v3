@@ -98,8 +98,23 @@
 - 字段：`information_schema.columns`，按 `ordinal_position` 排序并写入本地 SQLite 的 `sort_no` 字段，用于 UI 展示与差分比较。
 
 ### 列顺序保证策略
-- 元数据字段列表：查询 SQL 已按 `ordinal_position` 排序，写入本地缓存的 `sort_no` 与该顺序一致，浏览器与联想均按此顺序读取。
-- 查询结果展示：`SqlExecutionService` 优先读取响应中的 `columns`/`resultColumns` 数组作为列顺序；若缺失，则按后端返回的行对象顺序构建列清单，并用该顺序渲染 `QueryResultPanel`，避免 HashMap/JSONObject 打乱顺序。
+- 优先使用服务端返回的列名数组：依次读取 `columns`、`resultColumns`、`columnNames`，按后端给出的顺序直接渲染。
+- 未返回列名数组、且 `resultRows` 为对象时的保守重排：
+  - 识别 `select * from <table>`（单表、无 join/where/order/limit/union/with 等关键字），按本地缓存的 `columns.sort_no` 顺序重建列清单并重排 JsonObject 值；表名含 schema 时仅取对象名部分。
+  - 识别显式列列表：截取 `select` 与第一个 `from` 之间的片段，以括号深度为 0 的逗号切分，跳过包含函数/表达式/子查询/算术符号的复杂 token。优先使用 `AS` 或尾部别名，其次 `t.col` → `col`，再按用户列序从 JsonObject 取值；缺失字段填空字符串。
+  - 任意一步命中复杂结构或缓存缺失时立即回退，不做重排，保持服务端顺序。
+- `resultRows` 为数组时不调整原始顺序，仅在存在列名数组/缓存时提供列头，兼容旧格式。
+- 本地列缓存来源于 `information_schema.columns` 的 `ordinal_position`，默认 schema `leshan`，缓存缺失不会抛异常，只回退到后端顺序。
+
+## SQL 子窗口布局说明
+- 每个编辑 Tab 固定使用上下分割的 `JSplitPane`：上侧为编辑器工具条+正文，下侧为结果集/消息导航区，不再存在“编辑/结果”切换标签。
+- 默认分割比例约 65%（编辑）/35%（结果），工具条提供 70/30、60/40、40/60 预设，拖拽分隔条也会实时记忆位置。
+- 执行 SQL 后结果直接出现在下方，编辑器始终保持可见，可继续修改/再次执行。
+
+### 分屏视图与最大化逻辑
+- “结果最大化/编辑器最大化”通过隐藏另一侧组件并将分隔条移动至 1.0/0.0，同时保留上次分割位置；再次点击会调用 `restoreSplitLayout` 恢复双栏并还原分隔条。
+- 分隔条尺寸保持 8px，组件从不从容器移除，避免因 `setCenter(null)` 或重复 add 导致的空白；任意异常布局下可点击预设比例或最大化按钮恢复。
+- 常见排查：确认两侧组件的 visible 状态、`lastDividerLocation` 记录以及分隔条位置，必要时重置预设即可恢复界面。
 
 ### 配置与排错
 - 相关配置集中在 `AsyncSqlConfig`，包含 BASE_URL、Token、AES Key/IV 等；证书忽略逻辑在 `TrustAllHttpClient`。
