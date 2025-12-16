@@ -14,6 +14,7 @@ import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.SuggestionEngine;
 import tools.sqlclient.util.ThreadPools;
 import tools.sqlclient.util.SqlBlockDetector;
+import tools.sqlclient.ui.QueryResultPanel;
 
 import javax.swing.*;
 import javax.swing.text.BadLocationException;
