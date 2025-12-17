@@ -22,6 +22,7 @@ import tools.sqlclient.ui.ThemeManager;
 import tools.sqlclient.ui.ThemeOption;
 import tools.sqlclient.ui.QueryResultPanel;
 import tools.sqlclient.ui.ManageNotesDialog.SearchNavigation;
+import tools.sqlclient.util.Config;
 import tools.sqlclient.util.IconFactory;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
