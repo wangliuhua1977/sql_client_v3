@@ -16,6 +16,7 @@ public class AppStateRepository {
     private static final String FULL_WIDTH_KEY = "convert_full_width";
     private static final String CURRENT_STYLE_KEY = "editor_style";
     private static final String CURRENT_THEME_KEY = "app_theme";
+    private static final String DEFAULT_PAGE_SIZE_KEY = "default_page_size";
     private final SQLiteManager sqliteManager;
 
     public AppStateRepository(SQLiteManager sqliteManager) {
@@ -98,6 +99,22 @@ public class AppStateRepository {
 
     public String loadCurrentThemeName(String defaultName) {
         return loadStringOption(CURRENT_THEME_KEY, defaultName);
+    }
+
+    public void saveDefaultPageSize(int pageSize) {
+        saveStringOption(DEFAULT_PAGE_SIZE_KEY, String.valueOf(pageSize));
+    }
+
+    public int loadDefaultPageSize(int fallback) {
+        String raw = loadStringOption(DEFAULT_PAGE_SIZE_KEY, null);
+        if (raw == null || raw.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException ex) {
+            return fallback;
+        }
     }
 
     public void saveStringOption(String key, String value) {

@@ -82,7 +82,8 @@ public class SqlExecutionService {
     }
 
     private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages, String dbUser, Integer pageSizeOverride) {
-        AsyncJobStatus submitted = submitJob(sql, maxResultRows, dbUser, null);
+        int resolvedMaxRows = determineMaxRows(maxResultRows, pageSizeOverride);
+        AsyncJobStatus submitted = submitJob(sql, resolvedMaxRows, dbUser, null);
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
             if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
@@ -123,7 +124,7 @@ public class SqlExecutionService {
 
         OperationLog.log("即将提交异步 SQL:\n" + abbreviate(trimmed));
 
-        return CompletableFuture.supplyAsync(() -> submitJob(trimmed, DEFAULT_MAX_RESULT_ROWS, dbUser, null), ThreadPools.NETWORK_POOL)
+        return CompletableFuture.supplyAsync(() -> submitJob(trimmed, determineMaxRows(DEFAULT_MAX_RESULT_ROWS, pageSize), dbUser, null), ThreadPools.NETWORK_POOL)
                 .thenCompose(submit -> {
                     notifyStatus(onStatus, submit);
                     return pollJobUntilDone(submit.getJobId(), onStatus);
@@ -164,7 +165,7 @@ public class SqlExecutionService {
     }
 
     private AsyncJobStatus submitJob(String sql) {
-        return submitJob(sql, DEFAULT_MAX_RESULT_ROWS, null, null);
+        return submitJob(sql, determineMaxRows(DEFAULT_MAX_RESULT_ROWS, null), null, null);
     }
 
     private AsyncJobStatus submitJob(String sql, Integer maxResultRows, String dbUser, String label) {
@@ -360,6 +361,14 @@ public class SqlExecutionService {
             target = MAX_PAGE_SIZE;
         }
         return target;
+    }
+
+    private int determineMaxRows(Integer explicitMaxRows, Integer pageSizeOverride) {
+        int targetPageSize = resolvePageSize(pageSizeOverride);
+        if (explicitMaxRows != null && explicitMaxRows > 0) {
+            return Math.max(explicitMaxRows, targetPageSize);
+        }
+        return targetPageSize;
     }
 
     private JsonArray extractResultRows(JsonObject resp) {

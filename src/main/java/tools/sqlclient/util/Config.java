@@ -18,6 +18,7 @@ public class Config {
     private static final int DEFAULT_MAX_PAGE_SIZE = 1000;
     private static final int DEFAULT_PAGE_SIZE = 200;
     private static final Properties PROPS = new Properties();
+    private static volatile Integer runtimePageSizeOverride;
 
     static {
         loadFromClasspath();
@@ -54,8 +55,12 @@ public class Config {
     }
 
     public static int getResultPageSizeOrDefault(int defaultValue) {
+        int fallback = defaultValue;
+        if (runtimePageSizeOverride != null) {
+            fallback = runtimePageSizeOverride;
+        }
         String raw = PROPS.getProperty("result.pageSize");
-        int pageSize = parseIntOrDefault(raw, defaultValue);
+        int pageSize = parseIntOrDefault(raw, fallback);
         if (pageSize < 1) {
             OperationLog.log("配置 result.pageSize=" + pageSize + " 无效，使用默认值 " + defaultValue);
             pageSize = defaultValue;
@@ -79,6 +84,18 @@ public class Config {
             configured = DEFAULT_MAX_PAGE_SIZE;
         }
         return configured;
+    }
+
+    public static void overrideDefaultPageSize(int pageSize) {
+        int sanitized = pageSize;
+        if (sanitized < 1) {
+            sanitized = DEFAULT_PAGE_SIZE;
+        }
+        int max = getMaxPageSize();
+        if (sanitized > max) {
+            sanitized = max;
+        }
+        runtimePageSizeOverride = sanitized;
     }
 
     public static boolean allowPagingAfterFirstFetch() {

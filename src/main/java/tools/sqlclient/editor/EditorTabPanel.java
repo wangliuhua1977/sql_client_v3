@@ -45,6 +45,7 @@ public class EditorTabPanel extends JPanel {
     private final JLabel datasetLabel = new JLabel("结果集: -");
     private final JComboBox<String> dbUserSelector = new JComboBox<>(new String[]{"leshan", "leshan_app"});
     private final JComboBox<String> pageSizeSelector = new JComboBox<>(new String[]{"200", "500", "1000"});
+    private int defaultPageSize;
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
@@ -76,8 +77,10 @@ public class EditorTabPanel extends JPanel {
                           boolean convertFullWidth,
                           EditorStyle style,
                           Consumer<EditorTabPanel> focusNotifier,
-                          Consumer<String> linkOpener) {
+                          Consumer<String> linkOpener,
+                          int defaultPageSize) {
         super(new BorderLayout());
+        this.defaultPageSize = Math.max(1, defaultPageSize);
         this.noteRepository = noteRepository;
         this.note = note;
         this.databaseType = note.getDatabaseType();
@@ -92,7 +95,7 @@ public class EditorTabPanel extends JPanel {
         this.focusNotifier = focusNotifier;
         this.fullWidthFilter = new FullWidthFilter(convertFullWidth);
         this.pageSizeSelector.setEditable(true);
-        this.pageSizeSelector.setSelectedItem(String.valueOf(Config.getDefaultPageSize()));
+        this.pageSizeSelector.setSelectedItem(String.valueOf(this.defaultPageSize));
         this.dbUserSelector.setSelectedItem("leshan");
         if (textArea.getDocument() instanceof javax.swing.text.AbstractDocument doc) {
             doc.setDocumentFilter(fullWidthFilter);
@@ -651,7 +654,7 @@ public class EditorTabPanel extends JPanel {
     public int getPreferredPageSize() {
         Object val = pageSizeSelector.getSelectedItem();
         String chosen = val == null ? "" : val.toString().trim();
-        int fallback = Config.getDefaultPageSize();
+        int fallback = Math.max(1, defaultPageSize);
         int max = Config.getMaxPageSize();
         int parsed;
         try {
@@ -677,6 +680,11 @@ public class EditorTabPanel extends JPanel {
 
     public void setSuggestionEnabled(boolean enabled) {
         suggestionEngine.setEnabled(enabled);
+    }
+
+    public void updateDefaultPageSize(int pageSize) {
+        this.defaultPageSize = Math.max(1, pageSize);
+        this.pageSizeSelector.setSelectedItem(String.valueOf(this.defaultPageSize));
     }
 
     public void hideSuggestionPopup() {
