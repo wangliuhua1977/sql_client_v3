@@ -8,12 +8,14 @@ import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.util.OperationLog;
 
 import javax.swing.*;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Instant;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -26,6 +28,7 @@ import java.util.stream.Collectors;
 public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
+    private static final String METADATA_DB_USER = "leshan";
 
     private final SQLiteManager sqliteManager;
     private final ExecutorService metadataPool = Executors.newFixedThreadPool(4, r -> new Thread(r, "metadata-pool"));
@@ -97,64 +100,251 @@ public class MetadataService {
     private MetadataRefreshResult refreshMetadata() {
         try {
             OperationLog.log("开始刷新对象元数据");
-            List<RemoteObject> remoteObjects = fetchObjects();
-            log.info("元数据源返回 {} 条对象", remoteObjects.size());
-            OperationLog.log("元数据源对象数: " + remoteObjects.size());
-            Set<String> remoteNames = remoteObjects.stream().map(o -> o.object_name).collect(Collectors.toSet());
-
-            int added = 0;
-            int removed = 0;
-
+            Map<String, String> payloads = fetchAggregatedPayloads();
+            int totalChanges = 0;
+            int totalObjects;
             synchronized (dbWriteLock) {
                 try (Connection conn = sqliteManager.getConnection()) {
                     conn.setAutoCommit(false);
-                    Set<String> existing = new HashSet<>();
-                    try (PreparedStatement st = conn.prepareStatement("SELECT object_name FROM objects")) {
-                        try (ResultSet rs = st.executeQuery()) {
-                            while (rs.next()) {
-                                existing.add(rs.getString(1));
-                            }
+                    Map<String, String> snapshots = loadSnapshots(conn);
+                    for (String type : List.of("table", "view", "function", "procedure")) {
+                        String payload = payloads.getOrDefault(type, "");
+                        String hash = digest(payload);
+                        if (!hash.equals(snapshots.get(type))) {
+                            List<String> names = parseObjectsPayload(payload);
+                            totalChanges += upsertObjects(conn, type, names);
+                            saveSnapshot(conn, type, hash);
                         }
                     }
-                    // 插入新增
-                    try (PreparedStatement ps = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)")) {
-                        for (RemoteObject obj : remoteObjects) {
-                            ps.setString(1, obj.schema_name);
-                            ps.setString(2, obj.object_name);
-                            ps.setString(3, obj.object_type);
-                            ps.addBatch();
-                            if (!existing.contains(obj.object_name)) {
-                                added++;
-                            }
-                        }
-                        ps.executeBatch();
-                    }
-                    // 删除不存在（可扩展: 通过配置控制，这里默认删除）
-                    try (PreparedStatement ps = conn.prepareStatement("DELETE FROM objects WHERE object_name = ?")) {
-                        for (String old : existing) {
-                            if (!remoteNames.contains(old)) {
-                                ps.setString(1, old);
-                                ps.addBatch();
-                                removed++;
-                            }
-                        }
-                        ps.executeBatch();
+                    String columnsPayload = payloads.getOrDefault("columns", "");
+                    String colHash = digest(columnsPayload);
+                    if (!colHash.equals(snapshots.get("columns"))) {
+                        Map<String, List<String>> columns = parseColumnsPayload(columnsPayload);
+                        totalChanges += updateColumnsDiff(conn, columns);
+                        saveSnapshot(conn, "columns", colHash);
                     }
                     conn.commit();
                 }
             }
-
-            // 更新列信息
-            int totalInDb = countCachedObjects();
-            log.info("本地元数据写入完成：新增 {}，删除 {}，总计 {}", added, removed, totalInDb);
-            OperationLog.log("写入本地元数据: 新增 " + added + " 删除 " + removed + " 总计 " + totalInDb);
-            OperationLog.log("对象同步完成，共 " + remoteObjects.size() + " 个");
-            return new MetadataRefreshResult(true, totalInDb, added + removed, "刷新成功");
+            totalObjects = countCachedObjects();
+            OperationLog.log("对象同步完成，总计 " + totalObjects + " 个，变更 " + totalChanges);
+            return new MetadataRefreshResult(true, totalObjects, totalChanges, "刷新成功");
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
             return new MetadataRefreshResult(false, countCachedObjects(), 0, e.getMessage());
         }
+    }
+
+    private Map<String, String> fetchAggregatedPayloads() throws Exception {
+        Map<String, String> payloads = new HashMap<>();
+        payloads.put("table", fetchSinglePayload(String.format("""
+                SELECT string_agg(table_name, '|' ORDER BY table_name) AS payload
+                FROM information_schema.tables
+                WHERE table_schema='%s' AND table_type='BASE TABLE'
+                """, DEFAULT_SCHEMA)));
+        payloads.put("view", fetchSinglePayload(String.format("""
+                SELECT string_agg(table_name, '|' ORDER BY table_name) AS payload
+                FROM information_schema.views
+                WHERE table_schema='%s'
+                """, DEFAULT_SCHEMA)));
+        payloads.put("function", fetchSinglePayload(String.format("""
+                SELECT string_agg(p.proname, '|' ORDER BY p.proname) AS payload
+                FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                WHERE n.nspname='%s' AND p.prokind='f'
+                """, DEFAULT_SCHEMA)));
+        payloads.put("procedure", fetchSinglePayload(String.format("""
+                SELECT string_agg(p.proname, '|' ORDER BY p.proname) AS payload
+                FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+                WHERE n.nspname='%s' AND p.prokind='p'
+                """, DEFAULT_SCHEMA)));
+        payloads.put("columns", fetchSinglePayload(String.format("""
+                SELECT string_agg(obj || '\t' || cols, '\n' ORDER BY obj) AS payload
+                FROM (
+                  SELECT table_name AS obj,
+                         string_agg(column_name, ',' ORDER BY ordinal_position) AS cols
+                  FROM information_schema.columns
+                  WHERE table_schema='%s'
+                  GROUP BY table_name
+                ) t
+                """, DEFAULT_SCHEMA)));
+        return payloads;
+    }
+
+    private String fetchSinglePayload(String sql) throws Exception {
+        OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
+        SqlExecResult result = sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER);
+        if (result.getRows() == null || result.getRows().isEmpty()) {
+            return "";
+        }
+        List<String> row = result.getRows().get(0);
+        return row.isEmpty() ? "" : Optional.ofNullable(row.get(0)).orElse("");
+    }
+
+    private Map<String, String> loadSnapshots(Connection conn) {
+        Map<String, String> snapshot = new HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement("SELECT meta_type, meta_hash FROM meta_snapshot")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    snapshot.put(rs.getString("meta_type"), rs.getString("meta_hash"));
+                }
+            }
+        } catch (Exception e) {
+            log.warn("读取 meta_snapshot 失败", e);
+        }
+        return snapshot;
+    }
+
+    private void saveSnapshot(Connection conn, String type, String hash) throws Exception {
+        try (PreparedStatement ps = conn.prepareStatement("INSERT INTO meta_snapshot(meta_type, meta_hash, updated_at) VALUES(?,?,?) " +
+                "ON CONFLICT(meta_type) DO UPDATE SET meta_hash=excluded.meta_hash, updated_at=excluded.updated_at")) {
+            ps.setString(1, type);
+            ps.setString(2, hash);
+            ps.setLong(3, System.currentTimeMillis());
+            ps.executeUpdate();
+        }
+    }
+
+    private String digest(String payload) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = md.digest(Optional.ofNullable(payload).orElse("").getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : bytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private List<String> parseObjectsPayload(String payload) {
+        if (payload == null || payload.isBlank()) {
+            return List.of();
+        }
+        String[] parts = payload.split("\\|");
+        List<String> list = new ArrayList<>();
+        for (String p : parts) {
+            String trimmed = p.trim();
+            if (!trimmed.isEmpty()) {
+                list.add(trimmed);
+            }
+        }
+        return list;
+    }
+
+    private Map<String, List<String>> parseColumnsPayload(String payload) {
+        Map<String, List<String>> map = new HashMap<>();
+        if (payload == null || payload.isBlank()) {
+            return map;
+        }
+        for (String line : payload.split("\\n")) {
+            if (line.isBlank()) continue;
+            String[] parts = line.split("\\t", 2);
+            if (parts.length != 2) continue;
+            String obj = parts[0].trim();
+            String cols = parts[1];
+            List<String> columns = Arrays.stream(cols.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isEmpty())
+                    .toList();
+            map.put(obj, columns);
+        }
+        return map;
+    }
+
+    private SqlExecResult runMetadataSql(String sql) throws Exception {
+        OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
+        return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER);
+    }
+
+    private int upsertObjects(Connection conn, String type, List<String> names) throws Exception {
+        Set<String> remote = new HashSet<>(names);
+        Set<String> local = new HashSet<>();
+        try (PreparedStatement ps = conn.prepareStatement("SELECT object_name FROM objects WHERE object_type=?")) {
+            ps.setString(1, type);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    local.add(rs.getString(1));
+                }
+            }
+        }
+        int changes = 0;
+        try (PreparedStatement ins = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)");
+             PreparedStatement del = conn.prepareStatement("DELETE FROM objects WHERE object_name=? AND object_type=?")) {
+            for (String name : remote) {
+                ins.setString(1, DEFAULT_SCHEMA);
+                ins.setString(2, name);
+                ins.setString(3, type);
+                changes += ins.executeUpdate();
+            }
+            for (String old : local) {
+                if (!remote.contains(old)) {
+                    del.setString(1, old);
+                    del.setString(2, type);
+                    changes += del.executeUpdate();
+                }
+            }
+        }
+        return changes;
+    }
+
+    private int updateColumnsDiff(Connection conn, Map<String, List<String>> columnsPayload) throws Exception {
+        int changes = 0;
+        Map<String, List<String>> local = new HashMap<>();
+        Map<String, String> objectTypes = new HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement("SELECT object_name, object_type FROM objects")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    objectTypes.put(rs.getString("object_name"), rs.getString("object_type"));
+                }
+            }
+        }
+        try (PreparedStatement ps = conn.prepareStatement("SELECT object_name, column_name, sort_no FROM columns ORDER BY sort_no")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String obj = rs.getString("object_name");
+                    String col = rs.getString("column_name");
+                    local.computeIfAbsent(obj, k -> new ArrayList<>()).add(col);
+                }
+            }
+        }
+
+        try (PreparedStatement delObj = conn.prepareStatement("DELETE FROM columns WHERE object_name=?");
+             PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)");
+             PreparedStatement ensureObj = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)")) {
+            for (Map.Entry<String, List<String>> entry : columnsPayload.entrySet()) {
+                String obj = entry.getKey();
+                List<String> remoteCols = entry.getValue();
+                List<String> localCols = local.getOrDefault(obj, List.of());
+                if (!remoteCols.equals(localCols)) {
+                    delObj.setString(1, obj);
+                    delObj.executeUpdate();
+                    for (int i = 0; i < remoteCols.size(); i++) {
+                        ins.setString(1, DEFAULT_SCHEMA);
+                        ins.setString(2, obj);
+                        ins.setString(3, remoteCols.get(i));
+                        ins.setInt(4, i + 1);
+                        ins.addBatch();
+                    }
+                    ins.executeBatch();
+                    ensureObj.setString(1, DEFAULT_SCHEMA);
+                    ensureObj.setString(2, obj);
+                    ensureObj.setString(3, objectTypes.getOrDefault(obj, "table"));
+                    ensureObj.executeUpdate();
+                    changes++;
+                }
+            }
+
+            for (String existing : local.keySet()) {
+                if (!columnsPayload.containsKey(existing)) {
+                    delObj.setString(1, existing);
+                    changes += delObj.executeUpdate();
+                }
+            }
+        }
+        return changes;
     }
 
     private void clearLocalMetadata() {
@@ -164,6 +354,7 @@ public class MetadataService {
                 if (auto) conn.setAutoCommit(false);
                 st.executeUpdate("DELETE FROM columns");
                 st.executeUpdate("DELETE FROM objects");
+                st.executeUpdate("DELETE FROM meta_snapshot");
                 conn.commit();
                 if (auto) conn.setAutoCommit(true);
                 OperationLog.log("已清空本地元数据");
@@ -249,59 +440,6 @@ public class MetadataService {
         if (trimmed.isEmpty()) return false;
         if (trimmed.contains(" ") || trimmed.contains("\n")) return false;
         return trimmed.matches("[A-Za-z0-9_\\.]{2,128}");
-    }
-
-    private List<RemoteObject> fetchObjects() throws Exception {
-        List<RemoteObject> objects = new ArrayList<>();
-        objects.addAll(queryObjectsByType("table"));
-        objects.addAll(queryObjectsByType("view"));
-        return objects;
-    }
-
-    private List<RemoteObject> queryObjectsByType(String type) throws Exception {
-        String sql;
-        if ("table".equalsIgnoreCase(type)) {
-            sql = String.format("""
-                    SELECT table_schema AS schema_name, table_name AS object_name, 'table' AS object_type
-                    FROM information_schema.tables
-                    WHERE table_schema = '%s' AND table_type = 'BASE TABLE'
-                    ORDER BY table_name
-                    """, DEFAULT_SCHEMA);
-        } else {
-            sql = String.format("""
-                    SELECT table_schema AS schema_name, table_name AS object_name, 'view' AS object_type
-                    FROM information_schema.views
-                    WHERE table_schema = '%s'
-                    ORDER BY table_name
-                    """, DEFAULT_SCHEMA);
-        }
-        SqlExecResult result = runMetadataSql(sql);
-        return toObjects(result);
-    }
-
-    private SqlExecResult runMetadataSql(String sql) throws Exception {
-        OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        return sqlExecutionService.executeSyncAllPages(sql);
-    }
-
-    private List<RemoteObject> toObjects(SqlExecResult result) {
-        if (result == null || result.getRows() == null || result.getColumns() == null) {
-            return List.of();
-        }
-        Map<String, Integer> idx = indexColumns(result.getColumns());
-        int schemaIdx = idx.getOrDefault("schema_name", -1);
-        int nameIdx = idx.getOrDefault("object_name", -1);
-        int typeIdx = idx.getOrDefault("object_type", -1);
-        List<RemoteObject> list = new ArrayList<>();
-        for (List<String> row : result.getRows()) {
-            String schema = valueAt(row, schemaIdx);
-            String name = valueAt(row, nameIdx);
-            String type = valueAt(row, typeIdx);
-            if (name != null && type != null) {
-                list.add(new RemoteObject(schema != null ? schema : DEFAULT_SCHEMA, name, type));
-            }
-        }
-        return list;
     }
 
     private List<RemoteColumn> fetchColumnsBySql(String objectName) throws Exception {
@@ -665,18 +803,6 @@ public class MetadataService {
     }
 
     public record SuggestionItem(String name, String type, String tableHint, int useCount) {}
-
-    static class RemoteObject {
-        String schema_name;
-        String object_name;
-        String object_type;
-
-        RemoteObject(String schema_name, String object_name, String object_type) {
-            this.schema_name = schema_name;
-            this.object_name = object_name;
-            this.object_type = object_type;
-        }
-    }
 
     static class RemoteColumn {
         String schema_name;

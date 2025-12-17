@@ -50,6 +50,11 @@ public class SQLiteManager {
                     "schema_name TEXT, object_name TEXT, column_name TEXT, sort_no INTEGER, " +
                     "use_count INTEGER DEFAULT 0, last_used_at INTEGER, " +
                     "PRIMARY KEY(schema_name, object_name, column_name))");
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS meta_snapshot (" +
+                    "meta_type TEXT PRIMARY KEY, " +
+                    "meta_hash TEXT NOT NULL, " +
+                    "updated_at INTEGER NOT NULL)"
+            );
             st.executeUpdate("CREATE TABLE IF NOT EXISTS notes (" +
                     "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
                     "title TEXT NOT NULL, " +
