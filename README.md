@@ -135,10 +135,28 @@
   - 如遇“无法创建本地数据库目录”异常，可手动创建 `%USERPROFILE%\\.Sql_client_v3` 后重试；
   - 迁移失败会在日志中提示“迁移本地数据库失败”，可手动复制旧文件至新目录再启动。
 
-### 结果集分页协议与配置
-- 默认使用 `/api/jobs/result` 的分页参数：`page` 从 1 开始，`pageSize` 默认 2000，客户端会将配置值裁剪到 1~5000。
-- 响应中的 `hasNext`、`truncated`、`note` 会在操作日志中输出，便于判断是否还有下一页、是否被截断以及后端裁剪提示。
-- 普通 SQL 执行：仅拉取第 1 页并立即 `removeAfterFetch=true` 清理后端缓存，避免一次性加载超大结果；若需要保留分页能力，可在 `config.properties` 中设置 `allowPagingAfterFirstFetch=true`，但当前 UI 仍只展示首批数据。
-- 元数据刷新：通过 `SqlExecutionService.executeSyncAllPages` 循环翻页直至 `hasNext=false`，并在最后一次请求后清理缓存，确保对象/字段抓取完整。
-- 用户可在根目录或 classpath 的 `config.properties` 中编辑 `result.pageSize`，小于 1 时回退 2000，大于 5000 会在日志提示并裁剪到 5000。必要时可手动修改 `allowPagingAfterFirstFetch` 以便后端保留结果缓存供后续分页使用。
-- 结果过期或 TTL 失效时会提示“结果已过期，请重新执行 SQL”，不会导致客户端崩溃；如需排查分页问题，可查看操作日志中的 page/pageSize/hasNext 信息。
+### 异步接口对接（2024-05 更新）
+
+#### 固定请求头与安全要求
+- 所有 HTTPS POST 请求都使用 `Content-Type: application/json;charset=UTF-8`。
+- 统一附带 `X-Request-Token: WAF_STATIC_TOKEN_202405`，为测试环境固定值，不再支持可变 token。
+
+#### 接口总览
+- **/api/jobs/submit**：`{"encryptedSql": "<Base64 AES>", "maxResultRows":5000?, "dbUser":"leshan_app"?, "label":"xxx"?}`。`dbUser` 逻辑库用户默认 `leshan`，`maxResultRows` 仅影响首次内存快照，并不限制最终可见行数。
+- **/api/jobs/status**：`{"jobId":"..."}`，返回 `status/progressPercent/elapsedMillis` 等任务信息。
+- **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":true?, "page":1?, "pageSize":200?}`。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize`，客户端全部做空值兼容。
+
+#### 分页策略与上限
+- 默认 `page=1`、`pageSize=200`，客户端与 README 都建议显式传入。`config.properties` 提供 `result.pageSize` 默认 200，`result.pageSize.max` 固定上限 1000。
+- 前端会在 Tab 工具栏读取用户输入的 pageSize；`<1` 直接回退默认值，`>1000` 自动裁剪为 1000 并在操作日志输出“已裁剪到 1000”。
+- `hasNext`、`returnedRowCount`、`actualRowCount`、`maxVisibleRows`、`maxTotalRows`、`truncated`、`note` 全部写入 OperationLog 以便排障。`hasNext` 的计算基于 1000 行可见窗口，无法通过翻页突破上限。
+- 常规 SQL 默认仅抓取第一页并根据 `allowPagingAfterFirstFetch` 决定是否清理缓存；元数据同步仍使用 `executeSyncAllPages` 自动翻页，但单页上限依然受 1000 限制。
+
+#### dbUser 选项（每个 Tab 独立）
+- 每个 SQL 编辑 Tab 的工具栏新增 `dbUser` 下拉框，可在 `leshan / leshan_app` 间切换，默认 `leshan`。选择仅作用于当前 Tab 的 `/jobs/submit` 请求，互不串台。
+- Tab 同时提供 `pageSize` 输入框（预置 200/500/1000，可自定义），提交时用于 `/jobs/result` 的分页大小，独立于其他 Tab。
+
+#### 常见问题与提示
+- **pageSize 被裁剪**：日志出现 “pageSize=3000 超出上限，已裁剪到 1000” 时，实际请求体为 1000，符合后端硬上限。
+- **结果被截断**：响应 `truncated=true` 或 `note` 提示“maxVisibleRows=1000”时，客户端会在日志提示且无法再通过翻页取更多数据。
+- **TTL 过期**：`success=false` 且消息为空时，前端统一提示“结果已过期，请重新执行 SQL”，不会导致崩溃。

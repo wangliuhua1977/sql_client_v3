@@ -15,7 +15,8 @@ import java.util.Properties;
  */
 public class Config {
     private static final Logger log = LoggerFactory.getLogger(Config.class);
-    private static final int DEFAULT_MAX_PAGE_SIZE = 5000;
+    private static final int DEFAULT_MAX_PAGE_SIZE = 1000;
+    private static final int DEFAULT_PAGE_SIZE = 200;
     private static final Properties PROPS = new Properties();
 
     static {
@@ -59,11 +60,25 @@ public class Config {
             OperationLog.log("配置 result.pageSize=" + pageSize + " 无效，使用默认值 " + defaultValue);
             pageSize = defaultValue;
         }
-        if (pageSize > DEFAULT_MAX_PAGE_SIZE) {
-            OperationLog.log("配置 result.pageSize=" + pageSize + " 超出上限，已裁剪到 " + DEFAULT_MAX_PAGE_SIZE);
-            pageSize = DEFAULT_MAX_PAGE_SIZE;
+        int maxPageSize = getMaxPageSize();
+        if (pageSize > maxPageSize) {
+            OperationLog.log("配置 result.pageSize=" + pageSize + " 超出上限，已裁剪到 " + maxPageSize);
+            pageSize = maxPageSize;
         }
         return pageSize;
+    }
+
+    public static int getDefaultPageSize() {
+        return getResultPageSizeOrDefault(DEFAULT_PAGE_SIZE);
+    }
+
+    public static int getMaxPageSize() {
+        String raw = PROPS.getProperty("result.pageSize.max");
+        int configured = parseIntOrDefault(raw, DEFAULT_MAX_PAGE_SIZE);
+        if (configured < 1) {
+            configured = DEFAULT_MAX_PAGE_SIZE;
+        }
+        return configured;
     }
 
     public static boolean allowPagingAfterFirstFetch() {

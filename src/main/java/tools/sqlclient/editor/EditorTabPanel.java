@@ -9,6 +9,7 @@ import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.util.AutoSaveService;
+import tools.sqlclient.util.Config;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.SuggestionEngine;
@@ -42,6 +43,8 @@ public class EditorTabPanel extends JPanel {
     private final JLabel execStatusLabel = new JLabel("空闲");
     private final JLabel layoutLabel = new JLabel("布局: 分屏");
     private final JLabel datasetLabel = new JLabel("结果集: -");
+    private final JComboBox<String> dbUserSelector = new JComboBox<>(new String[]{"leshan", "leshan_app"});
+    private final JComboBox<String> pageSizeSelector = new JComboBox<>(new String[]{"200", "500", "1000"});
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
@@ -88,6 +91,9 @@ public class EditorTabPanel extends JPanel {
         this.suggestionEngine = new SuggestionEngine(metadataService, textArea);
         this.focusNotifier = focusNotifier;
         this.fullWidthFilter = new FullWidthFilter(convertFullWidth);
+        this.pageSizeSelector.setEditable(true);
+        this.pageSizeSelector.setSelectedItem(String.valueOf(Config.getDefaultPageSize()));
+        this.dbUserSelector.setSelectedItem("leshan");
         if (textArea.getDocument() instanceof javax.swing.text.AbstractDocument doc) {
             doc.setDocumentFilter(fullWidthFilter);
         }
@@ -415,6 +421,12 @@ public class EditorTabPanel extends JPanel {
         toolBar.addSeparator();
         toolBar.add(maximizeResult);
         toolBar.add(maximizeEditor);
+        toolBar.addSeparator();
+        toolBar.add(new JLabel("dbUser:"));
+        toolBar.add(dbUserSelector);
+        toolBar.addSeparator();
+        toolBar.add(new JLabel("pageSize:"));
+        toolBar.add(pageSizeSelector);
 
         installLayoutShortcuts(toolBar);
         return toolBar;
@@ -628,6 +640,35 @@ public class EditorTabPanel extends JPanel {
 
     public Note getNote() {
         return note;
+    }
+
+    public String getSelectedDbUser() {
+        Object val = dbUserSelector.getSelectedItem();
+        String chosen = val == null ? "" : val.toString().trim();
+        return chosen.isEmpty() ? "leshan" : chosen;
+    }
+
+    public int getPreferredPageSize() {
+        Object val = pageSizeSelector.getSelectedItem();
+        String chosen = val == null ? "" : val.toString().trim();
+        int fallback = Config.getDefaultPageSize();
+        int max = Config.getMaxPageSize();
+        int parsed;
+        try {
+            parsed = Integer.parseInt(chosen);
+        } catch (NumberFormatException ex) {
+            OperationLog.log("pageSize 输入无效，使用默认值 " + fallback);
+            return fallback;
+        }
+        if (parsed < 1) {
+            OperationLog.log("pageSize=" + parsed + " 无效，使用默认值 " + fallback);
+            return fallback;
+        }
+        if (parsed > max) {
+            OperationLog.log("pageSize=" + parsed + " 超出上限，已裁剪到 " + max);
+            return max;
+        }
+        return parsed;
     }
 
     public void setExecuteHandler(Runnable executeHandler) {
