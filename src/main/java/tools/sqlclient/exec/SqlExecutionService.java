@@ -74,6 +74,10 @@ public class SqlExecutionService {
         return executeSync(sql, null, true, dbUser);
     }
 
+    public SqlExecResult executeSyncAllPagesWithDbUser(String sql, String dbUser, Integer pageSizeOverride) {
+        return executeSync(sql, null, true, dbUser, pageSizeOverride);
+    }
+
     public SqlExecResult executeSync(String sql, Integer maxResultRows) {
         return executeSync(sql, maxResultRows, false);
     }
@@ -83,6 +87,10 @@ public class SqlExecutionService {
     }
 
     private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages, String dbUser) {
+        return executeSync(sql, maxResultRows, fetchAllPages, dbUser, null);
+    }
+
+    private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages, String dbUser, Integer pageSizeOverride) {
         AsyncJobStatus submitted = submitJob(sql, maxResultRows, dbUser, null);
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
@@ -91,7 +99,7 @@ public class SqlExecutionService {
                         ? finalStatus.getMessage()
                         : ("任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus()));
             }
-            return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, null);
+            return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, pageSizeOverride);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
