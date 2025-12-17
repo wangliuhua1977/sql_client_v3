@@ -174,6 +174,17 @@
 - **/api/jobs/status**：`{"jobId":"..."}`，返回 `status/progressPercent/elapsedMillis` 等任务信息。
 - **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":true?, "page":1?, "pageSize":200?}`。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize`，客户端全部做空值兼容。
 
+#### /jobs/result 响应与列推断
+- `resultRows` 是 **对象数组**，每个元素为 `key:value` 结构；客户端优先读取该字段（缺失时兼容 `rows/data`）。
+- 列名优先级：1）响应中显式的 `columns/resultColumns/columnNames`；2）遍历 `resultRows` 并集所有 key，保持“首行顺序 + 新 key 追加”稳定顺序；3）数组结果回退为 `col_1..n`。绝不再从 `SELECT *` 文本推断 `*` 列名。
+- 单元格值按列顺序取 `row.opt(col)` 填充，缺失写空串；若 value 为对象/数组则序列化为紧凑 JSON，避免显示类名或空白。
+- `hasResultSet=true` 但 `resultRows` 为空时表头也不会显示 `*`，保持空结果集提示即可。
+- OperationLog 额外打印 `jobId/returnedRowCount/resultRows.size/columns.size/第一行 keys` 等调试信息，解析异常会在 UI 直接提示错误。
+
+#### removeAfterFetch 处理
+- 首次 `/jobs/result` 默认强制 `removeAfterFetch=false`，避免分页或二次渲染时被意外清空；若后端缺少专用清理接口，则保留缓存优先保证可用性。
+- 同一 `jobId` 不会再二次调用带 `removeAfterFetch=true` 的 `/jobs/result` 自毁结果，后续分页/刷新直接复用首次返回的数据结构。
+
 #### 分页策略与上限
 - 默认 `page=1`、`pageSize=200`，客户端与 README 都建议显式传入。`config.properties` 提供 `result.pageSize` 默认 200，`result.pageSize.max` 固定上限 1000。
 - 前端会在 Tab 工具栏读取用户输入的 pageSize；`<1` 直接回退默认值，`>1000` 自动裁剪为 1000 并在操作日志输出“已裁剪到 1000”。
