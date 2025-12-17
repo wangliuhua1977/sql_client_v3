@@ -9,7 +9,9 @@ import tools.sqlclient.util.OperationLog;
 
 import javax.swing.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -29,6 +31,8 @@ public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
     private static final String METADATA_DB_USER = "leshan";
+    private static final int METADATA_BATCH_SIZE = 200;
+    private static final int TRACE_ROW_LIMIT = 200;
 
     private final SQLiteManager sqliteManager;
     private final ExecutorService metadataPool = Executors.newFixedThreadPool(4, r -> new Thread(r, "metadata-pool"));
@@ -38,6 +42,7 @@ public class MetadataService {
     private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
 
     public record MetadataRefreshResult(boolean success, int totalObjects, int changedObjects, String message) {}
+    private record RemoteSnapshot(Map<String, List<String>> objects, Map<String, List<String>> columnsByObject, int totalColumns) {}
 
     public MetadataService(Path dbPath) {
         this.sqliteManager = new SQLiteManager(dbPath);
@@ -98,37 +103,35 @@ public class MetadataService {
     }
 
     private MetadataRefreshResult refreshMetadata() {
+        long startedAt = System.currentTimeMillis();
         try {
             OperationLog.log("开始刷新对象元数据");
-            Map<String, String> payloads = fetchAggregatedPayloads();
+            RemoteSnapshot snapshot = fetchRemoteSnapshot();
             int totalChanges = 0;
             int totalObjects;
             synchronized (dbWriteLock) {
                 try (Connection conn = sqliteManager.getConnection()) {
                     conn.setAutoCommit(false);
                     Map<String, String> snapshots = loadSnapshots(conn);
-                    for (String type : List.of("table", "view", "function", "procedure")) {
-                        String payload = payloads.getOrDefault(type, "");
-                        String hash = digest(payload);
-                        if (!hash.equals(snapshots.get(type))) {
-                            List<String> names = parseObjectsPayload(payload);
-                            totalChanges += upsertObjects(conn, type, names);
-                            saveSnapshot(conn, type, hash);
-                        }
-                    }
-                    String columnsPayload = payloads.getOrDefault("columns", "");
-                    String colHash = digest(columnsPayload);
-                    if (!colHash.equals(snapshots.get("columns"))) {
-                        Map<String, List<String>> columns = parseColumnsPayload(columnsPayload);
-                        totalChanges += updateColumnsDiff(conn, columns);
-                        saveSnapshot(conn, "columns", colHash);
-                    }
+                    totalChanges += syncObjects(conn, "table", snapshot.objects().get("table"), snapshots);
+                    totalChanges += syncObjects(conn, "view", snapshot.objects().get("view"), snapshots);
+                    totalChanges += syncObjects(conn, "function", snapshot.objects().get("function"), snapshots);
+                    totalChanges += syncObjects(conn, "procedure", snapshot.objects().get("procedure"), snapshots);
+                    totalChanges += syncColumns(conn, snapshot.columnsByObject(), snapshots);
                     conn.commit();
                 }
             }
             totalObjects = countCachedObjects();
-            OperationLog.log("对象同步完成，总计 " + totalObjects + " 个，变更 " + totalChanges);
-            return new MetadataRefreshResult(true, totalObjects, totalChanges, "刷新成功");
+            long cost = System.currentTimeMillis() - startedAt;
+            OperationLog.log(String.format("对象同步完成：表 %d，视图 %d，函数 %d，过程 %d，字段 %d，变更 %d，用时 %d ms",
+                    snapshot.objects().getOrDefault("table", List.of()).size(),
+                    snapshot.objects().getOrDefault("view", List.of()).size(),
+                    snapshot.objects().getOrDefault("function", List.of()).size(),
+                    snapshot.objects().getOrDefault("procedure", List.of()).size(),
+                    snapshot.totalColumns(),
+                    totalChanges,
+                    cost));
+            return new MetadataRefreshResult(true, totalObjects, totalChanges, "刷新成功，用时 " + cost + " ms");
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
@@ -136,49 +139,104 @@ public class MetadataService {
         }
     }
 
-    private Map<String, String> fetchAggregatedPayloads() throws Exception {
-        Map<String, String> payloads = new HashMap<>();
-        payloads.put("table", fetchSinglePayload(String.format("""
-                SELECT string_agg(table_name, '|' ORDER BY table_name) AS payload
-                FROM information_schema.tables
-                WHERE table_schema='%s' AND table_type='BASE TABLE'
-                """, DEFAULT_SCHEMA)));
-        payloads.put("view", fetchSinglePayload(String.format("""
-                SELECT string_agg(table_name, '|' ORDER BY table_name) AS payload
+    private RemoteSnapshot fetchRemoteSnapshot() throws Exception {
+        Map<String, List<String>> objects = new HashMap<>();
+        objects.put("table", fetchObjects("table",
+                String.format("""
+                        SELECT table_name AS object_name
+                        FROM information_schema.tables
+                        WHERE table_schema='%s' AND table_type='BASE TABLE'
+                        ORDER BY table_name
+                        LIMIT %d OFFSET %%d
+                        """, DEFAULT_SCHEMA, METADATA_BATCH_SIZE)));
+        objects.put("view", fetchObjects("view", String.format("""
+                SELECT table_name AS object_name
                 FROM information_schema.views
                 WHERE table_schema='%s'
-                """, DEFAULT_SCHEMA)));
-        payloads.put("function", fetchSinglePayload(String.format("""
-                SELECT string_agg(p.proname, '|' ORDER BY p.proname) AS payload
+                ORDER BY table_name
+                LIMIT %d OFFSET %%d
+                """, DEFAULT_SCHEMA, METADATA_BATCH_SIZE)));
+        objects.put("function", fetchObjects("function", String.format("""
+                SELECT p.proname AS object_name
                 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                 WHERE n.nspname='%s' AND p.prokind='f'
-                """, DEFAULT_SCHEMA)));
-        payloads.put("procedure", fetchSinglePayload(String.format("""
-                SELECT string_agg(p.proname, '|' ORDER BY p.proname) AS payload
+                ORDER BY p.proname
+                LIMIT %d OFFSET %%d
+                """, DEFAULT_SCHEMA, METADATA_BATCH_SIZE)));
+        objects.put("procedure", fetchObjects("procedure", String.format("""
+                SELECT p.proname AS object_name
                 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                 WHERE n.nspname='%s' AND p.prokind='p'
-                """, DEFAULT_SCHEMA)));
-        payloads.put("columns", fetchSinglePayload(String.format("""
-                SELECT string_agg(obj || '\t' || cols, '\n' ORDER BY obj) AS payload
-                FROM (
-                  SELECT table_name AS obj,
-                         string_agg(column_name, ',' ORDER BY ordinal_position) AS cols
-                  FROM information_schema.columns
-                  WHERE table_schema='%s'
-                  GROUP BY table_name
-                ) t
-                """, DEFAULT_SCHEMA)));
-        return payloads;
+                ORDER BY p.proname
+                LIMIT %d OFFSET %%d
+                """, DEFAULT_SCHEMA, METADATA_BATCH_SIZE)));
+        Map<String, List<String>> columns = fetchColumns();
+        return new RemoteSnapshot(objects, columns, countColumns(columns));
     }
 
-    private String fetchSinglePayload(String sql) throws Exception {
-        OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        SqlExecResult result = sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER);
-        if (result.getRows() == null || result.getRows().isEmpty()) {
-            return "";
+    private List<String> fetchObjects(String type, String pagedSqlTemplate) throws Exception {
+        List<String> names = new ArrayList<>();
+        int offset = 0;
+        while (true) {
+            String sql = String.format(pagedSqlTemplate, offset);
+            SqlExecResult result = runMetadataSql(sql);
+            recordTrace(type + "-" + offset, sql, result);
+            List<List<String>> rows = result.getRows();
+            if (rows == null || rows.isEmpty()) {
+                break;
+            }
+            Map<String, Integer> idx = indexColumns(result.getColumns());
+            int nameIdx = idx.getOrDefault("object_name", -1);
+            for (List<String> row : rows) {
+                String name = valueAt(row, nameIdx);
+                if (name != null && !name.isBlank()) {
+                    names.add(name.trim());
+                }
+            }
+            OperationLog.log(String.format("[%s] 已拉取 %d 条，offset=%d", type, names.size(), offset));
+            if (rows.size() < METADATA_BATCH_SIZE) {
+                break;
+            }
+            offset += rows.size();
         }
-        List<String> row = result.getRows().get(0);
-        return row.isEmpty() ? "" : Optional.ofNullable(row.get(0)).orElse("");
+        return names;
+    }
+
+    private Map<String, List<String>> fetchColumns() throws Exception {
+        Map<String, List<String>> columns = new LinkedHashMap<>();
+        int offset = 0;
+        int total = 0;
+        while (true) {
+            String sql = String.format("""
+                    SELECT table_schema AS schema_name, table_name AS object_name, column_name, ordinal_position
+                    FROM information_schema.columns
+                    WHERE table_schema='%s'
+                    ORDER BY table_name, ordinal_position
+                    LIMIT %d OFFSET %d
+                    """, DEFAULT_SCHEMA, METADATA_BATCH_SIZE, offset);
+            SqlExecResult result = runMetadataSql(sql);
+            recordTrace("columns-" + offset, sql, result);
+            List<List<String>> rows = result.getRows();
+            if (rows == null || rows.isEmpty()) {
+                break;
+            }
+            Map<String, Integer> idx = indexColumns(result.getColumns());
+            int objIdx = idx.getOrDefault("object_name", -1);
+            int nameIdx = idx.getOrDefault("column_name", -1);
+            for (List<String> row : rows) {
+                String obj = valueAt(row, objIdx);
+                String col = valueAt(row, nameIdx);
+                if (obj == null || col == null) continue;
+                columns.computeIfAbsent(obj, k -> new ArrayList<>()).add(col);
+                total++;
+            }
+            OperationLog.log(String.format("[columns] 已拉取 %d 列，offset=%d", total, offset));
+            if (rows.size() < METADATA_BATCH_SIZE) {
+                break;
+            }
+            offset += rows.size();
+        }
+        return columns;
     }
 
     private Map<String, String> loadSnapshots(Connection conn) {
@@ -219,44 +277,88 @@ public class MetadataService {
         }
     }
 
-    private List<String> parseObjectsPayload(String payload) {
-        if (payload == null || payload.isBlank()) {
-            return List.of();
-        }
-        String[] parts = payload.split("\\|");
-        List<String> list = new ArrayList<>();
-        for (String p : parts) {
-            String trimmed = p.trim();
-            if (!trimmed.isEmpty()) {
-                list.add(trimmed);
-            }
-        }
-        return list;
-    }
-
-    private Map<String, List<String>> parseColumnsPayload(String payload) {
-        Map<String, List<String>> map = new HashMap<>();
-        if (payload == null || payload.isBlank()) {
-            return map;
-        }
-        for (String line : payload.split("\\n")) {
-            if (line.isBlank()) continue;
-            String[] parts = line.split("\\t", 2);
-            if (parts.length != 2) continue;
-            String obj = parts[0].trim();
-            String cols = parts[1];
-            List<String> columns = Arrays.stream(cols.split(","))
-                    .map(String::trim)
-                    .filter(s -> !s.isEmpty())
-                    .toList();
-            map.put(obj, columns);
-        }
-        return map;
-    }
-
     private SqlExecResult runMetadataSql(String sql) throws Exception {
         OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
         return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER);
+    }
+
+    private int syncObjects(Connection conn, String type, List<String> names, Map<String, String> snapshots) throws Exception {
+        if (names == null) names = List.of();
+        String hash = digest(String.join("\n", names));
+        if (hash.equals(snapshots.get(type))) {
+            OperationLog.log(type + " 未变化，跳过写入");
+            return 0;
+        }
+        int changes = upsertObjects(conn, type, names);
+        saveSnapshot(conn, type, hash);
+        return changes;
+    }
+
+    private int syncColumns(Connection conn, Map<String, List<String>> remote, Map<String, String> snapshots) throws Exception {
+        if (remote == null) remote = Map.of();
+        String hash = digestColumns(remote);
+        if (hash.equals(snapshots.get("columns"))) {
+            OperationLog.log("columns 未变化，跳过写入");
+            return 0;
+        }
+        int changes = updateColumnsDiff(conn, remote);
+        saveSnapshot(conn, "columns", hash);
+        return changes;
+    }
+
+    private String digestColumns(Map<String, List<String>> columns) {
+        if (columns == null || columns.isEmpty()) {
+            return "";
+        }
+        List<String> lines = new ArrayList<>();
+        columns.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> lines.add(e.getKey() + "\t" + String.join(",", e.getValue())));
+        return digest(String.join("\n", lines));
+    }
+
+    private int countColumns(Map<String, List<String>> columns) {
+        if (columns == null || columns.isEmpty()) {
+            return 0;
+        }
+        return columns.values().stream().mapToInt(List::size).sum();
+    }
+
+    private void recordTrace(String tag, String sql, SqlExecResult result) {
+        try {
+            String safeTag = tag.replaceAll("[^A-Za-z0-9_-]", "_");
+            Path dir = Paths.get(System.getProperty("user.home"), ".Sql_client_v3", "logs");
+            Files.createDirectories(dir);
+            Path file = dir.resolve(String.format("metadata-%s-%d.log", safeTag, System.currentTimeMillis()));
+            StringBuilder sb = new StringBuilder();
+            sb.append("sql: ").append(sql).append(System.lineSeparator());
+            if (result != null) {
+                sb.append("jobId: ").append(Optional.ofNullable(result.getJobId()).orElse("<unknown>"))
+                        .append(" status: ").append(Optional.ofNullable(result.getStatus()).orElse(""))
+                        .append(" page: ").append(Optional.ofNullable(result.getPage()).orElse(-1))
+                        .append(" pageSize: ").append(Optional.ofNullable(result.getPageSize()).orElse(-1))
+                        .append(System.lineSeparator());
+                List<List<String>> rows = result.getRows();
+                if (rows != null) {
+                    sb.append("rows (up to ").append(TRACE_ROW_LIMIT).append("):").append(System.lineSeparator());
+                    int limit = Math.min(rows.size(), TRACE_ROW_LIMIT);
+                    for (int i = 0; i < limit; i++) {
+                        sb.append(String.join("\t", rows.get(i))).append(System.lineSeparator());
+                    }
+                    if (rows.size() > TRACE_ROW_LIMIT) {
+                        sb.append("<trimmed ").append(rows.size() - TRACE_ROW_LIMIT).append(" rows>").append(System.lineSeparator());
+                    }
+                }
+            }
+            Files.writeString(file, sb.toString(), StandardCharsets.UTF_8);
+            if (safeTag.endsWith("-0")) {
+                OperationLog.log("元数据请求/响应已写入: " + file.toAbsolutePath());
+            } else {
+                log.debug("元数据请求/响应已写入: {}", file.toAbsolutePath());
+            }
+        } catch (Exception e) {
+            log.debug("写入元数据调试日志失败", e);
+        }
     }
 
     private int upsertObjects(Connection conn, String type, List<String> names) throws Exception {

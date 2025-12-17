@@ -89,13 +89,14 @@
 
 ### 元数据获取方式
 - 统一通过 POST 提交 SQL 方式获取，复用 `AsyncSqlConfig` 的 BASE_URL、`X-Request-Token` Header 与忽略证书的 HttpClient 封装。
-- 使用 `SqlExecutionService.executeSync(sql)` 同步执行信息_schema 查询，返回的列名与行数据保持服务端顺序。
-- 默认 schema 固定为 `leshan`，不再从远端枚举 schema，树形结构的根 schema 亦固定。
+- 使用 `SqlExecutionService.executeSyncAllPagesWithDbUser(sql,"leshan")` 执行信息_schema 查询，但每条 SQL 都自带 `LIMIT 200 OFFSET <n>` 分页，单次响应被硬性限制在 200 行以内，避免一次性返回超大 JSON。
+- 默认 schema/dbUser 均固定为 `leshan`，不再从远端枚举 schema，树形结构的根 schema 亦固定。
 
 ### 拉取的元数据 SQL
-- 表（BASE TABLE）：`information_schema.tables` 按 `table_name` 排序。
-- 视图：`information_schema.views` 按 `table_name` 排序。
-- 字段：`information_schema.columns`，按 `ordinal_position` 排序并写入本地 SQLite 的 `sort_no` 字段，用于 UI 展示与差分比较。
+- 表（BASE TABLE）：`information_schema.tables` 按 `table_name` 排序，并分页 `LIMIT 200 OFFSET n` 逐批获取。
+- 视图：`information_schema.views` 同样分页并按名称排序。
+- 函数/存储过程：`pg_proc` + `pg_namespace` 过滤 `prokind=f/p`，按名称排序并分页。
+- 字段：`information_schema.columns`，按 `table_name, ordinal_position` 排序分页抓取；写入本地 SQLite 时仍保留 `ordinal_position` 作为 `sort_no`，确保列顺序一致。
 
 ### 列顺序保证策略
 - 优先使用服务端返回的列名数组：依次读取 `columns`、`resultColumns`、`columnNames`，按后端给出的顺序直接渲染。
@@ -127,14 +128,13 @@
 - 若响应体超过 200,000 字符，会写入 `%USERPROFILE%\\.Sql_client_v3\\logs\\http-YYYYMMDD.log` 并在日志面板提示文件路径，同时仅展示前 200,000 字符以防 UI 卡顿。
 - 元数据刷新、SQL submit/status/result/cancel/list 均复用此日志通道，便于排障。
 
-### 元数据聚合 payload 与差分策略
+### 元数据分页同步与差分策略
 - 固定 schema/dbUser 均为 `leshan`，避免因 Tab 选择的 dbUser 导致元数据不一致。
-- 采用“单行聚合” SQL 拉取：
-  - 表：`string_agg(table_name,'|')`；视图：`string_agg(table_name,'|')`；函数/过程：聚合 `pg_proc.proname`；字段：以 `obj\tcol1,col2` 聚合、对象间以换行分隔。
-- 客户端解析 payload 后写入本地 SQLite，并新增 `meta_snapshot` 记录各类型的 SHA-256 哈希：
-  - 表/视图/函数/过程：按哈希差异计算新增/删除，对应插入/删除 `objects`。
-  - 字段：以对象为粒度比较列顺序变更，必要时重建该对象的全部列记录。
-- `meta_snapshot` 未命中视为首次全量；命中且哈希一致则跳过对应类型，避免重复写入。
+- **分页拉取**：每类元数据都以 200 行分页方式逐批抓取，不再使用 `string_agg` 聚合为超长单行，彻底杜绝超大响应体导致的 UI 卡顿或网络中断。
+- **哈希差分**：抓取到的名称/列清单按稳定顺序拼接后计算 SHA-256；与 `meta_snapshot` 中的上次哈希相同则跳过写库，不相同才增量写入。
+- **字段顺序保证**：字段按 `table_name, ordinal_position` 抓取并立即写入，对比本地列顺序，不一致才重建该对象的列，确保 UI 顺序与数据库一致。
+- **启动/刷新流程**：启动时后台线程自动执行一次全量分页同步；手动刷新仅对哈希变化的类别写入差异，数据库无变化时会快速返回并在日志提示“未变化，跳过写入”。
+- **可追溯调试**：每批请求的 SQL 与返回前 200 行会写入 `%USERPROFILE%\\.Sql_client_v3\\logs\\metadata-*.log`；UI 仅提示日志文件路径而不会输出整包响应，避免日志撑爆界面。
 
 ### 启动全量同步
 - 主窗口完成初始化后即触发异步元数据刷新，`meta_snapshot` 为空时执行全量同步；后续刷新仅更新变动的类别/对象。
