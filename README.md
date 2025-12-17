@@ -122,6 +122,24 @@
 
 ## 日志与元数据修复补充说明
 
+### HTTPS 全量日志输出
+- 网络层统一在 `SqlExecutionService#postJson` 中拦截，向右侧“操作日志”打印完整请求/响应：URL、方法、请求头、请求体 JSON、HTTP 状态码、响应头与响应体。
+- 若响应体超过 200,000 字符，会写入 `%USERPROFILE%\\.Sql_client_v3\\logs\\http-YYYYMMDD.log` 并在日志面板提示文件路径，同时仅展示前 200,000 字符以防 UI 卡顿。
+- 元数据刷新、SQL submit/status/result/cancel/list 均复用此日志通道，便于排障。
+
+### 元数据聚合 payload 与差分策略
+- 固定 schema/dbUser 均为 `leshan`，避免因 Tab 选择的 dbUser 导致元数据不一致。
+- 采用“单行聚合” SQL 拉取：
+  - 表：`string_agg(table_name,'|')`；视图：`string_agg(table_name,'|')`；函数/过程：聚合 `pg_proc.proname`；字段：以 `obj\tcol1,col2` 聚合、对象间以换行分隔。
+- 客户端解析 payload 后写入本地 SQLite，并新增 `meta_snapshot` 记录各类型的 SHA-256 哈希：
+  - 表/视图/函数/过程：按哈希差异计算新增/删除，对应插入/删除 `objects`。
+  - 字段：以对象为粒度比较列顺序变更，必要时重建该对象的全部列记录。
+- `meta_snapshot` 未命中视为首次全量；命中且哈希一致则跳过对应类型，避免重复写入。
+
+### 启动全量同步
+- 主窗口完成初始化后即触发异步元数据刷新，`meta_snapshot` 为空时执行全量同步；后续刷新仅更新变动的类别/对象。
+- 清空本地缓存（菜单“工具-重置元数据”）会删除 `objects/columns/meta_snapshot`，强制下一次重新全量拉取。
+
 ### 操作日志降噪
 - 笔记链接同步的成功日志已降级为 DEBUG，不再通过右侧“操作日志”面板输出“更新链接/Update link”等文案；如需排查可改用文件日志（`NoteRepository`）。
 - 仍保留解析/保存失败的提示，且改为“保存笔记关联失败”以便快速定位异常。
