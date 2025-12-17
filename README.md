@@ -87,48 +87,36 @@
 
 ## 前端开发技术文档：元数据获取与列顺序
 
-### 元数据同步（分批 + 差分）
-- **禁止超长 payload 聚合**：旧版通过 `string_agg` 拼接全库对象/字段，单行 payload 可达数 MB，既占带宽又易触发 413/502，现已彻底弃用。
-- **Keyset 分批**：所有清单统一采用 `name > :lastName ORDER BY name LIMIT :batchSize` 游标翻页，`batchSize=900`（小于后端 1000 行可见上限），每条 SQL 自带 `LIMIT`，不依赖 `/jobs/result` 的 `hasNext`。
+### 元数据同步（本地优先 + 分批差分）
+- **本地优先**：对象树、模糊联想与列提示全部只读本地 SQLite，常规操作不触发任何远端调用。
+- **全量同步仅两处**：程序启动后异步拉取一次表/视图/函数/过程名单；工具栏“刷新元数据”会再次按相同逻辑执行，全程不触碰字段。
+- **Keyset 分批**：所有清单统一使用 `name > :lastName ORDER BY name LIMIT 1000`，批量 SQL 自带 `LIMIT 1000`，请求 `pageSize` 固定 1000，不依赖 `/jobs/result` 的 `hasNext`。
 - **清单 SQL 模板**：
-  - 表：`SELECT table_name AS object_name FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE' AND table_name > :lastName ORDER BY table_name LIMIT :batchSize`。
-  - 视图：`SELECT table_name AS object_name FROM information_schema.views WHERE table_schema='leshan' AND table_name > :lastName ORDER BY table_name LIMIT :batchSize`。
-  - 函数：`SELECT p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='f' AND p.proname > :lastName ORDER BY p.proname LIMIT :batchSize`（不支持 `prokind` 时降级为 `proisagg=false`）。
-  - 过程：`SELECT p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='p' AND p.proname > :lastName ORDER BY p.proname LIMIT :batchSize`（`prokind` 缺失则返回空列表）。
-- **列 Manifest**：
-  - SQL：`SELECT table_name AS object_name, md5(string_agg(column_name, ',' ORDER BY ordinal_position)) AS cols_hash, max(ordinal_position) AS col_count FROM information_schema.columns WHERE table_schema='leshan' AND table_name > :lastName GROUP BY table_name ORDER BY table_name LIMIT :batchSize`。
-  - 响应仅含对象名/列哈希/数量，行体积极小，用于差分判定。
-- **列 Detail 按需拉取**：仅对 Manifest 中新增或哈希变化的对象执行 `SELECT column_name, ordinal_position FROM information_schema.columns WHERE table_schema='leshan' AND table_name=:objectName ORDER BY ordinal_position`，单表级请求避免全库大包。
-- **SQLite 快照表**：新增 `columns_snapshot(object_name PRIMARY KEY, cols_hash, updated_at)` 持久化 Manifest 哈希；哈希一致则跳过 Detail，哈希变更时重建 `columns` 记录并刷新快照；Manifest 不包含的对象会删除本地列与快照，保持一致性。
-- **启动全量同步**：主界面加载后后台线程自动执行：
-  1) 按类型 keyset 分批写入表/视图/函数/过程清单；
-  2) keyset 拉取 columns Manifest，逐表差分拉取 Detail；
-  3) 元数据请求统一使用 `pageSize=1000` + SQL `LIMIT 900` 双重防护，确保任意响应明显小于 1MB。
-- **常见排查**：
-  - 出现响应截断写文件时，检查是否误删了 `LIMIT` 或再次引入聚合 payload；
-  - Manifest 哈希频繁变化通常意味着远端列顺序调整或新增字段，可通过 `columns_snapshot.updated_at` 对照时间；
-  - 单个对象 Detail 失败不会影响全库，可单独重试或清空本地缓存后重同步。
+  - 表：`SELECT table_name AS object_name FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE' AND table_name > :lastName ORDER BY table_name LIMIT 1000`。
+  - 视图：`SELECT table_name AS object_name FROM information_schema.views WHERE table_schema='leshan' AND table_name > :lastName ORDER BY table_name LIMIT 1000`。
+  - 函数：`SELECT p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='f' AND p.proname > :lastName ORDER BY p.proname LIMIT 1000`（缺少 `prokind` 时降级到 `proisagg=false`）。
+  - 过程：`SELECT p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='p' AND p.proname > :lastName ORDER BY p.proname LIMIT 1000`（`prokind` 不可用时返回空列表以避免大包）。
+- **差分写库**：全量同步只对新增/删除对象做 INSERT/DELETE，移除的表/视图会顺带清理对应列缓存，避免全表重建带来的抖动。
 
-### 元数据获取方式
-- 统一通过 POST 提交 SQL 方式获取，复用 `AsyncSqlConfig` 的 BASE_URL、`X-Request-Token` Header 与忽略证书的 HttpClient 封装。
-- 使用 `SqlExecutionService.executeSyncAllPagesWithDbUser(sql,"leshan",1000)` 执行信息_schema 查询，SQL 内部自带 `LIMIT 900` 的 keyset 分批，后台请求 `pageSize` 亦强制 1000 双保险。
-- 默认 schema/dbUser 均固定为 `leshan`，不再从远端枚举 schema，树形结构的根 schema 亦固定。
+### 批次拉取与分页限制
+- 后端 `/jobs/result` 单页可见行数上限 1000，不再依赖 `hasNext`，每批 SQL 自行限制 1000 行并通过 `name > lastName` 循环。
+- 请求头、Token 与 HTTPS POST 仍复用异步执行链路，但默认只在启动/手动刷新/DDL 后的局部校验中触发。
 
-### 拉取的元数据 SQL（清单层）
-- 表（BASE TABLE）：`information_schema.tables` 按 `table_name` 排序的 keyset 分批。
-- 视图：`information_schema.views` 按名称 keyset 分批。
-- 函数/存储过程：`pg_proc` + `pg_namespace` 过滤 `prokind=f/p`（或降级），按名称 keyset 分批。
-- 字段 Manifest：按上文哈希 SQL 拉取，不包含列名列表，只返回对象名+哈希+数量。
+### 字段按需与联想
+- 列信息仅在需要时抓取：联想命中某表、或用户显式触发“刷新列”时，才对单表执行 `SELECT column_name, ordinal_position ... ORDER BY ordinal_position` 并落库为 `sort_no`。
+- ALTER TABLE 成功后会强制刷新该表列缓存，其它 DDL 不会触碰字段；CREATE TABLE/VIEW 会新增对象记录但列仍按需加载。
+- 列缓存缺失时自动触发单表请求，返回后按 `ordinal_position` 排序，联想/结果渲染直接复用本地顺序。
 
-### 列详情与顺序保证
-- 仅在 Manifest 指示新增/变动时才执行单表 Detail 查询，`ordinal_position` 直接落库为 `sort_no`，保证 UI 列顺序稳定。
-- 优先使用服务端返回的列名数组：依次读取 `columns`、`resultColumns`、`columnNames`，按后端给出的顺序直接渲染。
-- 未返回列名数组、且 `resultRows` 为对象时的保守重排：
-  - 识别 `select * from <table>`（单表、无 join/where/order/limit/union/with 等关键字），按本地缓存的 `columns.sort_no` 顺序重建列清单并重排 JsonObject 值；表名含 schema 时仅取对象名部分。
-  - 识别显式列列表：截取 `select` 与第一个 `from` 之间的片段，以括号深度为 0 的逗号切分，跳过包含函数/表达式/子查询/算术符号的复杂 token。优先使用 `AS` 或尾部别名，其次 `t.col` → `col`，再按用户列序从 JsonObject 取值；缺失字段填空字符串。
-  - 任意一步命中复杂结构或缓存缺失时立即回退，不做重排，保持服务端顺序。
-- `resultRows` 为数组时不调整原始顺序，仅在存在列名数组/缓存时提供列头，兼容旧格式。
-- 本地列缓存来源于单表 Detail 的 `ordinal_position`，默认 schema `leshan`，缓存缺失不会抛异常，只回退到后端顺序。
+### DDL 变更的局部刷新
+- 执行成功后的 SQL 会做轻量正则解析：识别 CREATE/DROP/ALTER + TABLE/VIEW/FUNCTION/PROCEDURE，并提取 `schema.object` 或裸对象名（默认 schema=`leshan`）。
+- CREATE/ALTER：只针对命中的对象向远端校验存在性并写入/更新本地对象表；ALTER TABLE 额外刷新该表列缓存。
+- DROP：立即删除本地对象与列缓存，不触发全量同步，避免无关对象被误删。
+- 未能解析出对象名时不做远端请求，保持“按需才上网”的原则。
+
+### 结果栏显示修复
+- 结果面板在重用 pending 面板时未必会重新应用渲染器，部分环境下 JTable 不会自动刷新背景与结构，易出现“已完成但表格空白”的错觉。
+- 现在每次渲染/报错都会重新绑定条纹渲染器、调用 `revalidate/repaint` 并重算列宽，确保列头/行数据即时出现在结果栏。
+- 结果计数、状态与 message 仍与后端字段同步；如仍为空白，可通过操作日志确认后端是否返回 `returnedRowCount`/`resultRows`。
 
 ## SQL 子窗口布局说明
 - 每个编辑 Tab 固定使用上下分割的 `JSplitPane`：上侧为编辑器工具条+正文，下侧为结果集/消息导航区，不再存在“编辑/结果”切换标签。
@@ -152,14 +140,11 @@
 - 元数据刷新、SQL submit/status/result/cancel/list 均复用此日志通道，便于排障。
 
 ### 元数据分页同步与差分策略
-- 固定 schema/dbUser 均为 `leshan`，避免因 Tab 选择的 dbUser 导致元数据不一致。
-- **Keyset 分批**：所有清单查询都使用 `name > lastName ORDER BY name LIMIT 900` 的游标翻页，且请求 `pageSize` 固定 1000，避免单次响应体过大或被后端 1000 行窗口截断。
-- **差分策略**：
-  - 对象层（表/视图/函数/过程）仍按名称清单与本地 `objects` 做增量插入/删除，保留 `meta_snapshot` 哈希。
-  - 字段层使用 Manifest 哈希对比 `columns_snapshot`，仅对新增或哈希变化的对象发起单表 Detail 请求并重建列；远端不存在的对象会清理列与快照。
-- **字段顺序保证**：Detail 查询固定按 `ordinal_position` 排序并落库为 `sort_no`，UI 按此顺序展示；未命中列缓存时回退到后端顺序。
-- **启动/刷新流程**：启动后自动执行全量 keyset 同步；手动刷新亦遵循 Manifest/Detail 双阶段，不再依赖超长 payload 或 offset 分页。
-- **可追溯调试**：每批请求的 SQL 与返回前 200 行会写入 `%USERPROFILE%\\.Sql_client_v3\\logs\\metadata-*.log`；UI 仅提示日志文件路径而不会输出整包响应，避免日志撑爆界面。
+- 固定 schema/dbUser 均为 `leshan`，对象树不再依赖用户选择的 dbUser，避免串台。
+- **Keyset 分批 1000 行**：对象清单按 `name > lastName ORDER BY name LIMIT 1000` 循环，避免 offset/hasNext 带来的截断问题。
+- **差分策略**：仅增量插入/删除对象记录，删除表/视图时同步清理列缓存；字段始终按需拉取，不再全库级扫描。
+- **字段顺序保证**：单表列请求固定按 `ordinal_position` 排序并落库为 `sort_no`，UI 直接按该顺序展示，缺失缓存时回退到后端顺序。
+- **可追溯调试**：每批请求的 SQL 与返回前 200 行会写入 `%USERPROFILE%\.Sql_client_v3\logs\metadata-*.log`，OperationLog 仅输出批次计数和耗时。
 
 ### 启动全量同步
 - 主窗口完成初始化后即触发异步元数据刷新，`meta_snapshot` 为空时执行全量同步；后续刷新仅更新变动的类别/对象。

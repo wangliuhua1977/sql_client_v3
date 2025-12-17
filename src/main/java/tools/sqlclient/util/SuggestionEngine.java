@@ -33,8 +33,6 @@ public class SuggestionEngine {
     private int replaceEnd = -1;
     private boolean showTableHintForColumns = true;
     private SuggestionContext lastContext;
-    private volatile boolean objectsRefreshInFlight = false;
-    private long lastObjectsRefreshAt = 0L;
     private volatile boolean enabled = true;
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
@@ -242,8 +240,14 @@ public class SuggestionEngine {
                     () -> SwingUtilities.invokeLater(() -> showSuggestions(token, context, true)));
         }
         currentItems = metadataService.suggest(token, context, 15);
-        if (currentItems.isEmpty() && !skipFetch && context.type() == SuggestionType.TABLE_OR_VIEW) {
-            triggerObjectRefresh(token, context);
+        if (currentItems.isEmpty()) {
+            if (context.type() == SuggestionType.TABLE_OR_VIEW) {
+                list.setListData(new SuggestionItem[]{new SuggestionItem("无本地匹配，使用工具菜单刷新元数据", "hint", null, 0)});
+                list.setSelectedIndex(0);
+                showPopup();
+            } else {
+                popup.setVisible(false);
+            }
             return;
         }
         if (context.type() == SuggestionType.COLUMN && context.tableHint() != null && !currentItems.isEmpty()) {
@@ -284,7 +288,7 @@ public class SuggestionEngine {
 
     private void commitSelection() {
         SuggestionItem item = list.getSelectedValue();
-        if (item == null || "loading".equals(item.type())) return;
+        if (item == null || "loading".equals(item.type()) || "hint".equals(item.type())) return;
         if ("all_columns".equals(item.type())) {
             if (lastContext == null || lastContext.tableHint() == null) {
                 popup.setVisible(false);
@@ -312,25 +316,6 @@ public class SuggestionEngine {
         }
         metadataService.recordUsage(item);
         popup.setVisible(false);
-    }
-
-    private void triggerObjectRefresh(String token, SuggestionContext context) {
-        long now = System.currentTimeMillis();
-        if (objectsRefreshInFlight || now - lastObjectsRefreshAt < 2000L) {
-            list.setListData(new SuggestionItem[]{new SuggestionItem("加载中...", "loading", null, 0)});
-            list.setSelectedIndex(0);
-            showPopup();
-            return;
-        }
-        objectsRefreshInFlight = true;
-        lastObjectsRefreshAt = now;
-        list.setListData(new SuggestionItem[]{new SuggestionItem("加载中...", "loading", null, 0)});
-        list.setSelectedIndex(0);
-        showPopup();
-        metadataService.refreshMetadataAsync(() -> SwingUtilities.invokeLater(() -> {
-            objectsRefreshInFlight = false;
-            showSuggestions(token, context, true);
-        }));
     }
 
     private void insertText(String text) {
