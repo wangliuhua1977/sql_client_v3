@@ -13,18 +13,25 @@ import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
 
 import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -41,12 +48,18 @@ public class SqlExecutionService {
     private final Gson gson = new Gson();
     private SQLiteManager metadataReader;
 
+    private static final int MAX_LOG_TEXT_LENGTH = 200_000;
+
     /**
      * 同步执行一条 SQL：提交后台任务，轮询至结束并返回结果集。
      * 仍然复用异步接口的加密与 Header 逻辑。
      */
     public SqlExecResult executeSync(String sql) {
         return executeSync(sql, DEFAULT_MAX_RESULT_ROWS);
+    }
+
+    public SqlExecResult executeSyncWithDbUser(String sql, String dbUser) {
+        return executeSync(sql, DEFAULT_MAX_RESULT_ROWS, false, dbUser);
     }
 
     public SqlExecResult executeSyncWithoutLimit(String sql) {
@@ -57,12 +70,20 @@ public class SqlExecutionService {
         return executeSync(sql, null, true);
     }
 
+    public SqlExecResult executeSyncAllPagesWithDbUser(String sql, String dbUser) {
+        return executeSync(sql, null, true, dbUser);
+    }
+
     public SqlExecResult executeSync(String sql, Integer maxResultRows) {
         return executeSync(sql, maxResultRows, false);
     }
 
     private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages) {
-        AsyncJobStatus submitted = submitJob(sql, maxResultRows, null, null);
+        return executeSync(sql, maxResultRows, fetchAllPages, null);
+    }
+
+    private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages, String dbUser) {
+        AsyncJobStatus submitted = submitJob(sql, maxResultRows, dbUser, null);
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
             if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
@@ -318,6 +339,9 @@ public class SqlExecutionService {
         JsonArray rowsJson = resp.has("resultRows") && resp.get("resultRows").isJsonArray()
                 ? resp.getAsJsonArray("resultRows") : new JsonArray();
         List<String> columns = extractColumns(resp, rowsJson, sql);
+        if (columns.isEmpty()) {
+            columns = deriveColumnsFromRows(rowsJson);
+        }
         List<List<String>> rows = extractRows(rowsJson, columns);
         int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
         OperationLog.log("[" + jobId + "] 任务完成，page=" + respPage + " pageSize=" + respPageSize
@@ -395,6 +419,31 @@ public class SqlExecutionService {
             for (int i = 0; i < arr.size(); i++) {
                 columns.add("col_" + (i + 1));
             }
+        }
+        return columns;
+    }
+
+    private List<String> deriveColumnsFromRows(JsonArray rowsJson) {
+        if (rowsJson == null || rowsJson.size() == 0) {
+            return new ArrayList<>();
+        }
+        JsonElement first = rowsJson.get(0);
+        if (first != null && first.isJsonObject()) {
+            List<String> keys = new ArrayList<>();
+            for (Map.Entry<String, JsonElement> entry : first.getAsJsonObject().entrySet()) {
+                keys.add(entry.getKey());
+            }
+            return keys;
+        }
+        int max = 0;
+        for (JsonElement el : rowsJson) {
+            if (el != null && el.isJsonArray()) {
+                max = Math.max(max, el.getAsJsonArray().size());
+            }
+        }
+        List<String> columns = new ArrayList<>();
+        for (int i = 0; i < max; i++) {
+            columns.add("col" + (i + 1));
         }
         return columns;
     }
@@ -680,15 +729,20 @@ public class SqlExecutionService {
 
     private JsonObject postJson(String path, JsonObject payload) {
         try {
+            String jsonBody = gson.toJson(payload);
             HttpRequest request = HttpRequest.newBuilder(AsyncSqlConfig.buildUri(path))
                     .header("Content-Type", "application/json;charset=UTF-8")
                     .header("X-Request-Token", AsyncSqlConfig.REQUEST_TOKEN)
                     .timeout(Duration.ofSeconds(30))
-                    .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(payload)))
+                    .POST(HttpRequest.BodyPublishers.ofString(jsonBody, StandardCharsets.UTF_8))
                     .build();
 
-            HttpResponse<String> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            logHttpRequest(request, jsonBody);
+
+            HttpResponse<String> resp = httpClient.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
             int sc = resp.statusCode();
+
+            logHttpResponse(request.uri().toString(), sc, resp.headers(), resp.body());
 
             // 任何 2xx 都视为成功（包括 202 Accepted）
             if (sc / 100 != 2) {
@@ -699,6 +753,63 @@ public class SqlExecutionService {
             return gson.fromJson(resp.body(), JsonObject.class);
         } catch (Exception e) {
             throw new RuntimeException("请求失败: " + e.getMessage(), e);
+        }
+    }
+
+    private void logHttpRequest(HttpRequest request, String body) {
+        if (!OperationLog.isReady()) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("--- HTTP REQUEST BEGIN ---\n");
+        sb.append(request.method()).append(' ').append(request.uri()).append('\n');
+        sb.append("Headers:\n");
+        request.headers().map().forEach((k, v) -> sb.append("  ").append(k).append(": ")
+                .append(String.join(",", v)).append('\n'));
+        sb.append("Body:\n");
+        sb.append(body == null ? "<empty>" : body).append('\n');
+        sb.append("--- HTTP REQUEST END ---");
+        OperationLog.log(sb.toString());
+    }
+
+    private void logHttpResponse(String url, int status, HttpHeaders headers, String body) {
+        if (!OperationLog.isReady()) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("--- HTTP RESPONSE BEGIN ---\n");
+        sb.append("URL: ").append(url).append('\n');
+        sb.append("Status: ").append(status).append('\n');
+        sb.append("Headers:\n");
+        headers.map().forEach((k, v) -> sb.append("  ").append(k).append(": ")
+                .append(String.join(",", v)).append('\n'));
+        sb.append("Body:\n");
+
+        String fullBody = body == null ? "" : body;
+        if (fullBody.length() > MAX_LOG_TEXT_LENGTH) {
+            Path path = writeHttpLogToFile(fullBody);
+            String truncated = fullBody.substring(0, MAX_LOG_TEXT_LENGTH);
+            sb.append(truncated);
+            sb.append("\n<响应体超长，已写入: ").append(path.toAbsolutePath()).append('>');
+        } else {
+            sb.append(fullBody);
+        }
+        sb.append('\n').append("--- HTTP RESPONSE END ---");
+        OperationLog.log(sb.toString());
+    }
+
+    private Path writeHttpLogToFile(String content) {
+        try {
+            String home = System.getProperty("user.home", "");
+            Path dir = Path.of(home, ".Sql_client_v3", "logs");
+            Files.createDirectories(dir);
+            Path file = dir.resolve("http-" + LocalDate.now().toString().replaceAll("-", "") + ".log");
+            Files.writeString(file, content + System.lineSeparator(), StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            return file;
+        } catch (Exception e) {
+            OperationLog.log("写入 HTTP 日志文件失败: " + e.getMessage());
+            return Path.of("http.log");
         }
     }
 
