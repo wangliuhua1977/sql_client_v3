@@ -405,7 +405,7 @@ public class SqlExecutionService {
 
     private List<String> tryResolveStarColumns(String sql) {
         String compact = sql.replaceAll("\\s+", " ").trim();
-        Pattern pattern = Pattern.compile("^select \\\* from ([A-Za-z0-9_\\.]+)\\s*;?$", Pattern.CASE_INSENSITIVE);
+        Pattern pattern = Pattern.compile("^select \\\\* from ([A-Za-z0-9_\\.]+)\\s*;?$", Pattern.CASE_INSENSITIVE);
         Matcher matcher = pattern.matcher(compact);
         if (!matcher.matches()) {
             return null;
