@@ -8,7 +8,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.function.Consumer;
 
 /**
@@ -57,14 +56,14 @@ public class ColumnOrderDecider {
         if (projection.simpleSelectStar() && !metadataColumns.isEmpty()) {
             return new ArrayList<>(metadataColumns);
         }
-        if (!projection.columns().isEmpty()) {
-            return new ArrayList<>(projection.columns());
-        }
         if (!originalColumns.isEmpty()) {
             return new ArrayList<>(originalColumns);
         }
         if (!metadataColumns.isEmpty()) {
             return new ArrayList<>(metadataColumns);
+        }
+        if (!projection.columns().isEmpty()) {
+            return new ArrayList<>(projection.columns());
         }
         if (!rows.isEmpty()) {
             int max = rows.stream().mapToInt(List::size).max().orElse(0);
@@ -126,13 +125,9 @@ public class ColumnOrderDecider {
         if (columns == null) {
             return new ArrayList<>();
         }
-        Set<String> seen = new java.util.LinkedHashSet<>();
-        List<String> result = new ArrayList<>();
+        List<String> result = new ArrayList<>(columns.size());
         for (String col : columns) {
-            String val = Objects.requireNonNullElse(col, "");
-            if (seen.add(val)) {
-                result.add(val);
-            }
+            result.add(Objects.requireNonNullElse(col, ""));
         }
         return result;
     }
