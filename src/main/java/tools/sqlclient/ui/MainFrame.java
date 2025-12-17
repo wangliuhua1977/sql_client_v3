@@ -825,6 +825,14 @@ public class MainFrame extends JFrame {
         editorSettings.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_COMMA, InputEvent.CTRL_DOWN_MASK));
         preferences.add(editorSettings);
 
+        tools.add(new JMenuItem(new AbstractAction("刷新元数据") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                OperationLog.log("用户手动刷新元数据");
+                metadataService.refreshMetadataAsync(MainFrame.this::handleMetadataRefreshResult);
+            }
+        }));
+
         tools.add(new JMenuItem(new AbstractAction("重置元数据") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -1717,6 +1725,7 @@ public class MainFrame extends JFrame {
     private void renderResult(long noteId, EditorTabPanel panel, SqlExecResult result, QueryResultPanel existingPanel) {
         QueryResultPanel target = existingPanel != null ? existingPanel : new QueryResultPanel(result, result.getSql());
         target.render(result);
+        metadataService.handleSqlSucceeded(result.getSql());
         if (existingPanel == null) {
             int idx = nextResultIndex(noteId);
             String tabTitle = windowMode ? "结果" + idx : panel.getNote().getTitle() + "-结果" + idx;

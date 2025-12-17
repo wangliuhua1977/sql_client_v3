@@ -23,6 +23,19 @@ public class QueryResultPanel extends JPanel {
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final DefaultTableModel model = new DefaultTableModel();
     private final JTable table = new JTable(model);
+    private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
+        private final Color even = new Color(250, 252, 255);
+        private final Color odd = Color.WHITE;
+
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+            if (!isSelected) {
+                c.setBackground(row % 2 == 0 ? even : odd);
+            }
+            return c;
+        }
+    };
 
     public QueryResultPanel(SqlExecResult result, String titleHint) {
         super(new BorderLayout());
@@ -58,23 +71,6 @@ public class QueryResultPanel extends JPanel {
         table.getTableHeader().setBackground(headerBg);
         table.getTableHeader().setOpaque(true);
         table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(180, 186, 198)));
-
-        DefaultTableCellRenderer renderer = new DefaultTableCellRenderer() {
-            private final Color even = new Color(250, 252, 255);
-            private final Color odd = Color.WHITE;
-
-            @Override
-            public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-                Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-                if (!isSelected) {
-                    c.setBackground(row % 2 == 0 ? even : odd);
-                }
-                return c;
-            }
-        };
-        for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
-            table.getColumnModel().getColumn(i).setCellRenderer(renderer);
-        }
 
         JScrollPane scrollPane = new JScrollPane(table);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
@@ -127,6 +123,9 @@ public class QueryResultPanel extends JPanel {
                 model.addRow(row.toArray());
             }
         }
+        applyStripedRenderer();
+        table.revalidate();
+        table.repaint();
         resizeColumns();
     }
 
@@ -154,7 +153,16 @@ public class QueryResultPanel extends JPanel {
         model.addRow(new Object[]{message});
         messageLabel.setText(message);
         setJobStatus(null, "FAILED", 100, null);
+        applyStripedRenderer();
+        table.revalidate();
+        table.repaint();
         resizeColumns();
+    }
+
+    private void applyStripedRenderer() {
+        for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
+            table.getColumnModel().getColumn(i).setCellRenderer(stripedRenderer);
+        }
     }
 
     private void setJobStatus(String jobId, String status, Integer progressPercent, Long elapsedMillis) {
