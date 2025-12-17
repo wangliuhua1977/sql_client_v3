@@ -20,6 +20,9 @@ public class SqlExecResult {
     private final Long durationMillis;
     private final Integer rowsAffected;
     private final Integer returnedRowCount;
+    private final Integer actualRowCount;
+    private final Integer maxVisibleRows;
+    private final Integer maxTotalRows;
     private final Boolean hasResultSet;
     private final Integer page;
     private final Integer pageSize;
@@ -29,7 +32,7 @@ public class SqlExecResult {
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
         this(sql, columns, rows, rowsCount, true, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null);
+                null, null, null, null, null, null, null, null);
     }
 
     public SqlExecResult(String sql,
@@ -45,6 +48,9 @@ public class SqlExecResult {
                          Long durationMillis,
                          Integer rowsAffected,
                          Integer returnedRowCount,
+                         Integer actualRowCount,
+                         Integer maxVisibleRows,
+                         Integer maxTotalRows,
                          Boolean hasResultSet,
                          Integer page,
                          Integer pageSize,
@@ -64,6 +70,9 @@ public class SqlExecResult {
         this.durationMillis = durationMillis;
         this.rowsAffected = rowsAffected;
         this.returnedRowCount = returnedRowCount;
+        this.actualRowCount = actualRowCount;
+        this.maxVisibleRows = maxVisibleRows;
+        this.maxTotalRows = maxTotalRows;
         this.hasResultSet = hasResultSet;
         this.page = page;
         this.pageSize = pageSize;
@@ -122,6 +131,18 @@ public class SqlExecResult {
 
     public Integer getReturnedRowCount() {
         return returnedRowCount;
+    }
+
+    public Integer getActualRowCount() {
+        return actualRowCount;
+    }
+
+    public Integer getMaxVisibleRows() {
+        return maxVisibleRows;
+    }
+
+    public Integer getMaxTotalRows() {
+        return maxTotalRows;
     }
 
     public Boolean getHasResultSet() {

@@ -1667,6 +1667,9 @@ public class MainFrame extends JFrame {
         runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
         List<RunningJobHandle> execList = runningExecutions.get(noteId);
 
+        String dbUser = panel.getSelectedDbUser();
+        int pageSize = panel.getPreferredPageSize();
+
         // 串行执行每一条 SQL
         java.util.concurrent.CompletableFuture<Void> chain =
                 java.util.concurrent.CompletableFuture.completedFuture(null);
@@ -1681,6 +1684,8 @@ public class MainFrame extends JFrame {
 
                 CompletableFuture<Void> future = sqlExecutionService.execute(
                         sqlStmt,
+                        dbUser,
+                        pageSize,
                         res -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res, pendingPanel)),
                         ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage(), pendingPanel)),
                         status -> SwingUtilities.invokeLater(() -> handleStatusUpdate(handle, status, panel))

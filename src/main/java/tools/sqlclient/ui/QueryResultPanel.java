@@ -88,7 +88,7 @@ public class QueryResultPanel extends JPanel {
         List<String> cols = List.of("消息");
         List<List<String>> rows = List.of(List.of("任务已提交，等待执行..."));
         SqlExecResult res = new SqlExecResult(sqlText, cols, rows, rows.size(), false,
-                "任务已提交", null, "QUEUED", 0, null, null, null, null, true,
+                "任务已提交", null, "QUEUED", 0, null, null, null, null, null, null, null, true,
                 null, null, null, null, null);
         return new QueryResultPanel(res, sqlText);
     }
@@ -109,8 +109,11 @@ public class QueryResultPanel extends JPanel {
         }
         setJobStatus(result.getJobId(), result.getStatus(), result.getProgressPercent(),
                 result.getElapsedMillis() != null ? result.getElapsedMillis() : result.getDurationMillis());
-        if (result.getMessage() != null) {
-            messageLabel.setText(result.getMessage());
+        String msg = result.getMessage();
+        if (msg != null && !msg.isBlank()) {
+            messageLabel.setText(msg);
+        } else if (result.getNote() != null && !result.getNote().isBlank()) {
+            messageLabel.setText(result.getNote());
         }
         countLabel.setText("记录数 " + result.getRowsCount() + " 条");
 

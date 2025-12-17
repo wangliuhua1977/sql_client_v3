@@ -33,8 +33,8 @@ import java.util.regex.Pattern;
  */
 public class SqlExecutionService {
     private static final int DEFAULT_MAX_RESULT_ROWS = 0; // 分页模式下不再按总行数截断
-    private static final int DEFAULT_PAGE_SIZE = 2000;
-    private static final int MAX_PAGE_SIZE = 5000;
+    private static final int DEFAULT_PAGE_SIZE = 200;
+    private static final int MAX_PAGE_SIZE = Math.max(1, Config.getMaxPageSize());
     private static final int MAX_ACCUMULATED_PAGES = 20;
     private static final int MAX_ACCUMULATED_ROWS = 100_000;
     private final HttpClient httpClient = TrustAllHttpClient.create();
@@ -62,7 +62,7 @@ public class SqlExecutionService {
     }
 
     private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages) {
-        AsyncJobStatus submitted = submitJob(sql, maxResultRows);
+        AsyncJobStatus submitted = submitJob(sql, maxResultRows, null, null);
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
             if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
@@ -70,7 +70,7 @@ public class SqlExecutionService {
                         ? finalStatus.getMessage()
                         : ("任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus()));
             }
-            return requestResultPaged(submitted.getJobId(), sql, fetchAllPages);
+            return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, null);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
@@ -80,10 +80,19 @@ public class SqlExecutionService {
     public CompletableFuture<Void> execute(String sql,
                                            Consumer<SqlExecResult> onSuccess,
                                            Consumer<Exception> onError) {
-        return execute(sql, onSuccess, onError, null);
+        return execute(sql, null, null, onSuccess, onError, null);
     }
 
     public CompletableFuture<Void> execute(String sql,
+                                           Consumer<SqlExecResult> onSuccess,
+                                           Consumer<Exception> onError,
+                                           Consumer<AsyncJobStatus> onStatus) {
+        return execute(sql, null, null, onSuccess, onError, onStatus);
+    }
+
+    public CompletableFuture<Void> execute(String sql,
+                                           String dbUser,
+                                           Integer pageSize,
                                            Consumer<SqlExecResult> onSuccess,
                                            Consumer<Exception> onError,
                                            Consumer<AsyncJobStatus> onStatus) {
@@ -94,14 +103,14 @@ public class SqlExecutionService {
 
         OperationLog.log("即将提交异步 SQL:\n" + abbreviate(trimmed));
 
-        return CompletableFuture.supplyAsync(() -> submitJob(trimmed), ThreadPools.NETWORK_POOL)
+        return CompletableFuture.supplyAsync(() -> submitJob(trimmed, DEFAULT_MAX_RESULT_ROWS, dbUser, null), ThreadPools.NETWORK_POOL)
                 .thenCompose(submit -> {
                     notifyStatus(onStatus, submit);
                     return pollJobUntilDone(submit.getJobId(), onStatus);
                 })
                 .thenCompose(status -> {
                     if ("SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
-                        return CompletableFuture.supplyAsync(() -> requestResultPaged(status.getJobId(), trimmed, false), ThreadPools.NETWORK_POOL)
+                        return CompletableFuture.supplyAsync(() -> requestResultPaged(status.getJobId(), trimmed, false, pageSize), ThreadPools.NETWORK_POOL)
                                 .thenAccept(res -> {
                                     notifyStatus(onStatus, status);
                                     if (onSuccess != null) {
@@ -135,17 +144,25 @@ public class SqlExecutionService {
     }
 
     private AsyncJobStatus submitJob(String sql) {
-        return submitJob(sql, DEFAULT_MAX_RESULT_ROWS);
+        return submitJob(sql, DEFAULT_MAX_RESULT_ROWS, null, null);
     }
 
-    private AsyncJobStatus submitJob(String sql, Integer maxResultRows) {
+    private AsyncJobStatus submitJob(String sql, Integer maxResultRows, String dbUser, String label) {
         JsonObject body = new JsonObject();
         body.addProperty("encryptedSql", AesEncryptor.encryptSqlToBase64(sql));
         if (maxResultRows != null && maxResultRows > 0) {
             body.addProperty("maxResultRows", maxResultRows);
         }
+        if (dbUser != null && !dbUser.isBlank()) {
+            body.addProperty("dbUser", dbUser);
+        }
+        if (label != null && !label.isBlank()) {
+            body.addProperty("label", label);
+        }
 
-        OperationLog.log("提交 /jobs/submit ...");
+        OperationLog.log("提交 /jobs/submit ... dbUser=" + (dbUser == null ? "<default>" : dbUser)
+                + (maxResultRows != null && maxResultRows > 0 ? (" maxResultRows=" + maxResultRows) : "")
+                + (label != null && !label.isBlank() ? (" label=" + label) : ""));
         JsonObject resp = postJson("/jobs/submit", body);
 
         AsyncJobStatus status = parseStatus(resp);
@@ -187,8 +204,8 @@ public class SqlExecutionService {
         return status;
     }
 
-    public SqlExecResult requestResultPaged(String jobId, String sql, boolean fetchAllPages) {
-        int pageSize = resolvePageSize();
+    public SqlExecResult requestResultPaged(String jobId, String sql, boolean fetchAllPages, Integer pageSizeOverride) {
+        int pageSize = resolvePageSize(pageSizeOverride);
         int currentPage = 1;
         boolean keepForPaging = Config.allowPagingAfterFirstFetch();
         boolean removeAfterFetch = fetchAllPages ? false : !keepForPaging;
@@ -242,16 +259,18 @@ public class SqlExecutionService {
 
         return new SqlExecResult(sql, firstPage.getColumns(), allRows, allRows.size(), true, firstPage.getMessage(), jobId,
                 firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
-                firstPage.getRowsAffected(), allRows.size(), firstPage.getHasResultSet(), currentPage, pageSize, hasNext,
+                firstPage.getRowsAffected(), firstPage.getReturnedRowCount(), firstPage.getActualRowCount(), firstPage.getMaxVisibleRows(),
+                firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), currentPage, pageSize, hasNext,
                 truncated, note);
     }
 
     private SqlExecResult requestResultPage(String jobId, String sql, int page, int pageSize, boolean removeAfterFetch) {
+        int finalPageSize = Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE);
         JsonObject body = new JsonObject();
         body.addProperty("jobId", jobId);
         body.addProperty("removeAfterFetch", removeAfterFetch);
         body.addProperty("page", page);
-        body.addProperty("pageSize", Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE));
+        body.addProperty("pageSize", finalPageSize);
         JsonObject resp = postJson("/jobs/result", body);
         boolean success = resp.has("success") && resp.get("success").getAsBoolean();
         String status = resp.has("status") && !resp.get("status").isJsonNull() ? resp.get("status").getAsString() : "";
@@ -263,6 +282,12 @@ public class SqlExecutionService {
                 ? resp.get("rowsAffected").getAsInt() : null;
         Integer returnedRowCount = resp.has("returnedRowCount") && !resp.get("returnedRowCount").isJsonNull()
                 ? resp.get("returnedRowCount").getAsInt() : null;
+        Integer actualRowCount = resp.has("actualRowCount") && !resp.get("actualRowCount").isJsonNull()
+                ? resp.get("actualRowCount").getAsInt() : null;
+        Integer maxVisibleRows = resp.has("maxVisibleRows") && !resp.get("maxVisibleRows").isJsonNull()
+                ? resp.get("maxVisibleRows").getAsInt() : null;
+        Integer maxTotalRows = resp.has("maxTotalRows") && !resp.get("maxTotalRows").isJsonNull()
+                ? resp.get("maxTotalRows").getAsInt() : null;
         Boolean hasResultSet = resp.has("hasResultSet") && !resp.get("hasResultSet").isJsonNull()
                 ? resp.get("hasResultSet").getAsBoolean() : null;
         Boolean hasNext = resp.has("hasNext") && !resp.get("hasNext").isJsonNull()
@@ -287,7 +312,7 @@ public class SqlExecutionService {
             String info = rowsAffected != null ? ("影响行数: " + rowsAffected) : (message != null ? message : "执行成功");
             rows.add(List.of(info));
             return new SqlExecResult(sql, columns, rows, rows.size(), true, message, jobId, status, progress,
-                    null, duration, rowsAffected, returnedRowCount, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
+                    null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
         }
 
         JsonArray rowsJson = resp.has("resultRows") && resp.get("resultRows").isJsonArray()
@@ -295,8 +320,13 @@ public class SqlExecutionService {
         List<String> columns = extractColumns(resp, rowsJson, sql);
         List<List<String>> rows = extractRows(rowsJson, columns);
         int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
-        OperationLog.log("[" + jobId + "] 任务完成，page " + respPage + "/size " + respPageSize
-                + "，本页行数 " + rowCount + (hasNext ? "，还有下一页" : ""));
+        OperationLog.log("[" + jobId + "] 任务完成，page=" + respPage + " pageSize=" + respPageSize
+                + "，returnedRowCount=" + (returnedRowCount != null ? returnedRowCount : rowCount)
+                + (actualRowCount != null ? ("，actualRowCount=" + actualRowCount) : "")
+                + (maxVisibleRows != null ? ("，maxVisibleRows=" + maxVisibleRows) : "")
+                + (maxTotalRows != null ? ("，maxTotalRows=" + maxTotalRows) : "")
+                + (hasNext ? "，hasNext=true" : "")
+                + (truncated != null && truncated ? "，truncated=true" : ""));
         if (Boolean.TRUE.equals(truncated)) {
             OperationLog.log("[" + jobId + "] 后端返回结果被截断（truncated=true）");
         }
@@ -304,7 +334,7 @@ public class SqlExecutionService {
             OperationLog.log("[" + jobId + "] note: " + note);
         }
         return new SqlExecResult(sql, columns, rows, rowCount, true, message, jobId, status, progress,
-                null, duration, rowsAffected, returnedRowCount, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
+                null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
     }
 
     private void cleanupResult(String jobId, int page, int pageSize) {
@@ -321,9 +351,18 @@ public class SqlExecutionService {
         }
     }
 
-    private int resolvePageSize() {
-        int configured = Config.getResultPageSizeOrDefault(DEFAULT_PAGE_SIZE);
-        return Math.min(Math.max(configured, 1), MAX_PAGE_SIZE);
+    private int resolvePageSize(Integer desired) {
+        int fallback = Config.getResultPageSizeOrDefault(DEFAULT_PAGE_SIZE);
+        int target = desired == null ? fallback : desired;
+        if (target < 1) {
+            OperationLog.log("pageSize=" + target + " 无效，使用默认值 " + fallback);
+            target = fallback;
+        }
+        if (target > MAX_PAGE_SIZE) {
+            OperationLog.log("pageSize=" + target + " 超出上限，已裁剪到 " + MAX_PAGE_SIZE);
+            target = MAX_PAGE_SIZE;
+        }
+        return target;
     }
 
     private List<String> extractColumns(JsonObject resp, JsonArray rowsJson, String sql) {
