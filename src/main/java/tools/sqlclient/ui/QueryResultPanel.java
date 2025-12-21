@@ -1,14 +1,15 @@
 package tools.sqlclient.ui;
 
 import tools.sqlclient.exec.AsyncJobStatus;
+import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.SqlExecResult;
 
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
 import javax.swing.table.DefaultTableCellRenderer;
-import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.text.DecimalFormat;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -21,7 +22,7 @@ public class QueryResultPanel extends JPanel {
     private final JLabel jobLabel = new JLabel("");
     private final JLabel messageLabel = new JLabel();
     private final JProgressBar progressBar = new JProgressBar(0, 100);
-    private final DefaultTableModel model = new DefaultTableModel();
+    private final ColumnarTableModel model = new ColumnarTableModel();
     private final JTable table = new JTable(model);
     private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
         private final Color even = new Color(250, 252, 255);
@@ -83,7 +84,7 @@ public class QueryResultPanel extends JPanel {
     public static QueryResultPanel pending(String sqlText) {
         List<String> cols = List.of("消息");
         List<List<String>> rows = List.of(List.of("任务已提交，等待执行..."));
-        SqlExecResult res = new SqlExecResult(sqlText, cols, rows, rows.size(), false,
+        SqlExecResult res = new SqlExecResult(sqlText, cols, null, rows, List.of(), rows.size(), false,
                 "任务已提交", null, "QUEUED", 0, null, null, null, null, null, null, null, true,
                 null, null, null, null, null);
         return new QueryResultPanel(res, sqlText);
@@ -113,16 +114,10 @@ public class QueryResultPanel extends JPanel {
         }
         countLabel.setText("记录数 " + result.getRowsCount() + " 条");
 
-        model.setColumnCount(0);
-        model.setRowCount(0);
-        if (result.getColumns() != null) {
-            result.getColumns().forEach(model::addColumn);
-        }
-        if (result.getRows() != null) {
-            for (var row : result.getRows()) {
-                model.addRow(row.toArray());
-            }
-        }
+        List<ColumnDef> defs = resolveColumns(result);
+        List<List<String>> rows = result.getRows() != null ? result.getRows() : List.of();
+        model.setData(defs, rows);
+        applyColumnIdentifiers(defs);
         applyStripedRenderer();
         table.revalidate();
         table.repaint();
@@ -147,10 +142,10 @@ public class QueryResultPanel extends JPanel {
     }
 
     public void renderError(String message) {
-        model.setColumnCount(0);
-        model.setRowCount(0);
-        model.addColumn("错误");
-        model.addRow(new Object[]{message});
+        List<ColumnDef> defs = List.of(new ColumnDef("error#1", "错误", "错误"));
+        List<List<String>> rows = List.of(List.of(message));
+        model.setData(defs, rows);
+        applyColumnIdentifiers(defs);
         messageLabel.setText(message);
         setJobStatus(null, "FAILED", 100, null);
         applyStripedRenderer();
@@ -162,6 +157,15 @@ public class QueryResultPanel extends JPanel {
     private void applyStripedRenderer() {
         for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setCellRenderer(stripedRenderer);
+        }
+    }
+
+    private void applyColumnIdentifiers(List<ColumnDef> defs) {
+        for (int i = 0; i < Math.min(defs.size(), table.getColumnModel().getColumnCount()); i++) {
+            var col = table.getColumnModel().getColumn(i);
+            ColumnDef def = defs.get(i);
+            col.setIdentifier(def.getId());
+            col.setHeaderValue(def.getDisplayName());
         }
     }
 
@@ -202,5 +206,20 @@ public class QueryResultPanel extends JPanel {
             }
             table.getColumnModel().getColumn(col).setPreferredWidth(cellWidth);
         }
+    }
+
+    private List<ColumnDef> resolveColumns(SqlExecResult result) {
+        if (result.getColumnDefs() != null && !result.getColumnDefs().isEmpty()) {
+            return result.getColumnDefs();
+        }
+        List<ColumnDef> defs = new ArrayList<>();
+        List<String> columns = result.getColumns() != null ? result.getColumns() : List.of();
+        int seq = 1;
+        for (String col : columns) {
+            String display = col == null ? "" : col;
+            defs.add(new ColumnDef(display + "#" + seq, display, display));
+            seq++;
+        }
+        return defs;
     }
 }

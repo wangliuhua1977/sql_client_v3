@@ -1,8 +1,6 @@
 package tools.sqlclient.exec;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
+import java.util.*;
 
 /**
  * 轻量级 SELECT 子句解析器，用于确定列顺序/别名。
@@ -11,79 +9,34 @@ public class SelectProjectionParser {
 
     public static Projection parse(String sql) {
         if (sql == null) {
-            return new Projection(List.of(), false, null);
+            return new Projection(List.of(), false, Map.of(), null);
         }
         String trimmed = sql.trim();
         if (trimmed.isEmpty()) {
-            return new Projection(List.of(), false, null);
+            return new Projection(List.of(), false, Map.of(), null);
         }
         int selectIdx = indexOfIgnoreCase(trimmed, "select", 0);
         if (selectIdx < 0) {
-            return new Projection(List.of(), false, null);
+            return new Projection(List.of(), false, Map.of(), null);
         }
         int fromIdx = findTopLevelKeyword(trimmed, "from", selectIdx + 6);
         if (fromIdx < 0) {
-            return new Projection(List.of(), false, null);
+            return new Projection(List.of(), false, Map.of(), null);
         }
         String projectionPart = trimmed.substring(selectIdx + 6, fromIdx);
         String fromPart = trimmed.substring(fromIdx + 4);
-        List<String> columns = parseProjectionList(projectionPart);
-        boolean simpleStar = isSimpleSelectStar(columns, fromPart);
-        String starTable = simpleStar ? parseSimpleTableName(fromPart) : null;
-        return new Projection(columns, simpleStar, starTable);
+        boolean distinct = projectionPart.trim().toLowerCase(Locale.ROOT).startsWith("distinct");
+        if (distinct) {
+            projectionPart = projectionPart.trim().substring("distinct".length()).trim();
+        }
+        List<ProjectionItem> items = parseProjectionList(projectionPart);
+        Map<String, String> tableAliases = parseTableAliases(fromPart);
+        String primaryTable = parseSimpleTableName(fromPart);
+        return new Projection(items, distinct, tableAliases, primaryTable);
     }
 
-    private static boolean isSimpleSelectStar(List<String> columns, String fromPart) {
-        if (columns.size() != 1) {
-            return false;
-        }
-        String col = columns.get(0);
-        if (!"*".equals(col)) {
-            return false;
-        }
-        String tableName = parseSimpleTableName(fromPart);
-        return tableName != null && !tableName.isBlank();
-    }
-
-    private static String parseSimpleTableName(String fromPart) {
-        if (fromPart == null) {
-            return null;
-        }
-        String trimmed = fromPart.trim();
-        String lower = trimmed.toLowerCase(Locale.ROOT);
-        if (lower.contains(" join ") || lower.contains(",")) {
-            return null;
-        }
-        int whereIdx = findTopLevelKeyword(trimmed, "where", 0);
-        if (whereIdx >= 0) {
-            trimmed = trimmed.substring(0, whereIdx);
-        }
-        int groupIdx = findTopLevelKeyword(trimmed, "group", 0);
-        if (groupIdx >= 0) {
-            trimmed = trimmed.substring(0, groupIdx);
-        }
-        int orderIdx = findTopLevelKeyword(trimmed, "order", 0);
-        if (orderIdx >= 0) {
-            trimmed = trimmed.substring(0, orderIdx);
-        }
-        int limitIdx = findTopLevelKeyword(trimmed, "limit", 0);
-        if (limitIdx >= 0) {
-            trimmed = trimmed.substring(0, limitIdx);
-        }
-        String[] tokens = trimmed.trim().split("\\s+");
-        if (tokens.length == 0) {
-            return null;
-        }
-        String table = cleanIdentifier(tokens[0]);
-        int dot = table.lastIndexOf('.') + 1;
-        if (dot > 0 && dot < table.length()) {
-            table = table.substring(dot);
-        }
-        return table;
-    }
-
-    private static List<String> parseProjectionList(String projectionPart) {
-        List<String> list = new ArrayList<>();
+    private static List<ProjectionItem> parseProjectionList(String projectionPart) {
+        List<ProjectionItem> list = new ArrayList<>();
         if (projectionPart == null) {
             return list;
         }
@@ -93,42 +46,37 @@ public class SelectProjectionParser {
             if (trimmed.isEmpty()) {
                 continue;
             }
-            String display = extractAlias(trimmed);
-            list.add(display);
+            ProjectionItem.Type type = isStar(trimmed) ? ProjectionItem.Type.STAR : ProjectionItem.Type.EXPR;
+            if (type == ProjectionItem.Type.STAR) {
+                String alias = parseStarAlias(trimmed);
+                list.add(new ProjectionItem(type, alias, trimmed, null, "*"));
+            } else {
+                String alias = extractAlias(trimmed);
+                String display = alias != null ? alias : deriveNameFromExpression(trimmed);
+                list.add(new ProjectionItem(type, null, trimmed, alias, display));
+            }
         }
         return list;
     }
 
-    private static String extractAlias(String expr) {
-        String lowered = expr.toLowerCase(Locale.ROOT);
-        int asIdx = lowered.lastIndexOf(" as ");
-        if (asIdx > 0) {
-            String alias = expr.substring(asIdx + 4).trim();
-            return cleanIdentifier(alias);
+    private static String parseStarAlias(String expr) {
+        String cleaned = expr.trim();
+        if ("*".equals(cleaned)) {
+            return null;
         }
-        String[] parts = expr.split("\\s+");
-        if (parts.length >= 2) {
-            String alias = parts[parts.length - 1].trim();
-            if (!alias.isEmpty() && Character.isLetterOrDigit(alias.charAt(0))) {
-                return cleanIdentifier(alias);
-            }
+        if (cleaned.endsWith(".*")) {
+            String maybeAlias = cleaned.substring(0, cleaned.length() - 2).trim();
+            return maybeAlias.isEmpty() ? null : cleanIdentifier(maybeAlias);
         }
-        return deriveNameFromExpression(expr.trim());
+        return null;
     }
 
-    private static String deriveNameFromExpression(String expr) {
-        if (expr == null || expr.isBlank()) {
-            return expr;
-        }
+    private static boolean isStar(String expr) {
         String cleaned = expr.trim();
-        if (cleaned.endsWith(".*")) {
-            cleaned = cleaned.substring(0, cleaned.length() - 2);
+        if ("*".equals(cleaned)) {
+            return true;
         }
-        int dot = cleaned.lastIndexOf('.');
-        if (dot >= 0 && dot < cleaned.length() - 1) {
-            return cleanIdentifier(cleaned.substring(dot + 1));
-        }
-        return cleanIdentifier(cleaned);
+        return cleaned.endsWith(".*") && !cleaned.contains(" ");
     }
 
     private static List<String> splitTopLevel(String text, char delimiter) {
@@ -202,5 +150,95 @@ public class SelectProjectionParser {
         return trimmed;
     }
 
-    public record Projection(List<String> columns, boolean simpleSelectStar, String tableForStar) {}
+    private static Map<String, String> parseTableAliases(String fromPart) {
+        Map<String, String> map = new LinkedHashMap<>();
+        if (fromPart == null) {
+            return map;
+        }
+        String trimmed = stripAfterClauses(fromPart);
+        List<String> segments = splitTopLevel(trimmed, ',');
+        for (String seg : segments) {
+            String cleaned = stripAfterJoin(seg.trim());
+            if (cleaned.isEmpty()) continue;
+            String[] tokens = cleaned.split("\\s+");
+            if (tokens.length == 0) continue;
+            String table = cleanIdentifier(tokens[0]);
+            if (table == null || table.isBlank()) continue;
+            String alias = tokens.length >= 2 ? cleanIdentifier(tokens[1]) : table;
+            if (alias != null && !alias.isBlank()) {
+                map.put(alias, table);
+            }
+            map.putIfAbsent(table, table);
+        }
+        return map;
+    }
+
+    private static String stripAfterJoin(String text) {
+        int joinIdx = findTopLevelKeyword(text, "join", 0);
+        if (joinIdx > 0) {
+            return text.substring(0, joinIdx);
+        }
+        return text;
+    }
+
+    private static String stripAfterClauses(String fromPart) {
+        String trimmed = fromPart.trim();
+        for (String keyword : List.of("where", "group", "order", "limit", "having", "offset")) {
+            int idx = findTopLevelKeyword(trimmed, keyword, 0);
+            if (idx >= 0) {
+                trimmed = trimmed.substring(0, idx);
+            }
+        }
+        return trimmed;
+    }
+
+    private static String parseSimpleTableName(String fromPart) {
+        Map<String, String> aliases = parseTableAliases(fromPart);
+        if (!aliases.isEmpty()) {
+            java.util.LinkedHashSet<String> distinct = new java.util.LinkedHashSet<>(aliases.values());
+            if (distinct.size() == 1) {
+                return distinct.iterator().next();
+            }
+        }
+        return null;
+    }
+
+    private static String extractAlias(String expr) {
+        String lowered = expr.toLowerCase(Locale.ROOT);
+        int asIdx = lowered.lastIndexOf(" as ");
+        if (asIdx > 0) {
+            String alias = expr.substring(asIdx + 4).trim();
+            return cleanIdentifier(alias);
+        }
+        List<String> parts = splitTopLevel(expr, ' ');
+        if (parts.size() >= 2) {
+            String alias = parts.get(parts.size() - 1).trim();
+            if (!alias.isEmpty() && Character.isLetterOrDigit(alias.charAt(0))) {
+                return cleanIdentifier(alias);
+            }
+        }
+        return null;
+    }
+
+    private static String deriveNameFromExpression(String expr) {
+        if (expr == null || expr.isBlank()) {
+            return expr;
+        }
+        String cleaned = expr.trim();
+        if (cleaned.endsWith(".*")) {
+            cleaned = cleaned.substring(0, cleaned.length() - 2);
+        }
+        int dot = cleaned.lastIndexOf('.');
+        if (dot >= 0 && dot < cleaned.length() - 1) {
+            return cleanIdentifier(cleaned.substring(dot + 1));
+        }
+        return cleanIdentifier(cleaned);
+    }
+
+    public record ProjectionItem(Type type, String tableAlias, String expression, String alias, String displayLabel) {
+        public enum Type {STAR, EXPR}
+    }
+
+    public record Projection(List<ProjectionItem> items, boolean distinct, Map<String, String> tableAliases,
+                             String tableForStar) {}
 }

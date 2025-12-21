@@ -28,6 +28,7 @@ class ColumnOrderDeciderTest {
         assertFalse(reordered.getRows().isEmpty(), "行数据不应被抹空");
         assertEquals(original.getRows().get(0).get(0), reordered.getRows().get(0).get(0));
         assertEquals(reordered.getColumns().size(), reordered.getRows().get(0).size());
+        assertEquals(reordered.getColumns().size(), reordered.getColumnDefs().size(), "列定义需与列头一一对应");
     }
 
     @Test
@@ -50,5 +51,6 @@ class ColumnOrderDeciderTest {
         assertEquals(columns, reordered.getColumns(), "混排列必须保持服务端顺序与重复列");
         assertEquals(rows, reordered.getRows(), "列顺序未变时行数据应原样返回");
         assertEquals(reordered.getColumns().size(), reordered.getRows().get(0).size());
+        assertEquals(columns.size(), reordered.getColumnDefs().size(), "重复列也应生成独立定义");
     }
 }
