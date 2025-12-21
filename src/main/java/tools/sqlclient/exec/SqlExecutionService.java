@@ -236,8 +236,12 @@ public class SqlExecutionService {
         }
 
         List<List<String>> allRows = new ArrayList<>();
+        List<java.util.Map<String, String>> allRowMaps = new ArrayList<>();
         if (firstPage.getRows() != null) {
             allRows.addAll(firstPage.getRows());
+        }
+        if (firstPage.getRowMaps() != null) {
+            allRowMaps.addAll(firstPage.getRowMaps());
         }
 
         boolean hasNext = Boolean.TRUE.equals(firstPage.getHasNext());
@@ -250,6 +254,9 @@ public class SqlExecutionService {
             SqlExecResult pageResult = requestResultPage(jobId, sql, currentPage, pageSize, false);
             if (pageResult.getRows() != null) {
                 allRows.addAll(pageResult.getRows());
+            }
+            if (pageResult.getRowMaps() != null) {
+                allRowMaps.addAll(pageResult.getRowMaps());
             }
             if (pageResult.getTruncated() != null && pageResult.getTruncated()) {
                 truncated = true;
@@ -268,7 +275,7 @@ public class SqlExecutionService {
             OperationLog.log("[" + jobId + "] 达到分页累积上限，已停止继续拉取剩余数据");
         }
 
-        return new SqlExecResult(sql, firstPage.getColumns(), allRows, allRows.size(), true, firstPage.getMessage(), jobId,
+        return new SqlExecResult(sql, firstPage.getColumns(), firstPage.getColumnDefs(), allRows, allRowMaps, allRows.size(), true, firstPage.getMessage(), jobId,
                 firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
                 firstPage.getRowsAffected(), firstPage.getReturnedRowCount(), firstPage.getActualRowCount(), firstPage.getMaxVisibleRows(),
                 firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), currentPage, pageSize, hasNext,
@@ -324,7 +331,8 @@ public class SqlExecutionService {
 
             JsonArray rowsJson = extractResultRows(resp);
             List<String> columns = extractColumns(resp, rowsJson);
-            List<List<String>> rows = extractRows(rowsJson, columns);
+            List<java.util.Map<String, String>> rowMaps = extractRowMaps(rowsJson, columns);
+            List<List<String>> rows = extractRows(rowMaps, columns);
             int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
 
             logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
@@ -335,12 +343,12 @@ public class SqlExecutionService {
                 List<List<String>> messageRows = new ArrayList<>();
                 String info = rowsAffected != null ? ("影响行数: " + rowsAffected) : (message != null ? message : "执行成功");
                 messageRows.add(List.of(info));
-                return new SqlExecResult(sql, messageCols, messageRows, messageRows.size(), true, message, jobId, status, progress,
+                return new SqlExecResult(sql, messageCols, null, messageRows, List.of(), messageRows.size(), true, message, jobId, status, progress,
                         null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
                         respPage, respPageSize, hasNext, truncated, note);
             }
 
-            return new SqlExecResult(sql, columns, rows, rowCount, true, message, jobId, status, progress,
+            return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, true, message, jobId, status, progress,
                     null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
                     respPage, respPageSize, hasNext, truncated, note);
         } catch (Exception e) {
@@ -435,28 +443,29 @@ public class SqlExecutionService {
         return keys;
     }
 
-    private List<List<String>> extractRows(JsonArray rowsJson, List<String> columns) {
-        List<List<String>> rows = new ArrayList<>();
+    private List<java.util.Map<String, String>> extractRowMaps(JsonArray rowsJson, List<String> columns) {
+        List<java.util.Map<String, String>> rows = new ArrayList<>();
         if (rowsJson == null) {
             return rows;
         }
+        int colCount = columns == null ? 0 : columns.size();
         for (JsonElement el : rowsJson) {
             if (el == null || el.isJsonNull()) {
                 continue;
             }
-            if (el.isJsonArray()) {
-                JsonArray arr = el.getAsJsonArray();
-                List<String> row = new ArrayList<>();
-                for (int i = 0; i < arr.size(); i++) {
-                    row.add(stringifyValue(arr.get(i)));
+            if (el.isJsonObject()) {
+                JsonObject obj = el.getAsJsonObject();
+                java.util.Map<String, String> row = new java.util.LinkedHashMap<>();
+                for (Map.Entry<String, JsonElement> entry : obj.entrySet()) {
+                    row.put(entry.getKey(), stringifyValue(entry.getValue()));
                 }
                 rows.add(row);
-            } else if (el.isJsonObject()) {
-                JsonObject obj = el.getAsJsonObject();
-                List<String> row = new ArrayList<>();
-                for (String col : columns) {
-                    JsonElement v = obj.get(col);
-                    row.add(stringifyValue(v));
+            } else if (el.isJsonArray()) {
+                JsonArray arr = el.getAsJsonArray();
+                java.util.Map<String, String> row = new java.util.LinkedHashMap<>();
+                for (int i = 0; i < arr.size(); i++) {
+                    String key = i < colCount ? columns.get(i) : ("col_" + (i + 1));
+                    row.put(key, stringifyValue(arr.get(i)));
                 }
                 rows.add(row);
             }
@@ -464,9 +473,25 @@ public class SqlExecutionService {
         return rows;
     }
 
+    private List<List<String>> extractRows(List<java.util.Map<String, String>> rowMaps, List<String> columns) {
+        List<List<String>> rows = new ArrayList<>();
+        if (rowMaps == null) {
+            return rows;
+        }
+        List<String> targetColumns = columns == null ? List.of() : columns;
+        for (java.util.Map<String, String> map : rowMaps) {
+            List<String> row = new ArrayList<>();
+            for (String col : targetColumns) {
+                row.add(map != null ? map.get(col) : null);
+            }
+            rows.add(row);
+        }
+        return rows;
+    }
+
     private String stringifyValue(JsonElement v) {
         if (v == null || v.isJsonNull()) {
-            return "";
+            return null;
         }
         if (v.isJsonPrimitive()) {
             return v.getAsString();

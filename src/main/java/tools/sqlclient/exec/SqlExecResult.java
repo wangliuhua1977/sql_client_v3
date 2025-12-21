@@ -9,7 +9,9 @@ import java.util.Objects;
 public class SqlExecResult {
     private final String sql;
     private final List<String> columns;
+    private final List<ColumnDef> columnDefs;
     private final List<List<String>> rows;
+    private final List<java.util.Map<String, String>> rowMaps;
     private final int rowsCount;
     private final boolean success;
     private final String message;
@@ -31,13 +33,15 @@ public class SqlExecResult {
     private final String note;
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
-        this(sql, columns, rows, rowsCount, true, null, null, null, null, null, null, null, null, null,
+        this(sql, columns, null, rows, null, rowsCount, true, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null, null);
     }
 
     public SqlExecResult(String sql,
                          List<String> columns,
+                         List<ColumnDef> columnDefs,
                          List<List<String>> rows,
+                         List<java.util.Map<String, String>> rowMaps,
                          int rowsCount,
                          boolean success,
                          String message,
@@ -59,7 +63,9 @@ public class SqlExecResult {
                          String note) {
         this.sql = Objects.requireNonNullElse(sql, "");
         this.columns = columns;
+        this.columnDefs = columnDefs;
         this.rows = rows;
+        this.rowMaps = rowMaps;
         this.rowsCount = rowsCount;
         this.success = success;
         this.message = message;
@@ -91,6 +97,14 @@ public class SqlExecResult {
 
     public List<List<String>> getRows() {
         return rows;
+    }
+
+    public List<ColumnDef> getColumnDefs() {
+        return columnDefs;
+    }
+
+    public List<java.util.Map<String, String>> getRowMaps() {
+        return rowMaps;
     }
 
     public int getRowsCount() {
