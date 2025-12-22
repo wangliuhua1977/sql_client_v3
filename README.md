@@ -179,6 +179,24 @@
 - **/api/jobs/status**：`{"jobId":"..."}`，返回 `status/progressPercent/elapsedMillis` 等任务信息。
 - **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":true?, "page":1?, "pageSize":200?}`。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize`，客户端全部做空值兼容。
 
+#### 异步 SQL 结果一致性窗口与客户端重试策略
+- 状态 `SUCCEEDED` 但结果暂不可用时（`success=false` 且 message 含 “Result expired/not available” 或返回行/计数矛盾），前端自动进入自愈重试，不再直接宣告失败。
+- 可配置项（System Property 或 `config.properties` 均可）：
+  - `ASYNC_SQL_RESULT_RETRY_MAX`：默认 `8`，最多重试次数（含首次请求）。
+  - `ASYNC_SQL_RESULT_RETRY_BASE_DELAY_MS`：默认 `150`，首次重试等待时间（毫秒）。
+  - `ASYNC_SQL_RESULT_RETRY_MAX_DELAY_MS`：默认 `1000`，重试延迟上限，采用递增等待避免 UI 卡顿。
+- 日志会输出 `jobId/attempt/page/base/delay/returnedRowCount/actualRowCount/hasResultSet/message`，便于定位“已完成但结果短暂不可用”的窗口期。
+- SUCCEEDED 后拉取结果在后台线程执行，即便重试也不会阻塞 UI；仅在拿到非空结果后才进入本地 SQLite 写库。部分批次失败不会影响已成功写入的批次。
+
+#### 分页 page 基准与 AUTO 探测规则
+- 默认仍按 1-based 请求 `page=1`，当发现 `hasResultSet=true && actualRowCount>0` 但 `returnedRowCount=0` 或返回空行时，会自动切换到另一种 page 基准（0-based）再试一次，并在当前刷新流程内缓存成功的基准。
+- `ASYNC_SQL_RESULT_PAGE_BASE`：`AUTO`（默认，先 1-based 再按需回退）、`0`、`1`。通过 System Property 或 `config.properties` 覆盖。
+
+#### removeAfterFetch 策略选择
+- 元数据/短结果优先保证可重试性，首次拉取统一使用 `removeAfterFetch=false`，待结果解析成功后再追加一次 `removeAfterFetch=true` 的清理请求（如配置允许），减少缓存占用。
+- `ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER`：`AUTO`（默认，成功后追加清理）、`TRUE`（总是追加清理）、`FALSE`（永不清理）。
+- 若后端在 `removeAfterFetch=true` 后不再允许重试，保持默认即可；日志会记录是否触发清理。
+
 #### /jobs/result 响应与列推断
 - `resultRows` 依旧兼容 `resultRows/rows/data` 三个字段，先拿数组再落表。
 - **列顺序决策链**：
@@ -203,8 +221,8 @@
 - 重复列名展示规则：不再去重或裁剪列数，JTable 直接展示重复列头；必要时可在 UI 层追加序号，但默认保持与行值一一对应。
 
 #### removeAfterFetch 处理
-- 首次 `/jobs/result` 默认强制 `removeAfterFetch=false`，避免分页或二次渲染时被意外清空；若后端缺少专用清理接口，则保留缓存优先保证可用性。
-- 同一 `jobId` 不会再二次调用带 `removeAfterFetch=true` 的 `/jobs/result` 自毁结果，后续分页/刷新直接复用首次返回的数据结构。
+- 首次 `/jobs/result` 统一使用 `removeAfterFetch=false`，避免在可重试窗口内提前清空缓存；当配置为 `AUTO/TRUE` 且结果已成功解析后，会在后台追加一次 `removeAfterFetch=true` 清理请求以释放服务端缓存。
+- 若配置为 `FALSE`，则完全跳过清理请求，确保即便后端在 `removeAfterFetch=true` 后不允许重试也不会影响可用性。
 
 #### 分页策略与上限
 - 默认 `page=1`、`pageSize=200`，客户端与 README 都建议显式传入。`config.properties` 提供 `result.pageSize` 默认 200，`result.pageSize.max` 固定上限 1000。

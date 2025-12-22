@@ -15,7 +15,8 @@ public class AsyncSqlConfig {
     }
 
     public static URI buildUri(String path) {
-        String base = BASE_URL.endsWith("/") ? BASE_URL.substring(0, BASE_URL.length() - 1) : BASE_URL;
+        String configured = System.getProperty("ASYNC_SQL_BASE_URL", BASE_URL);
+        String base = configured.endsWith("/") ? configured.substring(0, configured.length() - 1) : configured;
         String normalized = path.startsWith("/") ? path : "/" + path;
         return URI.create(base + normalized);
     }

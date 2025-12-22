@@ -106,6 +106,13 @@ public class Config {
         return raw.trim().equalsIgnoreCase("true");
     }
 
+    /**
+     * 读取原始配置（供新特性扩展使用），优先返回工作目录 / classpath 的配置，不包含 System Property。
+     */
+    public static String getRawProperty(String key) {
+        return PROPS.getProperty(key);
+    }
+
     private static int parseIntOrDefault(String raw, int defaultValue) {
         if (raw == null || raw.isBlank()) {
             return defaultValue;

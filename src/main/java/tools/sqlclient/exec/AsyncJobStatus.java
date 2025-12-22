@@ -13,6 +13,7 @@ public class AsyncJobStatus {
     private final Integer rowsAffected;
     private final Integer returnedRowCount;
     private final Boolean hasResultSet;
+    private final Integer actualRowCount;
     private final String message;
 
     public AsyncJobStatus(String jobId,
@@ -24,6 +25,7 @@ public class AsyncJobStatus {
                           Integer rowsAffected,
                           Integer returnedRowCount,
                           Boolean hasResultSet,
+                          Integer actualRowCount,
                           String message) {
         this.jobId = jobId;
         this.status = status;
@@ -34,6 +36,7 @@ public class AsyncJobStatus {
         this.rowsAffected = rowsAffected;
         this.returnedRowCount = returnedRowCount;
         this.hasResultSet = hasResultSet;
+        this.actualRowCount = actualRowCount;
         this.message = message;
     }
 
@@ -71,6 +74,10 @@ public class AsyncJobStatus {
 
     public Boolean getHasResultSet() {
         return hasResultSet;
+    }
+
+    public Integer getActualRowCount() {
+        return actualRowCount;
     }
 
     public String getMessage() {
