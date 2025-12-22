@@ -9,6 +9,7 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import tools.sqlclient.exec.AsyncResultConfig.PageBase;
 import tools.sqlclient.exec.AsyncResultConfig.RemoveAfterFetchStrategy;
 
@@ -18,6 +19,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AsyncResultRetryTest {
@@ -31,6 +33,37 @@ class AsyncResultRetryTest {
         overrideProp("ASYNC_SQL_RESULT_RETRY_MAX", "4");
         overrideProp("ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER", RemoveAfterFetchStrategy.FALSE.name());
         overrideProp("ASYNC_SQL_RESULT_PAGE_BASE", PageBase.AUTO.name());
+    }
+
+    @Test
+    void shouldTreatOverloadedSubmitAsTerminal() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(jsonResponse(overloadedSubmitPayload("job-3")));
+            server.start();
+
+            overrideProp("ASYNC_SQL_BASE_URL", server.url("/").toString());
+            SqlExecutionService service = new SqlExecutionService();
+            Executable exec = () -> service.executeSyncAllPagesWithDbUser("select * from t", "tester", 50);
+            RuntimeException ex = assertThrows(RuntimeException.class, exec);
+            assertTrue(ex.getMessage().contains("拒绝") || ex.getMessage().toLowerCase().contains("reject"));
+            assertEquals(1, server.getRequestCount(), "过载拒绝后不应继续轮询");
+        }
+    }
+
+    @Test
+    void shouldStopWhenQueueDelayTimeout() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.enqueue(jsonResponse(statusPayload("job-4", "SUBMITTED", null, true)));
+            server.enqueue(jsonResponse(queueDelayFailedPayload("job-4")));
+            server.start();
+
+            overrideProp("ASYNC_SQL_BASE_URL", server.url("/").toString());
+            SqlExecutionService service = new SqlExecutionService();
+            Executable exec = () -> service.executeSyncAllPagesWithDbUser("select * from t2", "tester", 50);
+            RuntimeException ex = assertThrows(RuntimeException.class, exec);
+            assertTrue(ex.getMessage().toLowerCase().contains("queue"), "错误信息应提示排队超时");
+            assertEquals(2, server.getRequestCount(), "排队失败后不应再拉取结果");
+        }
     }
 
     @AfterEach
@@ -160,6 +193,30 @@ class AsyncResultRetryTest {
         }
         obj.add("resultRows", gson.toJsonTree(rows));
         obj.add("columns", gson.toJsonTree(List.of("object_name")));
+        return obj;
+    }
+
+    private JsonObject overloadedSubmitPayload(String jobId) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("jobId", jobId);
+        obj.addProperty("status", "FAILED");
+        obj.addProperty("success", false);
+        obj.addProperty("overloaded", true);
+        obj.addProperty("message", "Rejected by ASYNC_SQL_REJECT_MESSAGE");
+        obj.addProperty("queueDelayMillis", 0);
+        return obj;
+    }
+
+    private JsonObject queueDelayFailedPayload(String jobId) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("jobId", jobId);
+        obj.addProperty("status", "FAILED");
+        obj.addProperty("success", false);
+        obj.addProperty("hasResultSet", true);
+        obj.addProperty("actualRowCount", 0);
+        obj.addProperty("returnedRowCount", 0);
+        obj.addProperty("message", "queue delay exceeded");
+        obj.addProperty("queueDelayMillis", 2500);
         return obj;
     }
 }

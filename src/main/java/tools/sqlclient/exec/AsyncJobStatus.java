@@ -5,6 +5,7 @@ package tools.sqlclient.exec;
  */
 public class AsyncJobStatus {
     private final String jobId;
+    private final Boolean success;
     private final String status;
     private final Integer progressPercent;
     private final Long elapsedMillis;
@@ -15,8 +16,13 @@ public class AsyncJobStatus {
     private final Boolean hasResultSet;
     private final Integer actualRowCount;
     private final String message;
+    private final Long queuedAt;
+    private final Long queueDelayMillis;
+    private final Boolean overloaded;
+    private final ThreadPoolSnapshot threadPool;
 
     public AsyncJobStatus(String jobId,
+                          Boolean success,
                           String status,
                           Integer progressPercent,
                           Long elapsedMillis,
@@ -26,8 +32,13 @@ public class AsyncJobStatus {
                           Integer returnedRowCount,
                           Boolean hasResultSet,
                           Integer actualRowCount,
-                          String message) {
+                          String message,
+                          Long queuedAt,
+                          Long queueDelayMillis,
+                          Boolean overloaded,
+                          ThreadPoolSnapshot threadPool) {
         this.jobId = jobId;
+        this.success = success;
         this.status = status;
         this.progressPercent = progressPercent;
         this.elapsedMillis = elapsedMillis;
@@ -38,10 +49,18 @@ public class AsyncJobStatus {
         this.hasResultSet = hasResultSet;
         this.actualRowCount = actualRowCount;
         this.message = message;
+        this.queuedAt = queuedAt;
+        this.queueDelayMillis = queueDelayMillis;
+        this.overloaded = overloaded;
+        this.threadPool = threadPool;
     }
 
     public String getJobId() {
         return jobId;
+    }
+
+    public Boolean getSuccess() {
+        return success;
     }
 
     public String getStatus() {
@@ -82,5 +101,21 @@ public class AsyncJobStatus {
 
     public String getMessage() {
         return message;
+    }
+
+    public Long getQueuedAt() {
+        return queuedAt;
+    }
+
+    public Long getQueueDelayMillis() {
+        return queueDelayMillis;
+    }
+
+    public Boolean getOverloaded() {
+        return overloaded;
+    }
+
+    public ThreadPoolSnapshot getThreadPool() {
+        return threadPool;
     }
 }

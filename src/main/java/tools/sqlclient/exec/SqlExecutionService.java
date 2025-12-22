@@ -187,7 +187,10 @@ public class SqlExecutionService {
         JsonObject resp = postJson("/jobs/submit", body);
 
         AsyncJobStatus status = parseStatus(resp);
-        OperationLog.log("[" + status.getJobId() + "] 已提交，状态 " + status.getStatus());
+        logStatus("已提交", status);
+        if (Boolean.FALSE.equals(status.getSuccess()) || (status.getOverloaded() != null && status.getOverloaded())) {
+            throw new RuntimeException(status.getMessage() != null ? status.getMessage() : "提交失败/系统过载");
+        }
         return status;
     }
 
@@ -219,9 +222,10 @@ public class SqlExecutionService {
         body.addProperty("jobId", jobId);
         JsonObject resp = postJson("/jobs/status", body);
         AsyncJobStatus status = parseStatus(resp);
-        Integer progress = status.getProgressPercent();
-        String progressText = progress != null ? progress + "%" : "-";
-        OperationLog.log("[" + jobId + "] 状态 " + status.getStatus() + " 进度 " + progressText);
+        logStatus("状态轮询", status);
+        if (isTerminalFailure(status)) {
+            throw new RuntimeException(status.getMessage() != null ? status.getMessage() : "任务失败或排队超时");
+        }
         return status;
     }
 
@@ -303,6 +307,7 @@ public class SqlExecutionService {
         long delay = Math.max(0, context.baseDelayMs());
         boolean useAlternateBase = false;
         RuntimeException lastError = null;
+        boolean transientDetected = false;
         while (attempt < attempts) {
             attempt++;
             int page = context.computePageNumber(pageIndex, useAlternateBase);
@@ -314,6 +319,7 @@ public class SqlExecutionService {
                 body.addProperty("pageSize", finalPageSize);
                 JsonObject resp = postJson("/jobs/result", body);
                 boolean success = resp.has("success") && resp.get("success").getAsBoolean();
+                String respStatus = resp.has("status") && !resp.get("status").isJsonNull() ? resp.get("status").getAsString() : null;
                 Integer returnedRowCount = resp.has("returnedRowCount") && !resp.get("returnedRowCount").isJsonNull()
                         ? resp.get("returnedRowCount").getAsInt() : null;
                 Integer actualRowCount = resp.has("actualRowCount") && !resp.get("actualRowCount").isJsonNull()
@@ -323,7 +329,8 @@ public class SqlExecutionService {
                 String message = extractMessage(resp);
                 logAttempt(jobId, attempt, pageIndex, page, finalPageSize, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
 
-                boolean transientUnavailable = isTransientUnavailable(message);
+                boolean expectResult = shouldExpectResult(finalStatus, hasResultSet, actualRowCount, returnedRowCount, respStatus);
+                boolean transientUnavailable = isTransientUnavailable(message) || (!success && expectResult);
                 SqlExecResult parsed = null;
                 boolean contradictoryEmpty = false;
                 if (success) {
@@ -332,7 +339,8 @@ public class SqlExecutionService {
                 }
 
                 if (!success && transientUnavailable) {
-                    lastError = new RuntimeException(message != null ? message : "结果暂不可用");
+                    transientDetected = true;
+                    lastError = new TransientResultUnavailableException(jobId, message != null ? message : "结果暂不可用");
                 } else if (!success) {
                     throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
                 }
@@ -349,7 +357,8 @@ public class SqlExecutionService {
                         OperationLog.log("[" + jobId + "] 检测到结果为空/过期，将尝试切换 page 基准并重试");
                         useAlternateBase = true;
                     }
-                    lastError = new RuntimeException(message != null ? message : "结果暂不可用");
+                    transientDetected = true;
+                    lastError = new TransientResultUnavailableException(jobId, message != null ? message : "结果暂不可用");
                 } else if (parsed == null) {
                     lastError = new RuntimeException(message != null ? message : "结果解析失败");
                 }
@@ -369,6 +378,12 @@ public class SqlExecutionService {
                 throw new RuntimeException("拉取结果被中断", ie);
             }
             delay = Math.min(context.maxDelayMs(), delay * 2);
+        }
+        if (transientDetected) {
+            if (lastError instanceof TransientResultUnavailableException) {
+                throw lastError;
+            }
+            throw new TransientResultUnavailableException(jobId, lastError != null ? lastError.getMessage() : "结果暂不可用", lastError);
         }
         throw lastError != null ? lastError : new RuntimeException("结果获取失败");
     }
@@ -402,6 +417,10 @@ public class SqlExecutionService {
             Integer respPageSize = resp.has("pageSize") && !resp.get("pageSize").isJsonNull()
                     ? resp.get("pageSize").getAsInt() : requestedPageSize;
             String note = resp.has("note") && !resp.get("note").isJsonNull() ? resp.get("note").getAsString() : null;
+            Long queuedAt = resp.has("queuedAt") && !resp.get("queuedAt").isJsonNull() ? resp.get("queuedAt").getAsLong() : null;
+            Long queueDelayMillis = resp.has("queueDelayMillis") && !resp.get("queueDelayMillis").isJsonNull() ? resp.get("queueDelayMillis").getAsLong() : null;
+            Boolean overloaded = resp.has("overloaded") && !resp.get("overloaded").isJsonNull() ? resp.get("overloaded").getAsBoolean() : null;
+            ThreadPoolSnapshot threadPool = parseThreadPool(resp);
             String message = extractMessage(resp);
 
             if (!success) {
@@ -416,7 +435,7 @@ public class SqlExecutionService {
             int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
 
             logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
-                    hasNext, truncated, note, columns, rowsJson, rows);
+                    hasNext, truncated, note, columns, rowsJson, rows, queuedAt, queueDelayMillis, overloaded, threadPool);
 
             if (hasResultSet != null && !hasResultSet) {
                 List<String> messageCols = List.of("消息");
@@ -425,12 +444,12 @@ public class SqlExecutionService {
                 messageRows.add(List.of(info));
                 return new SqlExecResult(sql, messageCols, null, messageRows, List.of(), messageRows.size(), true, message, jobId, status, progress,
                         null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
-                        respPage, respPageSize, hasNext, truncated, note);
+                        respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool);
             }
 
             return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, true, message, jobId, status, progress,
                     null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
-                    respPage, respPageSize, hasNext, truncated, note);
+                    respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool);
         } catch (Exception e) {
             OperationLog.log("[" + jobId + "] 解析 /jobs/result 失败: " + e.getMessage());
             throw new RuntimeException("解析结果失败: " + e.getMessage(), e);
@@ -581,20 +600,27 @@ public class SqlExecutionService {
 
     private void logResultDetails(String jobId, Integer respPage, Integer respPageSize, Integer returnedRowCount,
                                   Integer actualRowCount, Integer maxVisibleRows, Integer maxTotalRows, Boolean hasNext,
-                                  Boolean truncated, String note, List<String> columns, JsonArray rowsJson, List<List<String>> rows) {
+                                  Boolean truncated, String note, List<String> columns, JsonArray rowsJson, List<List<String>> rows,
+                                  Long queuedAt, Long queueDelayMillis, Boolean overloaded, ThreadPoolSnapshot threadPool) {
         OperationLog.log("[" + jobId + "] 任务完成，page=" + respPage + " pageSize=" + respPageSize
                 + "，returnedRowCount=" + (returnedRowCount != null ? returnedRowCount : rows.size())
                 + (actualRowCount != null ? ("，actualRowCount=" + actualRowCount) : "")
                 + (maxVisibleRows != null ? ("，maxVisibleRows=" + maxVisibleRows) : "")
                 + (maxTotalRows != null ? ("，maxTotalRows=" + maxTotalRows) : "")
                 + (hasNext != null && hasNext ? "，hasNext=true" : "")
-                + (truncated != null && truncated ? "，truncated=true" : ""));
+                + (truncated != null && truncated ? "，truncated=true" : "")
+                + (queuedAt != null ? ("，queuedAt=" + queuedAt) : "")
+                + (queueDelayMillis != null ? ("，queueDelayMillis=" + queueDelayMillis) : "")
+                + (overloaded != null ? ("，overloaded=" + overloaded) : ""));
         OperationLog.log("[" + jobId + "] resultRows.size=" + (rowsJson == null ? 0 : rowsJson.size())
                 + " columns=" + columns.size() + " -> " + abbreviate(String.join(",", columns)));
         if (rowsJson != null && rowsJson.size() > 0 && rowsJson.get(0).isJsonObject()) {
             var firstKeys = new ArrayList<String>();
             rowsJson.get(0).getAsJsonObject().keySet().forEach(firstKeys::add);
             OperationLog.log("[" + jobId + "] first row keys=" + abbreviate(String.join(",", firstKeys)));
+        }
+        if (threadPool != null) {
+            OperationLog.log("[" + jobId + "] threadPool=" + threadPool.toString());
         }
         if (note != null && !note.isBlank()) {
             OperationLog.log("[" + jobId + "] note: " + note);
@@ -670,6 +696,24 @@ public class SqlExecutionService {
         return 0;
     }
 
+    private boolean shouldExpectResult(AsyncJobStatus finalStatus,
+                                       Boolean respHasResultSet,
+                                       Integer respActualRowCount,
+                                       Integer returnedRowCount,
+                                       String respStatus) {
+        boolean statusSucceeded = respStatus != null && "SUCCEEDED".equalsIgnoreCase(respStatus);
+        if (finalStatus != null && "SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
+            statusSucceeded = true;
+        }
+        boolean hasResult = Boolean.TRUE.equals(respHasResultSet)
+                || (finalStatus != null && Boolean.TRUE.equals(finalStatus.getHasResultSet()));
+        int expectedRows = firstPositive(respActualRowCount,
+                returnedRowCount,
+                finalStatus != null ? finalStatus.getActualRowCount() : null,
+                finalStatus != null ? finalStatus.getReturnedRowCount() : null);
+        return statusSucceeded && hasResult && expectedRows > 0;
+    }
+
     private final class ResultFetchContext {
         private final AsyncResultConfig.PageBase configuredBase;
         private final int maxAttempts;
@@ -707,7 +751,10 @@ public class SqlExecutionService {
         }
 
         boolean shouldUseRemoveAfterFetch(int pageIndex) {
-            // 避免首次拉取后立即清理导致无法重试，统一改为在成功后追加清理请求
+            if (removeAfterFetchStrategy == AsyncResultConfig.RemoveAfterFetchStrategy.TRUE) {
+                return true;
+            }
+            // 避免首次拉取后立即清理导致无法重试，AUTO/false 统一使用 false
             return false;
         }
 
@@ -737,6 +784,9 @@ public class SqlExecutionService {
             }
             if (removeAfterFetchStrategy == AsyncResultConfig.RemoveAfterFetchStrategy.FALSE) {
                 return;
+            }
+            if (removeAfterFetchStrategy == AsyncResultConfig.RemoveAfterFetchStrategy.AUTO) {
+                return; // 默认不强制清理，避免二次拉取导致副作用
             }
             int page = computePageNumber(0, false);
             try {
@@ -802,8 +852,28 @@ public class SqlExecutionService {
         return "SUCCEEDED".equals(s) || "FAILED".equals(s) || "CANCELLED".equals(s);
     }
 
+    private boolean isTerminalFailure(AsyncJobStatus status) {
+        if (status == null) {
+            return false;
+        }
+        if (Boolean.FALSE.equals(status.getSuccess()) && "FAILED".equalsIgnoreCase(status.getStatus())) {
+            return true;
+        }
+        if ("FAILED".equalsIgnoreCase(status.getStatus())) {
+            String msg = status.getMessage();
+            if (status.getOverloaded() != null && status.getOverloaded()) {
+                return true;
+            }
+            if (msg != null && msg.toLowerCase().contains("queue delay")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private AsyncJobStatus parseStatus(JsonObject obj) {
         String jobId = obj.has("jobId") && !obj.get("jobId").isJsonNull() ? obj.get("jobId").getAsString() : "";
+        Boolean success = obj.has("success") && !obj.get("success").isJsonNull() ? obj.get("success").getAsBoolean() : null;
         String status = obj.has("status") && !obj.get("status").isJsonNull() ? obj.get("status").getAsString() : "";
         Integer progress = obj.has("progressPercent") && !obj.get("progressPercent").isJsonNull()
                 ? obj.get("progressPercent").getAsInt() : null;
@@ -819,8 +889,27 @@ public class SqlExecutionService {
                 ? obj.get("actualRowCount").getAsInt() : null;
         Boolean hasResultSet = obj.has("hasResultSet") && !obj.get("hasResultSet").isJsonNull()
                 ? obj.get("hasResultSet").getAsBoolean() : null;
+        Long queuedAt = obj.has("queuedAt") && !obj.get("queuedAt").isJsonNull() ? obj.get("queuedAt").getAsLong() : null;
+        Long queueDelayMillis = obj.has("queueDelayMillis") && !obj.get("queueDelayMillis").isJsonNull() ? obj.get("queueDelayMillis").getAsLong() : null;
+        Boolean overloaded = obj.has("overloaded") && !obj.get("overloaded").isJsonNull() ? obj.get("overloaded").getAsBoolean() : null;
+        ThreadPoolSnapshot threadPool = parseThreadPool(obj);
         String message = extractMessage(obj);
-        return new AsyncJobStatus(jobId, status, progress, elapsed, label, sqlSummary, rowsAffected, returnedRowCount, hasResultSet, actualRowCount, message);
+        return new AsyncJobStatus(jobId, success, status, progress, elapsed, label, sqlSummary, rowsAffected, returnedRowCount, hasResultSet, actualRowCount,
+                message, queuedAt, queueDelayMillis, overloaded, threadPool);
+    }
+
+    private ThreadPoolSnapshot parseThreadPool(JsonObject obj) {
+        if (obj == null || !obj.has("threadPool") || obj.get("threadPool").isJsonNull() || !obj.get("threadPool").isJsonObject()) {
+            return null;
+        }
+        JsonObject tp = obj.getAsJsonObject("threadPool");
+        Integer poolSize = tp.has("poolSize") && !tp.get("poolSize").isJsonNull() ? tp.get("poolSize").getAsInt() : null;
+        Integer activeCount = tp.has("activeCount") && !tp.get("activeCount").isJsonNull() ? tp.get("activeCount").getAsInt() : null;
+        Integer queueSize = tp.has("queueSize") && !tp.get("queueSize").isJsonNull() ? tp.get("queueSize").getAsInt() : null;
+        Long taskCount = tp.has("taskCount") && !tp.get("taskCount").isJsonNull() ? tp.get("taskCount").getAsLong() : null;
+        Long completedTaskCount = tp.has("completedTaskCount") && !tp.get("completedTaskCount").isJsonNull() ? tp.get("completedTaskCount").getAsLong() : null;
+        Integer jobStoreSize = tp.has("jobStoreSize") && !tp.get("jobStoreSize").isJsonNull() ? tp.get("jobStoreSize").getAsInt() : null;
+        return new ThreadPoolSnapshot(poolSize, activeCount, queueSize, taskCount, completedTaskCount, jobStoreSize);
     }
 
     private JsonObject postJson(String path, JsonObject payload) {
@@ -914,6 +1003,34 @@ public class SqlExecutionService {
         if (onStatus != null && status != null) {
             onStatus.accept(status);
         }
+    }
+
+    private void logStatus(String scene, AsyncJobStatus status) {
+        if (status == null) {
+            return;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("[").append(status.getJobId()).append("] ").append(scene)
+                .append(" status=").append(status.getStatus());
+        if (status.getProgressPercent() != null) {
+            sb.append(" progress=").append(status.getProgressPercent()).append("%");
+        }
+        if (status.getQueuedAt() != null) {
+            sb.append(" queuedAt=").append(status.getQueuedAt());
+        }
+        if (status.getQueueDelayMillis() != null) {
+            sb.append(" queueDelayMillis=").append(status.getQueueDelayMillis());
+        }
+        if (status.getOverloaded() != null) {
+            sb.append(" overloaded=").append(status.getOverloaded());
+        }
+        if (status.getThreadPool() != null) {
+            sb.append(" threadPool=[").append(status.getThreadPool().toString()).append("]");
+        }
+        if (status.getMessage() != null && !status.getMessage().isBlank()) {
+            sb.append(" message=").append(abbreviate(status.getMessage()));
+        }
+        OperationLog.log(sb.toString());
     }
 
     private String extractMessage(JsonObject obj) {
