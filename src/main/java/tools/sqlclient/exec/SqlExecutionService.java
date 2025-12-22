@@ -91,7 +91,7 @@ public class SqlExecutionService {
                         ? finalStatus.getMessage()
                         : ("任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus()));
             }
-            return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, pageSizeOverride);
+            return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, pageSizeOverride, finalStatus);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
@@ -131,7 +131,7 @@ public class SqlExecutionService {
                 })
                 .thenCompose(status -> {
                     if ("SUCCEEDED".equalsIgnoreCase(status.getStatus())) {
-                        return CompletableFuture.supplyAsync(() -> requestResultPaged(status.getJobId(), trimmed, false, pageSize), ThreadPools.NETWORK_POOL)
+                        return CompletableFuture.supplyAsync(() -> requestResultPaged(status.getJobId(), trimmed, false, pageSize, status), ThreadPools.NETWORK_POOL)
                                 .thenAccept(res -> {
                                     notifyStatus(onStatus, status);
                                     if (onSuccess != null) {
@@ -226,12 +226,20 @@ public class SqlExecutionService {
     }
 
     public SqlExecResult requestResultPaged(String jobId, String sql, boolean fetchAllPages, Integer pageSizeOverride) {
-        int pageSize = resolvePageSize(pageSizeOverride);
-        int currentPage = 1;
-        boolean removeAfterFetch = false;
+        return requestResultPaged(jobId, sql, fetchAllPages, pageSizeOverride, null);
+    }
 
-        SqlExecResult firstPage = requestResultPage(jobId, sql, currentPage, pageSize, removeAfterFetch);
+    public SqlExecResult requestResultPaged(String jobId, String sql, boolean fetchAllPages, Integer pageSizeOverride, AsyncJobStatus finalStatus) {
+        int pageSize = resolvePageSize(pageSizeOverride);
+        ResultFetchContext context = new ResultFetchContext(AsyncResultConfig.getPageBase(),
+                AsyncResultConfig.getRetryMaxAttempts(),
+                AsyncResultConfig.getRetryBaseDelayMs(),
+                AsyncResultConfig.getRetryMaxDelayMs(),
+                AsyncResultConfig.getRemoveAfterFetchStrategy());
+        int pageIndex = 0; // zero-based index for client side
+        SqlExecResult firstPage = requestResultPageWithRetry(jobId, sql, pageIndex, pageSize, context, finalStatus);
         if (!fetchAllPages || firstPage == null) {
+            context.cleanupResultIfNeeded(jobId, pageSize);
             return firstPage;
         }
 
@@ -249,9 +257,9 @@ public class SqlExecutionService {
         String note = firstPage.getNote();
         boolean stoppedByLimit = false;
 
-        while (hasNext && currentPage < MAX_ACCUMULATED_PAGES && allRows.size() < MAX_ACCUMULATED_ROWS) {
-            currentPage++;
-            SqlExecResult pageResult = requestResultPage(jobId, sql, currentPage, pageSize, false);
+        while (hasNext && pageIndex + 1 < MAX_ACCUMULATED_PAGES && allRows.size() < MAX_ACCUMULATED_ROWS) {
+            pageIndex++;
+            SqlExecResult pageResult = requestResultPageWithRetry(jobId, sql, pageIndex, pageSize, context, finalStatus);
             if (pageResult.getRows() != null) {
                 allRows.addAll(pageResult.getRows());
             }
@@ -275,22 +283,94 @@ public class SqlExecutionService {
             OperationLog.log("[" + jobId + "] 达到分页累积上限，已停止继续拉取剩余数据");
         }
 
+        context.cleanupResultIfNeeded(jobId, pageSize);
         return new SqlExecResult(sql, firstPage.getColumns(), firstPage.getColumnDefs(), allRows, allRowMaps, allRows.size(), true, firstPage.getMessage(), jobId,
                 firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
                 firstPage.getRowsAffected(), firstPage.getReturnedRowCount(), firstPage.getActualRowCount(), firstPage.getMaxVisibleRows(),
-                firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), currentPage, pageSize, hasNext,
+                firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), pageIndex + context.resolvedBase(), pageSize, hasNext,
                 truncated, note);
     }
 
-    private SqlExecResult requestResultPage(String jobId, String sql, int page, int pageSize, boolean removeAfterFetch) {
+    private SqlExecResult requestResultPageWithRetry(String jobId,
+                                                     String sql,
+                                                     int pageIndex,
+                                                     int pageSize,
+                                                     ResultFetchContext context,
+                                                     AsyncJobStatus finalStatus) {
         int finalPageSize = Math.min(Math.max(pageSize, 1), MAX_PAGE_SIZE);
-        JsonObject body = new JsonObject();
-        body.addProperty("jobId", jobId);
-        body.addProperty("removeAfterFetch", removeAfterFetch);
-        body.addProperty("page", page);
-        body.addProperty("pageSize", finalPageSize);
-        JsonObject resp = postJson("/jobs/result", body);
-        return parseResultResponse(resp, sql, jobId, page, pageSize);
+        int attempts = Math.max(1, context.maxAttempts());
+        int attempt = 0;
+        long delay = Math.max(0, context.baseDelayMs());
+        boolean useAlternateBase = false;
+        RuntimeException lastError = null;
+        while (attempt < attempts) {
+            attempt++;
+            int page = context.computePageNumber(pageIndex, useAlternateBase);
+            try {
+                JsonObject body = new JsonObject();
+                body.addProperty("jobId", jobId);
+                body.addProperty("removeAfterFetch", context.shouldUseRemoveAfterFetch(pageIndex));
+                body.addProperty("page", page);
+                body.addProperty("pageSize", finalPageSize);
+                JsonObject resp = postJson("/jobs/result", body);
+                boolean success = resp.has("success") && resp.get("success").getAsBoolean();
+                Integer returnedRowCount = resp.has("returnedRowCount") && !resp.get("returnedRowCount").isJsonNull()
+                        ? resp.get("returnedRowCount").getAsInt() : null;
+                Integer actualRowCount = resp.has("actualRowCount") && !resp.get("actualRowCount").isJsonNull()
+                        ? resp.get("actualRowCount").getAsInt() : null;
+                Boolean hasResultSet = resp.has("hasResultSet") && !resp.get("hasResultSet").isJsonNull()
+                        ? resp.get("hasResultSet").getAsBoolean() : null;
+                String message = extractMessage(resp);
+                logAttempt(jobId, attempt, pageIndex, page, finalPageSize, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
+
+                boolean transientUnavailable = isTransientUnavailable(message);
+                SqlExecResult parsed = null;
+                boolean contradictoryEmpty = false;
+                if (success) {
+                    parsed = parseResultResponse(resp, sql, jobId, page, pageSize);
+                    contradictoryEmpty = isContradictoryEmpty(parsed, finalStatus, actualRowCount, returnedRowCount, hasResultSet);
+                }
+
+                if (!success && transientUnavailable) {
+                    lastError = new RuntimeException(message != null ? message : "结果暂不可用");
+                } else if (!success) {
+                    throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
+                }
+
+                boolean shouldRetryForTransient = transientUnavailable;
+                if (parsed != null && !contradictoryEmpty && !shouldRetryForTransient) {
+                    context.resolveBase(page, pageIndex);
+                    context.markResultFetched();
+                    return parsed;
+                }
+
+                if (contradictoryEmpty || shouldRetryForTransient) {
+                    if (context.canFallbackPageBase(useAlternateBase)) {
+                        OperationLog.log("[" + jobId + "] 检测到结果为空/过期，将尝试切换 page 基准并重试");
+                        useAlternateBase = true;
+                    }
+                    lastError = new RuntimeException(message != null ? message : "结果暂不可用");
+                } else if (parsed == null) {
+                    lastError = new RuntimeException(message != null ? message : "结果解析失败");
+                }
+            } catch (RuntimeException ex) {
+                lastError = ex;
+            }
+
+            if (attempt >= attempts) {
+                break;
+            }
+            long sleepMs = Math.min(context.maxDelayMs(), delay);
+            OperationLog.log("[" + jobId + "] /jobs/result attempt=" + attempt + " 将在 " + sleepMs + "ms 后重试");
+            try {
+                Thread.sleep(sleepMs);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("拉取结果被中断", ie);
+            }
+            delay = Math.min(context.maxDelayMs(), delay * 2);
+        }
+        throw lastError != null ? lastError : new RuntimeException("结果获取失败");
     }
 
     SqlExecResult parseResultResponse(JsonObject resp, String sql, String jobId, int requestedPage, int requestedPageSize) {
@@ -524,6 +604,172 @@ public class SqlExecutionService {
         }
     }
 
+    private void logAttempt(String jobId, int attempt, int pageIndex, int page, int pageSize, ResultFetchContext context,
+                            boolean success, Integer returnedRowCount, Integer actualRowCount, Boolean hasResultSet,
+                            String message, boolean alternateBase) {
+        OperationLog.log("[" + jobId + "] /jobs/result attempt=" + attempt
+                + " page=" + page
+                + " (base=" + context.describeBase(page, alternateBase) + ")"
+                + " pageSize=" + pageSize
+                + " removeAfterFetch=" + context.shouldUseRemoveAfterFetch(pageIndex)
+                + " success=" + success
+                + (hasResultSet != null ? (" hasResultSet=" + hasResultSet) : "")
+                + (returnedRowCount != null ? (" returnedRowCount=" + returnedRowCount) : "")
+                + (actualRowCount != null ? (" actualRowCount=" + actualRowCount) : "")
+                + (message != null && !message.isBlank() ? (" message=" + abbreviate(message)) : ""));
+    }
+
+    private boolean isTransientUnavailable(String message) {
+        if (message == null) {
+            return false;
+        }
+        String lower = message.toLowerCase();
+        return lower.contains("result expired") || lower.contains("not available");
+    }
+
+    private boolean isContradictoryEmpty(SqlExecResult parsed,
+                                         AsyncJobStatus finalStatus,
+                                         Integer respActualRowCount,
+                                         Integer returnedRowCount,
+                                         Boolean respHasResultSet) {
+        boolean hasResultSet = coalesceHasResultSet(parsed, finalStatus, respHasResultSet);
+        if (!hasResultSet) {
+            return false;
+        }
+        int expectedActual = firstPositive(respActualRowCount, parsed.getActualRowCount(),
+                finalStatus != null ? finalStatus.getActualRowCount() : null,
+                finalStatus != null ? finalStatus.getReturnedRowCount() : null,
+                returnedRowCount);
+        int returned = firstPositive(parsed.getReturnedRowCount(), returnedRowCount);
+        int realRows = parsed.getRows() != null ? parsed.getRows().size() : 0;
+        return expectedActual > 0 && (returned == 0 || realRows == 0);
+    }
+
+    private boolean coalesceHasResultSet(SqlExecResult parsed, AsyncJobStatus finalStatus, Boolean respHasResultSet) {
+        if (parsed.getHasResultSet() != null) {
+            return parsed.getHasResultSet();
+        }
+        if (respHasResultSet != null) {
+            return respHasResultSet;
+        }
+        if (finalStatus != null && finalStatus.getHasResultSet() != null) {
+            return finalStatus.getHasResultSet();
+        }
+        return true;
+    }
+
+    private int firstPositive(Integer... values) {
+        if (values == null) {
+            return 0;
+        }
+        for (Integer v : values) {
+            if (v != null && v > 0) {
+                return v;
+            }
+        }
+        return 0;
+    }
+
+    private final class ResultFetchContext {
+        private final AsyncResultConfig.PageBase configuredBase;
+        private final int maxAttempts;
+        private final long baseDelayMs;
+        private final long maxDelayMs;
+        private final AsyncResultConfig.RemoveAfterFetchStrategy removeAfterFetchStrategy;
+        private Integer resolvedBase;
+        private boolean fetched;
+
+        ResultFetchContext(AsyncResultConfig.PageBase configuredBase,
+                           int maxAttempts,
+                           long baseDelayMs,
+                           long maxDelayMs,
+                           AsyncResultConfig.RemoveAfterFetchStrategy removeAfterFetchStrategy) {
+            this.configuredBase = configuredBase == null ? AsyncResultConfig.PageBase.AUTO : configuredBase;
+            this.maxAttempts = maxAttempts <= 0 ? 1 : maxAttempts;
+            this.baseDelayMs = Math.max(0, baseDelayMs);
+            this.maxDelayMs = Math.max(this.baseDelayMs, maxDelayMs);
+            this.removeAfterFetchStrategy = removeAfterFetchStrategy == null
+                    ? AsyncResultConfig.RemoveAfterFetchStrategy.AUTO
+                    : removeAfterFetchStrategy;
+        }
+
+        int computePageNumber(int pageIndex, boolean useAlternateBase) {
+            int base = resolvedBase != null ? resolvedBase : determineBase(useAlternateBase);
+            return pageIndex + base;
+        }
+
+        int resolvedBase() {
+            return resolvedBase != null ? resolvedBase : determineBase(false);
+        }
+
+        void resolveBase(int pageNumber, int pageIndex) {
+            this.resolvedBase = Math.max(0, pageNumber - pageIndex);
+        }
+
+        boolean shouldUseRemoveAfterFetch(int pageIndex) {
+            // 避免首次拉取后立即清理导致无法重试，统一改为在成功后追加清理请求
+            return false;
+        }
+
+        boolean canFallbackPageBase(boolean alreadyAlternate) {
+            return configuredBase == AsyncResultConfig.PageBase.AUTO && resolvedBase == null && !alreadyAlternate;
+        }
+
+        int maxAttempts() {
+            return maxAttempts;
+        }
+
+        long baseDelayMs() {
+            return baseDelayMs;
+        }
+
+        long maxDelayMs() {
+            return maxDelayMs;
+        }
+
+        void markResultFetched() {
+            this.fetched = true;
+        }
+
+        void cleanupResultIfNeeded(String jobId, int pageSize) {
+            if (!fetched) {
+                return;
+            }
+            if (removeAfterFetchStrategy == AsyncResultConfig.RemoveAfterFetchStrategy.FALSE) {
+                return;
+            }
+            int page = computePageNumber(0, false);
+            try {
+                JsonObject body = new JsonObject();
+                body.addProperty("jobId", jobId);
+                body.addProperty("removeAfterFetch", true);
+                body.addProperty("page", page);
+                body.addProperty("pageSize", pageSize);
+                postJson("/jobs/result", body);
+                OperationLog.log("[" + jobId + "] 已使用 removeAfterFetch=true 清理结果缓存 (page=" + page + ")");
+            } catch (Exception e) {
+                OperationLog.log("[" + jobId + "] 清理结果缓存失败: " + e.getMessage());
+            }
+        }
+
+        String describeBase(int page, boolean alternateBase) {
+            int base = resolvedBase != null ? resolvedBase : determineBase(alternateBase);
+            return base == 0 ? "0-based" : "1-based";
+        }
+
+        private int determineBase(boolean useAlternateBase) {
+            int preferred = switch (configuredBase) {
+                case ZERO_BASED -> 0;
+                case ONE_BASED -> 1;
+                default -> 1;
+            };
+            if (useAlternateBase) {
+                return preferred == 0 ? 1 : 0;
+            }
+            return preferred;
+        }
+    }
+
     private AsyncJobStatus doCancel(String jobId, String reason) {
         JsonObject body = new JsonObject();
         body.addProperty("jobId", jobId);
@@ -569,10 +815,12 @@ public class SqlExecutionService {
                 ? obj.get("rowsAffected").getAsInt() : null;
         Integer returnedRowCount = obj.has("returnedRowCount") && !obj.get("returnedRowCount").isJsonNull()
                 ? obj.get("returnedRowCount").getAsInt() : null;
+        Integer actualRowCount = obj.has("actualRowCount") && !obj.get("actualRowCount").isJsonNull()
+                ? obj.get("actualRowCount").getAsInt() : null;
         Boolean hasResultSet = obj.has("hasResultSet") && !obj.get("hasResultSet").isJsonNull()
                 ? obj.get("hasResultSet").getAsBoolean() : null;
         String message = extractMessage(obj);
-        return new AsyncJobStatus(jobId, status, progress, elapsed, label, sqlSummary, rowsAffected, returnedRowCount, hasResultSet, message);
+        return new AsyncJobStatus(jobId, status, progress, elapsed, label, sqlSummary, rowsAffected, returnedRowCount, hasResultSet, actualRowCount, message);
     }
 
     private JsonObject postJson(String path, JsonObject payload) {
