@@ -188,14 +188,27 @@
 - 日志会输出 `jobId/attempt/page/base/delay/returnedRowCount/actualRowCount/hasResultSet/message`，便于定位“已完成但结果短暂不可用”的窗口期。
 - SUCCEEDED 后拉取结果在后台线程执行，即便重试也不会阻塞 UI；仅在拿到非空结果后才进入本地 SQLite 写库。部分批次失败不会影响已成功写入的批次。
 
+#### 低延迟调度与资源治理字段
+- 后端新增 `queuedAt/queueDelayMillis/overloaded/threadPool(poolSize/activeCount/queueSize/taskCount/completedTaskCount/jobStoreSize)`，前端在 submit/status/result 日志中透传，便于观察排队与池状态。
+- `/jobs/submit` 直接 `success:false` 或 `overloaded=true` 视为终态拒绝，不进入轮询；`/jobs/status` 返回 `FAILED` 且 message 含 queue delay exceeded 亦为终态，UI 直接提示“排队超时/系统繁忙”。
+
 #### 分页 page 基准与 AUTO 探测规则
 - 默认仍按 1-based 请求 `page=1`，当发现 `hasResultSet=true && actualRowCount>0` 但 `returnedRowCount=0` 或返回空行时，会自动切换到另一种 page 基准（0-based）再试一次，并在当前刷新流程内缓存成功的基准。
 - `ASYNC_SQL_RESULT_PAGE_BASE`：`AUTO`（默认，先 1-based 再按需回退）、`0`、`1`。通过 System Property 或 `config.properties` 覆盖。
 
 #### removeAfterFetch 策略选择
-- 元数据/短结果优先保证可重试性，首次拉取统一使用 `removeAfterFetch=false`，待结果解析成功后再追加一次 `removeAfterFetch=true` 的清理请求（如配置允许），减少缓存占用。
-- `ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER`：`AUTO`（默认，成功后追加清理）、`TRUE`（总是追加清理）、`FALSE`（永不清理）。
-- 若后端在 `removeAfterFetch=true` 后不再允许重试，保持默认即可；日志会记录是否触发清理。
+- 元数据/短结果优先保证可重试性，首次拉取统一使用 `removeAfterFetch=false`。默认 `AUTO` 不会做二次清理，避免清理后无法重试；如确需主动清理，可设置为 `TRUE`。
+- `ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER`：`AUTO`（默认，安全保留缓存）、`TRUE`（解析成功后追加一次 `removeAfterFetch=true`）、`FALSE`（永不清理）。
+- 日志会显示 `removeAfterFetch=<true|false>` 以便确认策略，若后端专门提供清理接口可按需开启。
+
+#### 结果重试与自动重提
+- 结果请求的重试仍受上述退避参数控制，矛盾检测（status 已 SUCCEEDED 且 actualRowCount > 0 但返回 0 行）会自动切换 page 基准并视为暂不可用。
+- 元数据批处理遇到“Result expired / not available”或返回空行的暂不可用场景，会在一次重试失败后自动重提任务（单批仅 1 次），日志包含 `resubmitted=true`、原/新 jobId。
+- 非元数据查询保持谨慎，不会自动重提；如超出重试上限需用户重新执行。
+
+#### 排队节奏与上限字段
+- `maxVisibleRows=1000`、`pageSize` 上限 1000（遵循后端固定窗口），前端默认 pageSize 200，超出会自动裁剪并记录日志。
+- 同步接口的 `maxTotalRows/capped` 字段在结果日志中透传，便于确认是否触发行数封顶。
 
 #### /jobs/result 响应与列推断
 - `resultRows` 依旧兼容 `resultRows/rows/data` 三个字段，先拿数组再落表。

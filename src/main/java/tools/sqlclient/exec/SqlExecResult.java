@@ -31,10 +31,14 @@ public class SqlExecResult {
     private final Boolean hasNext;
     private final Boolean truncated;
     private final String note;
+    private final Long queuedAt;
+    private final Long queueDelayMillis;
+    private final Boolean overloaded;
+    private final ThreadPoolSnapshot threadPool;
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
         this(sql, columns, null, rows, null, rowsCount, true, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null);
     }
 
     public SqlExecResult(String sql,
@@ -60,7 +64,11 @@ public class SqlExecResult {
                          Integer pageSize,
                          Boolean hasNext,
                          Boolean truncated,
-                         String note) {
+                         String note,
+                         Long queuedAt,
+                         Long queueDelayMillis,
+                         Boolean overloaded,
+                         ThreadPoolSnapshot threadPool) {
         this.sql = Objects.requireNonNullElse(sql, "");
         this.columns = columns;
         this.columnDefs = columnDefs;
@@ -85,6 +93,10 @@ public class SqlExecResult {
         this.hasNext = hasNext;
         this.truncated = truncated;
         this.note = note;
+        this.queuedAt = queuedAt;
+        this.queueDelayMillis = queueDelayMillis;
+        this.overloaded = overloaded;
+        this.threadPool = threadPool;
     }
 
     public String getSql() {
@@ -181,5 +193,21 @@ public class SqlExecResult {
 
     public String getNote() {
         return note;
+    }
+
+    public Long getQueuedAt() {
+        return queuedAt;
+    }
+
+    public Long getQueueDelayMillis() {
+        return queueDelayMillis;
+    }
+
+    public Boolean getOverloaded() {
+        return overloaded;
+    }
+
+    public ThreadPoolSnapshot getThreadPool() {
+        return threadPool;
     }
 }

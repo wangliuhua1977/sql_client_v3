@@ -327,6 +327,13 @@ public class MetadataService {
                 OperationLog.log("元数据结果已过期，自动重试一次: " + ex.getMessage());
                 return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
             }
+            if (ex instanceof tools.sqlclient.exec.TransientResultUnavailableException tre) {
+                OperationLog.log("元数据结果暂不可用，自动重提任务: originalJobId=" + Optional.ofNullable(tre.getJobId()).orElse("<unknown>") + " msg=" + tre.getMessage());
+                SqlExecResult retried = sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
+                OperationLog.log("元数据任务已重提 resubmitted=true originalJobId=" + Optional.ofNullable(tre.getJobId()).orElse("<unknown>")
+                        + " newJobId=" + Optional.ofNullable(retried.getJobId()).orElse("<unknown>"));
+                return retried;
+            }
             throw ex;
         }
     }
