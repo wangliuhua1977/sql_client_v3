@@ -36,6 +36,12 @@ public class MetadataService {
     private static final int METADATA_BATCH_SIZE = 1000;
     private static final int METADATA_PAGE_SIZE = 1000;
     private static final int TRACE_ROW_LIMIT = 200;
+    private static final List<String> RESULT_EXPIRED_HINTS = List.of(
+            "result expired",
+            "not available anymore",
+            "结果已过期",
+            "结果不存在"
+    );
     private static final Pattern DDL_PATTERN = Pattern.compile(
             "^(?i)(create|drop|alter)\\s+(or\\s+replace\\s+)?(table|view|function|procedure)\\s+(if\\s+not\\s+exists\\s+|if\\s+exists\\s+)?([A-Za-z0-9_\\.\\\"]+)");
 
@@ -259,6 +265,23 @@ public class MetadataService {
         return snapshot;
     }
 
+    private boolean isResultExpiredError(Throwable error) {
+        Throwable cursor = error;
+        while (cursor != null) {
+            String msg = cursor.getMessage();
+            if (msg != null) {
+                String lower = msg.toLowerCase(Locale.ROOT);
+                for (String hint : RESULT_EXPIRED_HINTS) {
+                    if (lower.contains(hint)) {
+                        return true;
+                    }
+                }
+            }
+            cursor = cursor.getCause();
+        }
+        return false;
+    }
+
     private Map<String, String> loadObjectTypes(Connection conn) throws Exception {
         Map<String, String> objectTypes = new HashMap<>();
         try (PreparedStatement ps = conn.prepareStatement("SELECT object_name, object_type FROM objects")) {
@@ -297,7 +320,15 @@ public class MetadataService {
 
     private SqlExecResult runMetadataSql(String sql) throws Exception {
         OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
+        try {
+            return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
+        } catch (RuntimeException ex) {
+            if (isResultExpiredError(ex)) {
+                OperationLog.log("元数据结果已过期，自动重试一次: " + ex.getMessage());
+                return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
+            }
+            throw ex;
+        }
     }
 
     private int syncObjects(Connection conn, String type, List<String> names, Map<String, String> snapshots) throws Exception {
