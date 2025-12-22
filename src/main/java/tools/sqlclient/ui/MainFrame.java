@@ -11,6 +11,7 @@ import tools.sqlclient.db.SqlHistoryRepository;
 import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.exec.AsyncJobStatus;
+import tools.sqlclient.exec.ColumnOrderDecider;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.metadata.MetadataService;
@@ -21,6 +22,7 @@ import tools.sqlclient.ui.ThemeManager;
 import tools.sqlclient.ui.ThemeOption;
 import tools.sqlclient.ui.QueryResultPanel;
 import tools.sqlclient.ui.ManageNotesDialog.SearchNavigation;
+import tools.sqlclient.util.Config;
 import tools.sqlclient.util.IconFactory;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
@@ -87,6 +89,7 @@ public class MainFrame extends JFrame {
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private final Map<Long, java.util.List<RunningJobHandle>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
+    private final ColumnOrderDecider columnOrderDecider;
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
     // 笔记图标持久化：noteId -> 图标规格
     private final java.util.Map<Long, NoteIconSpec> noteIconSpecs = new java.util.HashMap<>();
@@ -102,6 +105,7 @@ public class MainFrame extends JFrame {
     private EditorTabPanel activePanel;
     private JButton executeButton;
     private JButton stopButton;
+    private JSpinner defaultPageSizeSpinner;
     private JSplitPane leftSplit;
     private JSplitPane centerRightSplit;
     private JSplitPane verticalSplit;
@@ -135,6 +139,7 @@ public class MainFrame extends JFrame {
     private Path scheduledBackupDir;
     private String scheduledBackupLabel;
     private Path lastBackupDir;
+    private int defaultPageSize;
 
     private QuickSqlSnippetDialog quickSqlSnippetDialog;
     private ExecutionHistoryDialog executionHistoryDialog;
@@ -166,6 +171,9 @@ public class MainFrame extends JFrame {
         this.sqlSnippetRepository = new SqlSnippetRepository(sqliteManager);
         this.sqlHistoryRepository = new SqlHistoryRepository(sqliteManager);
         this.styleRepository = new EditorStyleRepository(sqliteManager);
+        this.columnOrderDecider = new ColumnOrderDecider(metadataService);
+        this.defaultPageSize = sanitizePageSize(appStateRepository.loadDefaultPageSize(Config.getDefaultPageSize()));
+        Config.overrideDefaultPageSize(defaultPageSize);
         initTheme();
         // 加载笔记图标配置（noteId -> 图标规格）
         loadNoteIcons();
@@ -1026,6 +1034,14 @@ public class MainFrame extends JFrame {
         toolBar.addSeparator();
         toolBar.add(logButton);
         toolBar.add(layoutButton);
+        toolBar.addSeparator();
+        toolBar.add(new JLabel("默认返回条数:"));
+        defaultPageSizeSpinner = new JSpinner(new SpinnerNumberModel(defaultPageSize, 1, Config.getMaxPageSize(), 10));
+        toolBar.add(defaultPageSizeSpinner);
+        JButton applyPageSizeButton = new JButton("应用");
+        applyPageSizeButton.addActionListener(e -> applyDefaultPageSizeFromUi());
+        styleToolbarButton(applyPageSizeButton);
+        toolBar.add(applyPageSizeButton);
         add(toolBar, BorderLayout.NORTH);
     }
 
@@ -1424,7 +1440,8 @@ public class MainFrame extends JFrame {
                     convertFullWidth,
                     resolveStyleForNote(note),
                     this::onPanelFocused,
-                    this::openNoteByTitle
+                    this::openNoteByTitle,
+                    defaultPageSize
             );
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
@@ -1677,6 +1694,7 @@ public class MainFrame extends JFrame {
 
         String dbUser = panel.getSelectedDbUser();
         int pageSize = panel.getPreferredPageSize();
+        OperationLog.log("本次查询使用 pageSize=" + pageSize);
 
         // 串行执行每一条 SQL
         java.util.concurrent.CompletableFuture<Void> chain =
@@ -1694,7 +1712,11 @@ public class MainFrame extends JFrame {
                         sqlStmt,
                         dbUser,
                         pageSize,
-                        res -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, res, pendingPanel)),
+                        res -> {
+                            SqlExecResult normalized = columnOrderDecider.reorder(res,
+                                    refreshed -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, refreshed, pendingPanel)));
+                            SwingUtilities.invokeLater(() -> renderResult(noteId, panel, normalized, pendingPanel));
+                        },
                         ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage(), pendingPanel)),
                         status -> SwingUtilities.invokeLater(() -> handleStatusUpdate(handle, status, panel))
                 );
@@ -1860,6 +1882,35 @@ public class MainFrame extends JFrame {
         statusLabel.setText("已发送取消请求");
         updateExecutionButtons();
         OperationLog.log("停止执行: " + panel.getNote().getTitle());
+    }
+
+    private void applyDefaultPageSizeFromUi() {
+        Object val = defaultPageSizeSpinner.getValue();
+        int parsed = val instanceof Number ? ((Number) val).intValue() : defaultPageSize;
+        int sanitized = sanitizePageSize(parsed);
+        if (sanitized != parsed) {
+            OperationLog.log("pageSize=" + parsed + " 超出范围，已调整为 " + sanitized);
+        }
+        defaultPageSizeSpinner.setValue(sanitized);
+        defaultPageSize = sanitized;
+        Config.overrideDefaultPageSize(sanitized);
+        appStateRepository.saveDefaultPageSize(sanitized);
+        panelCache.values().forEach(p -> p.updateDefaultPageSize(sanitized));
+        OperationLog.log("默认 pageSize 已更新为 " + sanitized);
+    }
+
+    private int sanitizePageSize(int desired) {
+        int fallback = Config.getDefaultPageSize();
+        int max = Config.getMaxPageSize();
+        if (desired < 1) {
+            OperationLog.log("pageSize=" + desired + " 无效，使用默认值 " + fallback);
+            return fallback;
+        }
+        if (desired > max) {
+            OperationLog.log("pageSize=" + desired + " 超出上限，已裁剪到 " + max);
+            return max;
+        }
+        return desired;
     }
 
     private void updateExecutionButtons() {

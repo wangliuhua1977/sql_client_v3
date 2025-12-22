@@ -4,8 +4,6 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import tools.sqlclient.db.LocalDatabasePathProvider;
-import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.network.TrustAllHttpClient;
 import tools.sqlclient.util.AesEncryptor;
 import tools.sqlclient.util.Config;
@@ -20,20 +18,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * 基于异步任务接口的 SQL 执行服务：提交任务、轮询状态、获取结果。
@@ -46,7 +38,6 @@ public class SqlExecutionService {
     private static final int MAX_ACCUMULATED_ROWS = 100_000;
     private final HttpClient httpClient = TrustAllHttpClient.create();
     private final Gson gson = new Gson();
-    private SQLiteManager metadataReader;
 
     private static final int MAX_LOG_TEXT_LENGTH = 200_000;
 
@@ -91,7 +82,8 @@ public class SqlExecutionService {
     }
 
     private SqlExecResult executeSync(String sql, Integer maxResultRows, boolean fetchAllPages, String dbUser, Integer pageSizeOverride) {
-        AsyncJobStatus submitted = submitJob(sql, maxResultRows, dbUser, null);
+        int resolvedMaxRows = determineMaxRows(maxResultRows, pageSizeOverride);
+        AsyncJobStatus submitted = submitJob(sql, resolvedMaxRows, dbUser, null);
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
             if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
@@ -132,7 +124,7 @@ public class SqlExecutionService {
 
         OperationLog.log("即将提交异步 SQL:\n" + abbreviate(trimmed));
 
-        return CompletableFuture.supplyAsync(() -> submitJob(trimmed, DEFAULT_MAX_RESULT_ROWS, dbUser, null), ThreadPools.NETWORK_POOL)
+        return CompletableFuture.supplyAsync(() -> submitJob(trimmed, determineMaxRows(DEFAULT_MAX_RESULT_ROWS, pageSize), dbUser, null), ThreadPools.NETWORK_POOL)
                 .thenCompose(submit -> {
                     notifyStatus(onStatus, submit);
                     return pollJobUntilDone(submit.getJobId(), onStatus);
@@ -173,7 +165,7 @@ public class SqlExecutionService {
     }
 
     private AsyncJobStatus submitJob(String sql) {
-        return submitJob(sql, DEFAULT_MAX_RESULT_ROWS, null, null);
+        return submitJob(sql, determineMaxRows(DEFAULT_MAX_RESULT_ROWS, null), null, null);
     }
 
     private AsyncJobStatus submitJob(String sql, Integer maxResultRows, String dbUser, String label) {
@@ -236,8 +228,7 @@ public class SqlExecutionService {
     public SqlExecResult requestResultPaged(String jobId, String sql, boolean fetchAllPages, Integer pageSizeOverride) {
         int pageSize = resolvePageSize(pageSizeOverride);
         int currentPage = 1;
-        boolean keepForPaging = Config.allowPagingAfterFirstFetch();
-        boolean removeAfterFetch = fetchAllPages ? false : !keepForPaging;
+        boolean removeAfterFetch = false;
 
         SqlExecResult firstPage = requestResultPage(jobId, sql, currentPage, pageSize, removeAfterFetch);
         if (!fetchAllPages || firstPage == null) {
@@ -245,8 +236,12 @@ public class SqlExecutionService {
         }
 
         List<List<String>> allRows = new ArrayList<>();
+        List<java.util.Map<String, String>> allRowMaps = new ArrayList<>();
         if (firstPage.getRows() != null) {
             allRows.addAll(firstPage.getRows());
+        }
+        if (firstPage.getRowMaps() != null) {
+            allRowMaps.addAll(firstPage.getRowMaps());
         }
 
         boolean hasNext = Boolean.TRUE.equals(firstPage.getHasNext());
@@ -256,10 +251,12 @@ public class SqlExecutionService {
 
         while (hasNext && currentPage < MAX_ACCUMULATED_PAGES && allRows.size() < MAX_ACCUMULATED_ROWS) {
             currentPage++;
-            boolean stopAfterThisPage = currentPage >= MAX_ACCUMULATED_PAGES || allRows.size() >= MAX_ACCUMULATED_ROWS;
-            SqlExecResult pageResult = requestResultPage(jobId, sql, currentPage, pageSize, stopAfterThisPage);
+            SqlExecResult pageResult = requestResultPage(jobId, sql, currentPage, pageSize, false);
             if (pageResult.getRows() != null) {
                 allRows.addAll(pageResult.getRows());
+            }
+            if (pageResult.getRowMaps() != null) {
+                allRowMaps.addAll(pageResult.getRowMaps());
             }
             if (pageResult.getTruncated() != null && pageResult.getTruncated()) {
                 truncated = true;
@@ -268,10 +265,6 @@ public class SqlExecutionService {
                 note = pageResult.getNote();
             }
             hasNext = Boolean.TRUE.equals(pageResult.getHasNext());
-            if (stopAfterThisPage && hasNext) {
-                stoppedByLimit = true;
-                break;
-            }
             if (allRows.size() >= MAX_ACCUMULATED_ROWS) {
                 stoppedByLimit = true;
                 break;
@@ -282,11 +275,7 @@ public class SqlExecutionService {
             OperationLog.log("[" + jobId + "] 达到分页累积上限，已停止继续拉取剩余数据");
         }
 
-        if (!removeAfterFetch && (!hasNext || stoppedByLimit)) {
-            cleanupResult(jobId, currentPage, pageSize);
-        }
-
-        return new SqlExecResult(sql, firstPage.getColumns(), allRows, allRows.size(), true, firstPage.getMessage(), jobId,
+        return new SqlExecResult(sql, firstPage.getColumns(), firstPage.getColumnDefs(), allRows, allRowMaps, allRows.size(), true, firstPage.getMessage(), jobId,
                 firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
                 firstPage.getRowsAffected(), firstPage.getReturnedRowCount(), firstPage.getActualRowCount(), firstPage.getMaxVisibleRows(),
                 firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), currentPage, pageSize, hasNext,
@@ -301,85 +290,70 @@ public class SqlExecutionService {
         body.addProperty("page", page);
         body.addProperty("pageSize", finalPageSize);
         JsonObject resp = postJson("/jobs/result", body);
-        boolean success = resp.has("success") && resp.get("success").getAsBoolean();
-        String status = resp.has("status") && !resp.get("status").isJsonNull() ? resp.get("status").getAsString() : "";
-        Integer progress = resp.has("progressPercent") && !resp.get("progressPercent").isJsonNull()
-                ? resp.get("progressPercent").getAsInt() : null;
-        Long duration = resp.has("durationMillis") && !resp.get("durationMillis").isJsonNull()
-                ? resp.get("durationMillis").getAsLong() : null;
-        Integer rowsAffected = resp.has("rowsAffected") && !resp.get("rowsAffected").isJsonNull()
-                ? resp.get("rowsAffected").getAsInt() : null;
-        Integer returnedRowCount = resp.has("returnedRowCount") && !resp.get("returnedRowCount").isJsonNull()
-                ? resp.get("returnedRowCount").getAsInt() : null;
-        Integer actualRowCount = resp.has("actualRowCount") && !resp.get("actualRowCount").isJsonNull()
-                ? resp.get("actualRowCount").getAsInt() : null;
-        Integer maxVisibleRows = resp.has("maxVisibleRows") && !resp.get("maxVisibleRows").isJsonNull()
-                ? resp.get("maxVisibleRows").getAsInt() : null;
-        Integer maxTotalRows = resp.has("maxTotalRows") && !resp.get("maxTotalRows").isJsonNull()
-                ? resp.get("maxTotalRows").getAsInt() : null;
-        Boolean hasResultSet = resp.has("hasResultSet") && !resp.get("hasResultSet").isJsonNull()
-                ? resp.get("hasResultSet").getAsBoolean() : null;
-        Boolean hasNext = resp.has("hasNext") && !resp.get("hasNext").isJsonNull()
-                ? resp.get("hasNext").getAsBoolean() : false;
-        Boolean truncated = resp.has("truncated") && !resp.get("truncated").isJsonNull()
-                ? resp.get("truncated").getAsBoolean() : null;
-        Integer respPage = resp.has("page") && !resp.get("page").isJsonNull()
-                ? resp.get("page").getAsInt() : page;
-        Integer respPageSize = resp.has("pageSize") && !resp.get("pageSize").isJsonNull()
-                ? resp.get("pageSize").getAsInt() : pageSize;
-        String note = resp.has("note") && !resp.get("note").isJsonNull() ? resp.get("note").getAsString() : null;
-        String message = extractMessage(resp);
-
-        if (!success) {
-            OperationLog.log("[" + jobId + "] 任务失败/未完成: " + message);
-            throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
-        }
-
-        if (hasResultSet != null && !hasResultSet) {
-            List<String> columns = List.of("消息");
-            List<List<String>> rows = new ArrayList<>();
-            String info = rowsAffected != null ? ("影响行数: " + rowsAffected) : (message != null ? message : "执行成功");
-            rows.add(List.of(info));
-            return new SqlExecResult(sql, columns, rows, rows.size(), true, message, jobId, status, progress,
-                    null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
-        }
-
-        JsonArray rowsJson = resp.has("resultRows") && resp.get("resultRows").isJsonArray()
-                ? resp.getAsJsonArray("resultRows") : new JsonArray();
-        List<String> columns = extractColumns(resp, rowsJson, sql);
-        if (columns.isEmpty()) {
-            columns = deriveColumnsFromRows(rowsJson);
-        }
-        List<List<String>> rows = extractRows(rowsJson, columns);
-        int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
-        OperationLog.log("[" + jobId + "] 任务完成，page=" + respPage + " pageSize=" + respPageSize
-                + "，returnedRowCount=" + (returnedRowCount != null ? returnedRowCount : rowCount)
-                + (actualRowCount != null ? ("，actualRowCount=" + actualRowCount) : "")
-                + (maxVisibleRows != null ? ("，maxVisibleRows=" + maxVisibleRows) : "")
-                + (maxTotalRows != null ? ("，maxTotalRows=" + maxTotalRows) : "")
-                + (hasNext ? "，hasNext=true" : "")
-                + (truncated != null && truncated ? "，truncated=true" : ""));
-        if (Boolean.TRUE.equals(truncated)) {
-            OperationLog.log("[" + jobId + "] 后端返回结果被截断（truncated=true）");
-        }
-        if (note != null && !note.isBlank()) {
-            OperationLog.log("[" + jobId + "] note: " + note);
-        }
-        return new SqlExecResult(sql, columns, rows, rowCount, true, message, jobId, status, progress,
-                null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet, respPage, respPageSize, hasNext, truncated, note);
+        return parseResultResponse(resp, sql, jobId, page, pageSize);
     }
 
-    private void cleanupResult(String jobId, int page, int pageSize) {
+    SqlExecResult parseResultResponse(JsonObject resp, String sql, String jobId, int requestedPage, int requestedPageSize) {
         try {
-            JsonObject body = new JsonObject();
-            body.addProperty("jobId", jobId);
-            body.addProperty("removeAfterFetch", true);
-            body.addProperty("page", page);
-            body.addProperty("pageSize", pageSize);
-            postJson("/jobs/result", body);
-            OperationLog.log("[" + jobId + "] 已清理后端结果缓存");
+            boolean success = resp.has("success") && resp.get("success").getAsBoolean();
+            String status = resp.has("status") && !resp.get("status").isJsonNull() ? resp.get("status").getAsString() : "";
+            Integer progress = resp.has("progressPercent") && !resp.get("progressPercent").isJsonNull()
+                    ? resp.get("progressPercent").getAsInt() : null;
+            Long duration = resp.has("durationMillis") && !resp.get("durationMillis").isJsonNull()
+                    ? resp.get("durationMillis").getAsLong() : null;
+            Integer rowsAffected = resp.has("rowsAffected") && !resp.get("rowsAffected").isJsonNull()
+                    ? resp.get("rowsAffected").getAsInt() : null;
+            Integer returnedRowCount = resp.has("returnedRowCount") && !resp.get("returnedRowCount").isJsonNull()
+                    ? resp.get("returnedRowCount").getAsInt() : null;
+            Integer actualRowCount = resp.has("actualRowCount") && !resp.get("actualRowCount").isJsonNull()
+                    ? resp.get("actualRowCount").getAsInt() : null;
+            Integer maxVisibleRows = resp.has("maxVisibleRows") && !resp.get("maxVisibleRows").isJsonNull()
+                    ? resp.get("maxVisibleRows").getAsInt() : null;
+            Integer maxTotalRows = resp.has("maxTotalRows") && !resp.get("maxTotalRows").isJsonNull()
+                    ? resp.get("maxTotalRows").getAsInt() : null;
+            Boolean hasResultSet = resp.has("hasResultSet") && !resp.get("hasResultSet").isJsonNull()
+                    ? resp.get("hasResultSet").getAsBoolean() : null;
+            Boolean hasNext = resp.has("hasNext") && !resp.get("hasNext").isJsonNull()
+                    ? resp.get("hasNext").getAsBoolean() : false;
+            Boolean truncated = resp.has("truncated") && !resp.get("truncated").isJsonNull()
+                    ? resp.get("truncated").getAsBoolean() : null;
+            Integer respPage = resp.has("page") && !resp.get("page").isJsonNull()
+                    ? resp.get("page").getAsInt() : requestedPage;
+            Integer respPageSize = resp.has("pageSize") && !resp.get("pageSize").isJsonNull()
+                    ? resp.get("pageSize").getAsInt() : requestedPageSize;
+            String note = resp.has("note") && !resp.get("note").isJsonNull() ? resp.get("note").getAsString() : null;
+            String message = extractMessage(resp);
+
+            if (!success) {
+                OperationLog.log("[" + jobId + "] 任务失败/未完成: " + message);
+                throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
+            }
+
+            JsonArray rowsJson = extractResultRows(resp);
+            List<String> columns = extractColumns(resp, rowsJson);
+            List<java.util.Map<String, String>> rowMaps = extractRowMaps(rowsJson, columns);
+            List<List<String>> rows = extractRows(rowMaps, columns);
+            int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
+
+            logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
+                    hasNext, truncated, note, columns, rowsJson, rows);
+
+            if (hasResultSet != null && !hasResultSet) {
+                List<String> messageCols = List.of("消息");
+                List<List<String>> messageRows = new ArrayList<>();
+                String info = rowsAffected != null ? ("影响行数: " + rowsAffected) : (message != null ? message : "执行成功");
+                messageRows.add(List.of(info));
+                return new SqlExecResult(sql, messageCols, null, messageRows, List.of(), messageRows.size(), true, message, jobId, status, progress,
+                        null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
+                        respPage, respPageSize, hasNext, truncated, note);
+            }
+
+            return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, true, message, jobId, status, progress,
+                    null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
+                    respPage, respPageSize, hasNext, truncated, note);
         } catch (Exception e) {
-            OperationLog.log("[" + jobId + "] 清理结果缓存失败: " + e.getMessage());
+            OperationLog.log("[" + jobId + "] 解析 /jobs/result 失败: " + e.getMessage());
+            throw new RuntimeException("解析结果失败: " + e.getMessage(), e);
         }
     }
 
@@ -397,10 +371,33 @@ public class SqlExecutionService {
         return target;
     }
 
-    private List<String> extractColumns(JsonObject resp, JsonArray rowsJson, String sql) {
+    private int determineMaxRows(Integer explicitMaxRows, Integer pageSizeOverride) {
+        int targetPageSize = resolvePageSize(pageSizeOverride);
+        if (explicitMaxRows != null && explicitMaxRows > 0) {
+            return Math.max(explicitMaxRows, targetPageSize);
+        }
+        return targetPageSize;
+    }
+
+    private JsonArray extractResultRows(JsonObject resp) {
+        if (resp == null) {
+            return new JsonArray();
+        }
+        if (resp.has("resultRows") && resp.get("resultRows").isJsonArray()) {
+            return resp.getAsJsonArray("resultRows");
+        }
+        for (String key : List.of("rows", "data")) {
+            if (resp.has(key) && resp.get(key).isJsonArray()) {
+                return resp.getAsJsonArray(key);
+            }
+        }
+        return new JsonArray();
+    }
+
+    private List<String> extractColumns(JsonObject resp, JsonArray rowsJson) {
         List<String> columns = new ArrayList<>();
         for (String key : List.of("columns", "resultColumns", "columnNames")) {
-            if (resp.has(key) && resp.get(key).isJsonArray()) {
+            if (resp != null && resp.has(key) && resp.get(key).isJsonArray()) {
                 for (JsonElement el : resp.getAsJsonArray(key)) {
                     if (el != null && el.isJsonPrimitive()) {
                         columns.add(el.getAsString());
@@ -412,70 +409,63 @@ public class SqlExecutionService {
             }
         }
 
-        JsonElement first = rowsJson.size() > 0 ? rowsJson.get(0) : null;
-        if (first != null && first.isJsonObject()) {
-            List<String> ordered = resolveColumnsFromSql(sql, first.getAsJsonObject());
-            if (ordered != null && !ordered.isEmpty()) {
-                return ordered;
+        java.util.LinkedHashSet<String> mergedKeys = deriveColumnsFromObjects(rowsJson);
+        if (!mergedKeys.isEmpty()) {
+            return new ArrayList<>(mergedKeys);
+        }
+
+        if (rowsJson != null && rowsJson.size() > 0 && rowsJson.get(0).isJsonArray()) {
+            int max = 0;
+            for (JsonElement el : rowsJson) {
+                if (el != null && el.isJsonArray()) {
+                    max = Math.max(max, el.getAsJsonArray().size());
+                }
             }
-            // JsonObject 在 Gson 中保持插入顺序，避免依赖 HashMap
-            for (Map.Entry<String, JsonElement> entry : first.getAsJsonObject().entrySet()) {
-                columns.add(entry.getKey());
-            }
-        } else if (first != null && first.isJsonArray()) {
-            JsonArray arr = first.getAsJsonArray();
-            for (int i = 0; i < arr.size(); i++) {
+            for (int i = 0; i < max; i++) {
                 columns.add("col_" + (i + 1));
             }
         }
         return columns;
     }
 
-    private List<String> deriveColumnsFromRows(JsonArray rowsJson) {
-        if (rowsJson == null || rowsJson.size() == 0) {
-            return new ArrayList<>();
-        }
-        JsonElement first = rowsJson.get(0);
-        if (first != null && first.isJsonObject()) {
-            List<String> keys = new ArrayList<>();
-            for (Map.Entry<String, JsonElement> entry : first.getAsJsonObject().entrySet()) {
-                keys.add(entry.getKey());
-            }
+    private java.util.LinkedHashSet<String> deriveColumnsFromObjects(JsonArray rowsJson) {
+        java.util.LinkedHashSet<String> keys = new java.util.LinkedHashSet<>();
+        if (rowsJson == null) {
             return keys;
         }
-        int max = 0;
         for (JsonElement el : rowsJson) {
-            if (el != null && el.isJsonArray()) {
-                max = Math.max(max, el.getAsJsonArray().size());
+            if (el != null && el.isJsonObject()) {
+                for (Map.Entry<String, JsonElement> entry : el.getAsJsonObject().entrySet()) {
+                    keys.add(entry.getKey());
+                }
             }
         }
-        List<String> columns = new ArrayList<>();
-        for (int i = 0; i < max; i++) {
-            columns.add("col" + (i + 1));
-        }
-        return columns;
+        return keys;
     }
 
-    private List<List<String>> extractRows(JsonArray rowsJson, List<String> columns) {
-        List<List<String>> rows = new ArrayList<>();
+    private List<java.util.Map<String, String>> extractRowMaps(JsonArray rowsJson, List<String> columns) {
+        List<java.util.Map<String, String>> rows = new ArrayList<>();
+        if (rowsJson == null) {
+            return rows;
+        }
+        int colCount = columns == null ? 0 : columns.size();
         for (JsonElement el : rowsJson) {
             if (el == null || el.isJsonNull()) {
                 continue;
             }
-            if (el.isJsonArray()) {
-                JsonArray arr = el.getAsJsonArray();
-                List<String> row = new ArrayList<>();
-                for (int i = 0; i < arr.size(); i++) {
-                    JsonElement v = arr.get(i);
-                    row.add(v == null || v.isJsonNull() ? "" : v.getAsString());
+            if (el.isJsonObject()) {
+                JsonObject obj = el.getAsJsonObject();
+                java.util.Map<String, String> row = new java.util.LinkedHashMap<>();
+                for (Map.Entry<String, JsonElement> entry : obj.entrySet()) {
+                    row.put(entry.getKey(), stringifyValue(entry.getValue()));
                 }
                 rows.add(row);
-            } else if (el.isJsonObject()) {
-                JsonObject obj = el.getAsJsonObject();
-                List<String> row = new ArrayList<>();
-                for (String col : columns) {
-                    JsonElement v = obj.get(col);
-                    row.add(v == null || v.isJsonNull() ? "" : v.getAsString());
+            } else if (el.isJsonArray()) {
+                JsonArray arr = el.getAsJsonArray();
+                java.util.Map<String, String> row = new java.util.LinkedHashMap<>();
+                for (int i = 0; i < arr.size(); i++) {
+                    String key = i < colCount ? columns.get(i) : ("col_" + (i + 1));
+                    row.put(key, stringifyValue(arr.get(i)));
                 }
                 rows.add(row);
             }
@@ -483,205 +473,55 @@ public class SqlExecutionService {
         return rows;
     }
 
-    private List<String> resolveColumnsFromSql(String sql, JsonObject firstRow) {
-        String normalized = normalizeSql(sql);
-        if (normalized.isEmpty()) {
-            return null;
+    private List<List<String>> extractRows(List<java.util.Map<String, String>> rowMaps, List<String> columns) {
+        List<List<String>> rows = new ArrayList<>();
+        if (rowMaps == null) {
+            return rows;
         }
-        List<String> star = tryResolveStarColumns(normalized);
-        if (star != null && !star.isEmpty()) {
-            return star;
-        }
-        if (firstRow == null) {
-            return null;
-        }
-        List<String> explicit = tryResolveExplicitColumns(normalized);
-        return explicit != null && !explicit.isEmpty() ? explicit : null;
-    }
-
-    private List<String> tryResolveStarColumns(String sql) {
-        String compact = sql.replaceAll("\\s+", " ").trim();
-        Pattern pattern = Pattern.compile("^select \\\\* from ([A-Za-z0-9_\\.]+)\\s*;?$", Pattern.CASE_INSENSITIVE);
-        Matcher matcher = pattern.matcher(compact);
-        if (!matcher.matches()) {
-            return null;
-        }
-        if (containsComplexKeyword(compact)) {
-            return null;
-        }
-        String tableToken = matcher.group(1);
-        String objectName = tableToken.contains(".")
-                ? tableToken.substring(tableToken.lastIndexOf('.') + 1)
-                : tableToken;
-        return loadCachedColumns(objectName);
-    }
-
-    private boolean containsComplexKeyword(String sql) {
-        Pattern forbidden = Pattern.compile("\\b(join|where|group\\s+by|order\\s+by|limit|union|with|having)\\b",
-                Pattern.CASE_INSENSITIVE);
-        return forbidden.matcher(sql).find();
-    }
-
-    private List<String> tryResolveExplicitColumns(String sql) {
-        Matcher selectMatcher = Pattern.compile("\\bselect\\b", Pattern.CASE_INSENSITIVE).matcher(sql);
-        if (!selectMatcher.find()) {
-            return null;
-        }
-        Matcher fromMatcher = Pattern.compile("\\bfrom\\b", Pattern.CASE_INSENSITIVE).matcher(sql);
-        if (!fromMatcher.find(selectMatcher.end())) {
-            return null;
-        }
-        int fromIdx = fromMatcher.start();
-        String selectPart = sql.substring(selectMatcher.end(), fromIdx).trim();
-        if (selectPart.toLowerCase(Locale.ROOT).startsWith("distinct ")) {
-            selectPart = selectPart.substring("distinct".length()).trim();
-        }
-        if (selectPart.isEmpty()) {
-            return null;
-        }
-        List<String> tokens = splitColumns(selectPart);
-        if (tokens.isEmpty()) {
-            return null;
-        }
-        List<String> columns = new ArrayList<>();
-        for (String token : tokens) {
-            String trimmed = token.trim();
-            if (isComplexToken(trimmed)) {
-                return null;
+        List<String> targetColumns = columns == null ? List.of() : columns;
+        for (java.util.Map<String, String> map : rowMaps) {
+            List<String> row = new ArrayList<>();
+            for (String col : targetColumns) {
+                row.add(map != null ? map.get(col) : null);
             }
-            String alias = extractAlias(trimmed);
-            if (alias != null && !alias.isBlank()) {
-                columns.add(alias);
-                continue;
-            }
-            String stripped = stripQualifier(trimmed);
-            columns.add(stripped);
+            rows.add(row);
         }
-        return columns;
+        return rows;
     }
 
-    private List<String> splitColumns(String selectPart) {
-        List<String> tokens = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        int depth = 0;
-        boolean inQuote = false;
-        for (int i = 0; i < selectPart.length(); i++) {
-            char ch = selectPart.charAt(i);
-            if (ch == '\'' || ch == '"') {
-                inQuote = !inQuote;
-            }
-            if (!inQuote) {
-                if (ch == '(') depth++;
-                if (ch == ')') depth = Math.max(0, depth - 1);
-                if (ch == ',' && depth == 0) {
-                    tokens.add(current.toString());
-                    current.setLength(0);
-                    continue;
-                }
-            }
-            current.append(ch);
+    private String stringifyValue(JsonElement v) {
+        if (v == null || v.isJsonNull()) {
+            return null;
         }
-        if (current.length() > 0) {
-            tokens.add(current.toString());
+        if (v.isJsonPrimitive()) {
+            return v.getAsString();
         }
-        return tokens;
+        return gson.toJson(v);
     }
 
-    private boolean isComplexToken(String token) {
-        String lower = token.toLowerCase(Locale.ROOT);
-        if (lower.contains(" select ") || lower.contains(" case ")) {
-            return true;
+    private void logResultDetails(String jobId, Integer respPage, Integer respPageSize, Integer returnedRowCount,
+                                  Integer actualRowCount, Integer maxVisibleRows, Integer maxTotalRows, Boolean hasNext,
+                                  Boolean truncated, String note, List<String> columns, JsonArray rowsJson, List<List<String>> rows) {
+        OperationLog.log("[" + jobId + "] 任务完成，page=" + respPage + " pageSize=" + respPageSize
+                + "，returnedRowCount=" + (returnedRowCount != null ? returnedRowCount : rows.size())
+                + (actualRowCount != null ? ("，actualRowCount=" + actualRowCount) : "")
+                + (maxVisibleRows != null ? ("，maxVisibleRows=" + maxVisibleRows) : "")
+                + (maxTotalRows != null ? ("，maxTotalRows=" + maxTotalRows) : "")
+                + (hasNext != null && hasNext ? "，hasNext=true" : "")
+                + (truncated != null && truncated ? "，truncated=true" : ""));
+        OperationLog.log("[" + jobId + "] resultRows.size=" + (rowsJson == null ? 0 : rowsJson.size())
+                + " columns=" + columns.size() + " -> " + abbreviate(String.join(",", columns)));
+        if (rowsJson != null && rowsJson.size() > 0 && rowsJson.get(0).isJsonObject()) {
+            var firstKeys = new ArrayList<String>();
+            rowsJson.get(0).getAsJsonObject().keySet().forEach(firstKeys::add);
+            OperationLog.log("[" + jobId + "] first row keys=" + abbreviate(String.join(",", firstKeys)));
         }
-        for (char c : new char[]{'(', ')', '+', '/', '-'}) {
-            if (token.indexOf(c) >= 0) {
-                return true;
-            }
+        if (note != null && !note.isBlank()) {
+            OperationLog.log("[" + jobId + "] note: " + note);
         }
-        int starIdx = token.indexOf('*');
-        return starIdx > 0 || (lower.contains("*") && token.trim().length() != 1);
-    }
-
-    private String extractAlias(String token) {
-        String lower = token.toLowerCase(Locale.ROOT);
-        int asIdx = lower.lastIndexOf(" as ");
-        if (asIdx >= 0) {
-            return stripQuotes(token.substring(asIdx + 4).trim());
+        if (Boolean.TRUE.equals(truncated)) {
+            OperationLog.log("[" + jobId + "] 后端返回结果被截断（truncated=true）");
         }
-        String[] parts = token.trim().split("\\s+");
-        if (parts.length >= 2) {
-            return stripQuotes(parts[parts.length - 1]);
-        }
-        return null;
-    }
-
-    private String stripQualifier(String token) {
-        String stripped = token.trim();
-        int dot = stripped.lastIndexOf('.');
-        if (dot >= 0 && dot < stripped.length() - 1) {
-            stripped = stripped.substring(dot + 1);
-        }
-        return stripQuotes(stripped);
-    }
-
-    private String stripQuotes(String text) {
-        if (text == null || text.isBlank()) {
-            return text;
-        }
-        String trimmed = text.trim();
-        if ((trimmed.startsWith("\"") && trimmed.endsWith("\""))
-                || (trimmed.startsWith("`") && trimmed.endsWith("`"))
-                || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
-            return trimmed.substring(1, trimmed.length() - 1);
-        }
-        return trimmed;
-    }
-
-    private List<String> loadCachedColumns(String objectName) {
-        String name = sanitizeObjectName(objectName);
-        if (name.isEmpty()) {
-            return List.of();
-        }
-        List<String> cols = new ArrayList<>();
-        try (Connection conn = metadataDb().getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no")) {
-            ps.setString(1, name);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    cols.add(rs.getString(1));
-                }
-            }
-        } catch (Exception e) {
-            OperationLog.log("读取本地列缓存失败: " + e.getMessage());
-        }
-        return cols;
-    }
-
-    private String sanitizeObjectName(String objectName) {
-        if (objectName == null) {
-            return "";
-        }
-        String trimmed = objectName.trim();
-        if (trimmed.contains(".")) {
-            trimmed = trimmed.substring(trimmed.lastIndexOf('.') + 1);
-        }
-        return trimmed.replace("'", "");
-    }
-
-    private SQLiteManager metadataDb() {
-        if (metadataReader == null) {
-            metadataReader = new SQLiteManager(LocalDatabasePathProvider.resolveMetadataDbPath());
-            metadataReader.initSchema();
-        }
-        return metadataReader;
-    }
-
-    private String normalizeSql(String sql) {
-        if (sql == null) {
-            return "";
-        }
-        String withoutBlock = sql.replaceAll("(?s)/\\*.*?\\*/", " ");
-        String withoutLine = withoutBlock.replaceAll("(?m)^\\s*--.*?$", " ");
-        return withoutLine.trim();
     }
 
     private AsyncJobStatus doCancel(String jobId, String reason) {

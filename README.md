@@ -132,6 +132,11 @@
 - 相关配置集中在 `AsyncSqlConfig`，包含 BASE_URL、Token、AES Key/IV 等；证书忽略逻辑在 `TrustAllHttpClient`。
 - 元数据或查询列顺序异常时，可开启操作日志观察“执行元数据 SQL”与任务完成日志，确认返回的列名顺序；必要时清空本地 SQLite（工具-重置元数据）后重试。
 
+### 常见排查（列顺序 / 空列头 / pageSize 裁剪）
+- 列乱序：查看日志中的 `columns=` 与 `first row keys=`，确认是否触发了“正在拉取表 <name> 的字段顺序”提示；单表 `SELECT *` 会等待本地元数据顺序并在拉取完成后刷新 UI。
+- 空列头：结果 0 行时也应看到列名；若未出现，确认后端是否返回了列名数组，或检查日志中的 SELECT 解析结果与兜底 `col_n` 提示。
+- pageSize 被裁剪：日志会输出 “pageSize=5000 超出上限，已裁剪到 1000”等信息；确认工具栏“默认返回条数”与每个 Tab 的 pageSize 输入框均在 1~1000 范围内。
+
 ## 日志与元数据修复补充说明
 
 ### HTTPS 全量日志输出
@@ -174,11 +179,39 @@
 - **/api/jobs/status**：`{"jobId":"..."}`，返回 `status/progressPercent/elapsedMillis` 等任务信息。
 - **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":true?, "page":1?, "pageSize":200?}`。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize`，客户端全部做空值兼容。
 
+#### /jobs/result 响应与列推断
+- `resultRows` 依旧兼容 `resultRows/rows/data` 三个字段，先拿数组再落表。
+- **列顺序决策链**：
+  1. 如果是 `SELECT * FROM <单表>`，优先按本地缓存的字段顺序（metadata.columns.sort_no）渲染；若缓存缺失会后台拉取后刷新；
+  2. 显式列清单（`SELECT a AS x, b ...`）按用户书写顺序+别名展示，与后端返回顺序无关；
+  3. 复杂查询（JOIN/子查询/函数返回）优先使用后端返回的 `columns/resultColumns/columnNames` 顺序；
+  4. 后端无列名时会对 SELECT 与 FROM 之间的顶层逗号分隔投影做轻量解析，提取别名/标识符；解析失败则稳定生成 `col_1..n` 占位。
+- **行值重排**：渲染前显式根据决策出的最终列顺序重排行值；即便 `resultRows` 为空，也会按上述策略生成表头，避免“0 行时无列名”。
+- OperationLog 额外打印 `jobId/returnedRowCount/resultRows.size/columns.size/第一行 keys` 等调试信息，解析异常会在 UI 直接提示错误。
+
+### 结果列顺序与空结果展示
+- `SELECT * FROM <单表>`：按照本地元数据的 `ordinal_position` 展示列顺序；若缓存缺失会触发异步拉取，加载完成后自动刷新对应结果面板。
+- `SELECT colA AS x, colB ...`：严格遵循用户输入的投影顺序与别名，别名优先作为列头。
+- 复杂查询（JOIN/聚合/函数返回）：若后端提供列名数组则按返回顺序展示；否则按轻量解析得到的投影列表稳定落表。
+- 空结果集仍会显示列头，优先级：后端列名数组 > 显式 SELECT 解析 > 单表 `*` 使用本地列缓存 > 兜底 `col_1..n`。日志会提示任何裁剪/兜底行为。
+
+#### 列名/列值错位修复（2024-07）
+- 根因：当后端已返回列名时，轻量解析器仍可能用 `SELECT` 投影覆盖真实列（例如 `a.*`、`a.lx_flag, *`、`acct_id::varchar`），导致列头数量与行值不一致；同时重复列名会被去重。
+- 修复策略：
+  - 只要后端列名非空，默认直接采用其顺序与数量；仅在纯粹 `SELECT * FROM <单表>` 且元数据顺序已缓存时，才用元数据重排；其它情况不再用轻量解析结果覆盖。
+  - 轻量解析仅在后端列名缺失时兜底生成列头，避免 `a.*` 与 `::` 转换被误判。
+- 重复列名展示规则：不再去重或裁剪列数，JTable 直接展示重复列头；必要时可在 UI 层追加序号，但默认保持与行值一一对应。
+
+#### removeAfterFetch 处理
+- 首次 `/jobs/result` 默认强制 `removeAfterFetch=false`，避免分页或二次渲染时被意外清空；若后端缺少专用清理接口，则保留缓存优先保证可用性。
+- 同一 `jobId` 不会再二次调用带 `removeAfterFetch=true` 的 `/jobs/result` 自毁结果，后续分页/刷新直接复用首次返回的数据结构。
+
 #### 分页策略与上限
 - 默认 `page=1`、`pageSize=200`，客户端与 README 都建议显式传入。`config.properties` 提供 `result.pageSize` 默认 200，`result.pageSize.max` 固定上限 1000。
 - 前端会在 Tab 工具栏读取用户输入的 pageSize；`<1` 直接回退默认值，`>1000` 自动裁剪为 1000 并在操作日志输出“已裁剪到 1000”。
 - `hasNext`、`returnedRowCount`、`actualRowCount`、`maxVisibleRows`、`maxTotalRows`、`truncated`、`note` 全部写入 OperationLog 以便排障。`hasNext` 的计算基于 1000 行可见窗口，无法通过翻页突破上限。
 - 常规 SQL 默认仅抓取第一页并根据 `allowPagingAfterFirstFetch` 决定是否清理缓存；元数据同步仍使用 `executeSyncAllPages` 自动翻页，但单页上限依然受 1000 限制。
+- 工具栏新增“默认返回条数”输入框 + “应用”按钮（1~1000，步长 10），修改后立即作用于后续查询；会持久化到 `app_state.default_page_size` 并通过 `Config.overrideDefaultPageSize` 影响 `/jobs/result` 的 pageSize 与 `/jobs/submit` 的 maxResultRows。超过 1000 会被裁剪到 1000，0/负数会回退到安全默认值 200，日志均有提示。
 
 #### dbUser 选项（每个 Tab 独立）
 - 每个 SQL 编辑 Tab 的工具栏新增 `dbUser` 下拉框，可在 `leshan / leshan_app` 间切换，默认 `leshan`。选择仅作用于当前 Tab 的 `/jobs/submit` 请求，互不串台。
