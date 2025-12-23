@@ -9,6 +9,27 @@
 
 > 若容器/网络限制导致构建失败，可在联网环境下重新执行 Maven 下载依赖。
 
+## PostgreSQL 语义服务（postgres-language-server）
+- **可执行文件放置规则**  
+  - 开发态：将 `postgres-language-server.exe` 放在项目根目录（与 `pom.xml` 同级）。  
+  - 发行态：与最终打包后的 EXE 同目录，应用启动时会自动发现并使用。  
+  - 未找到可执行文件时，会弹出一次提示并自动降级为仅本地元数据联想，编辑/执行功能可用。
+- **启动参数（应用自动拉起）**  
+  ```powershell
+  .\postgres-language-server.exe --skip-db lsp-proxy --config-path "$env:APPDATA\\sql_client_v3\\pgls" --log-path ".\\logs" --log-prefix-name "sql_client_v3"
+  ```
+- **手工验证（PowerShell）**  
+  ```powershell
+  .\postgres-language-server.exe version
+  .\postgres-language-server.exe --skip-db lsp-proxy --config-path "$env:APPDATA\\sql_client_v3\\pgls"
+  ```
+- **日志位置**：`logs\pg-lsp.log`（应用自动写入 server stdout/stderr）。  
+- **快捷键**：`Ctrl+Space` 合并补全（本地元数据 + LSP），`Alt+H` 显示 Hover 信息。  
+- **常见错误与排障**  
+  - 双击执行出现“一闪而过”是 CLI 正常退出现象。  
+  - “不是有效的 Win32 应用程序”：确认下载的 exe 与操作系统架构匹配（x86_64 vs aarch64）。  
+  - Windows 可能阻止下载的可执行文件，可运行 `Unblock-File .\postgres-language-server.exe` 解除阻止。  
+
 ## 界面布局与面板停靠
 - 默认布局：左侧“对象/笔记”导航，中央 SQL 编辑器，底部停靠“结果/日志/任务/历史”多标签面板，右侧为 Inspector 预留区。
 - 视图菜单：

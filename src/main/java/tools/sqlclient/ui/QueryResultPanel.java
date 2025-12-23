@@ -11,6 +11,7 @@ import java.awt.*;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 通用结果面板，展示单条 SQL 执行的结果集与异步进度。
@@ -83,12 +84,43 @@ public class QueryResultPanel extends JPanel {
 
     public static QueryResultPanel pending(String sqlText) {
         List<String> cols = List.of("消息");
+        List<ColumnDef> colDefs = List.of(new ColumnDef("msg#1", "消息", "消息"));
         List<List<String>> rows = List.of(List.of("任务已提交，等待执行..."));
-        SqlExecResult res = new SqlExecResult(sqlText, cols, null, rows, List.of(), rows.size(), false,
-                "任务已提交", null, "QUEUED", 0, null, null, null, null, null, null, null, true,
-                null, null, null, null, null);
+
+        SqlExecResult res = new SqlExecResult(
+                sqlText,                         // 1  sql
+                cols,                            // 2  columns
+                colDefs,                         // 3  columnDefs
+                rows,                            // 4  rows
+                List.<Map<String, String>>of(),  // 5  meta/list-of-maps
+                rows.size(),                     // 6  rowsCount
+                false,                           // 7  truncated
+                "任务已提交，等待执行...",          // 8  message
+                null,                            // 9  note
+                "QUEUED",                        // 10 status
+                0,                               // 11 progressPercent
+                null,                            // 12 elapsedMillis
+                null,                            // 13 durationMillis
+                null,                            // 14 pageNo
+                null,                            // 15 pageSize
+                null,                            // 16 returnedRows
+                null,                            // 17 totalRows
+                null,                            // 18 totalPages
+                Boolean.FALSE,                   // 19 hasMore
+                null,                            // 20 warningCode
+                null,                            // 21 errorCode
+                Boolean.TRUE,                    // 22 isSelect
+                Boolean.TRUE,                    // 23 isAsync
+                null,                            // 24 jobId
+                null,                            // 25 queuedAtMillis
+                null,                            // 26 startedAtMillis
+                Boolean.FALSE,                   // 27 persisted
+                null                             // 28 threadPoolSnapshot
+        );
+
         return new QueryResultPanel(res, sqlText);
     }
+
 
     public void updateProgress(AsyncJobStatus status) {
         if (status == null) {

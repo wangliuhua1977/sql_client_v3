@@ -37,9 +37,38 @@ public class SqlExecResult {
     private final ThreadPoolSnapshot threadPool;
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
-        this(sql, columns, null, rows, null, rowsCount, true, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null);
+        this(
+                sql,
+                columns,
+                null, // columnDefs
+                rows,
+                null, // rowMaps
+                rowsCount,
+                true, // success
+                null, // message
+                null, // jobId
+                null, // status
+                null, // progressPercent
+                null, // elapsedMillis
+                null, // durationMillis
+                null, // rowsAffected
+                null, // returnedRowCount
+                null, // actualRowCount
+                null, // maxVisibleRows
+                null, // maxTotalRows
+                null, // hasResultSet
+                null, // page
+                null, // pageSize
+                null, // hasNext
+                null, // truncated
+                null, // note
+                null, // queuedAt
+                null, // queueDelayMillis
+                null, // overloaded
+                null  // threadPool
+        );
     }
+
 
     public SqlExecResult(String sql,
                          List<String> columns,

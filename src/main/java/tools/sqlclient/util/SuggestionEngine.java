@@ -34,6 +34,7 @@ public class SuggestionEngine {
     private boolean showTableHintForColumns = true;
     private SuggestionContext lastContext;
     private volatile boolean enabled = true;
+    public record SuggestionSnapshot(String token, SuggestionContext context, List<SuggestionItem> items) {}
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -161,6 +162,22 @@ public class SuggestionEngine {
                 showSuggestions(prefix, ctx);
             }
         };
+    }
+
+    /**
+     * 提供给外部合并补全使用的快照，复用同一套上下文分析逻辑。
+     */
+    public SuggestionSnapshot snapshotForCaret() {
+        SuggestionContext ctx = analyzeContext();
+        if (ctx == null) {
+            return new SuggestionSnapshot("", null, List.of());
+        }
+        String token = currentToken();
+        if (token.contains(".")) {
+            token = token.substring(token.lastIndexOf('.') + 1);
+        }
+        List<SuggestionItem> items = metadataService.suggest(token, ctx, 30);
+        return new SuggestionSnapshot(token, ctx, items);
     }
 
 
