@@ -58,10 +58,10 @@
 - 新增 Alt+E 联想开关、元数据状态提示与日志面板默认收拢，执行/停止按钮随焦点窗口切换。
 
 ## 元数据刷新（3 万条规模）
-- **窗口硬约束**：后端单次返回窗口恒定 1000 行（`maxVisibleRows=1000`），page 1-based，`pageSize` 默认 200 且最大 1000，所有元数据 SQL 均固定 `LIMIT 1000` 并使用 `page=1`、`removeAfterFetch=true` 拉取，禁止依赖 `hasNext` 绕过上限。
+- **窗口硬约束**：后端单次返回窗口恒定 1000 行（`maxVisibleRows=1000`），page 1-based，`pageSize` 默认 200 且最大 1000，所有元数据 SQL 均固定 `LIMIT 1000` 并使用 `page=1` 拉取。轮询阶段始终 `removeAfterFetch=false`，只有在确认结果就绪后追加一次最终拉取 `removeAfterFetch=true`，避免提前清理导致 404。
 - **分批策略**：优先使用 keyset 分页（`object_name > :lastName ORDER BY object_name LIMIT 1000`，初始 `lastName=''`），当字符集排序不稳定时自动按前缀桶（0-9/a-c/.../x-z/其它）分桶后再做 keyset，防止卡在 1000 窗口内。表/视图/函数/过程各自独立循环，`lastName` 只以后端返回值推进，防御性检测到不推进即切换桶或终止。
-- **状态机与容错**：仅轮询 `/jobs/result`，间隔 300~500ms，单批次最长等待 60s；`RESULT_NOT_READY` 或 RUNNING/QUEUED/ACCEPTED 继续等待，`archiveError` 立即失败；HTTP 410 + `RESULT_EXPIRED` 自动重提同一批（最多 1 次）；`overloaded=true` 或提交被拒绝采用指数退避（500ms 起，最高 8s，最多 3 次）后重试本批。
-- **并发与清理**：元数据抓取全程后台线程串行提交（默认并发 1，可配置到 2），严格遵循“提交 -> 等待完成 -> 取结果 -> 立即释放”顺序，所有请求均带 `X-Request-Token: WAF_STATIC_TOKEN_202405` 与 AES/CBC/PKCS5Padding+Base64 加密的 SQL。
+- **状态机与容错**：仅轮询 `/jobs/result`，间隔 300~500ms，单批次最长等待 60s；`RESULT_NOT_READY` 或 RUNNING/QUEUED/ACCEPTED 继续等待，`archiveError` 立即失败；HTTP 410 + `RESULT_EXPIRED` 自动重提同一批（最多 1 次）；`overloaded=true` 或提交被拒绝采用指数退避（500ms 起，最高 8s，最多 3 次）后重试本批；HTTP 404 + message “Job not found” 视为 jobStore 已清理或负载均衡打散，会自动重提一次。
+- **并发与清理**：元数据抓取全程后台线程串行提交（默认并发 1，可配置到 2），严格遵循“提交 -> 等待完成 -> 轮询结果 -> 最终取数并释放”两段式顺序，所有请求均带 `X-Request-Token: WAF_STATIC_TOKEN_202405` 与 AES/CBC/PKCS5Padding+Base64 加密的 SQL，且默认开启 Cookie 粘性以保持同一实例。
 - **本地缓存与 UI 性能**：批次结果先写入 SQLite 分区表 `objects_staging/columns_staging`，完成后一次性事务替换正式表，避免半成品污染；列信息按单表查询（每表通常 <1000 行），不会做全库 join 拉列；刷新、列抓取与日志输出均在后台线程执行，UI 仅接收进度文本，不会一次性把 3 万行塞进 JTable，列表/树继续惰性读取本地缓存。
 - **开发者自测入口**：工具菜单新增 “Refresh Metadata (Large)” 入口，执行完整批次刷新并弹窗展示 `tablesCount/columnsCount/batches/duration`，便于验证 3 万规模无超时、不过载、不卡 UI。
 
@@ -185,7 +185,7 @@
 #### 接口总览
 - **/api/jobs/submit**：`{"encryptedSql": "<Base64 AES>", "maxResultRows":5000?, "dbUser":"leshan_app"?, "label":"xxx"?}`。`dbUser` 逻辑库用户默认 `leshan`，`maxResultRows` 仅影响首次内存快照，并不限制最终可见行数。
 - **/api/jobs/status**：`{"jobId":"..."}`，返回 `status/progressPercent/elapsedMillis` 等任务信息。
-- **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":true?, "page":1?, "pageSize":200?}`。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize`，客户端全部做空值兼容。
+- **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":false/true, "page":1?, "pageSize":200?}`，page 1-based、pageSize≤1000（超出会被前端裁剪）。轮询阶段一律 `removeAfterFetch=false`，仅在已就绪时发送一次 `removeAfterFetch=true` 释放 jobStore。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize/resultAvailable/archived/archiveError/queuedAt/queueDelayMillis/overloaded/threadPool`，客户端全部做空值兼容。
 
 #### 异步 SQL 结果一致性窗口与客户端重试策略
 - 状态 `SUCCEEDED` 但结果暂不可用时（`success=false` 且 message 含 “Result expired/not available” 或返回行/计数矛盾），前端自动进入自愈重试，不再直接宣告失败。
@@ -205,9 +205,14 @@
 - `ASYNC_SQL_RESULT_PAGE_BASE`：`AUTO`（默认，先 1-based 再按需回退）、`0`、`1`。通过 System Property 或 `config.properties` 覆盖。
 
 #### removeAfterFetch 策略选择
-- 元数据/短结果优先保证可重试性，首次拉取统一使用 `removeAfterFetch=false`。默认 `AUTO` 不会做二次清理，避免清理后无法重试；如确需主动清理，可设置为 `TRUE`。
-- `ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER`：`AUTO`（默认，安全保留缓存）、`TRUE`（解析成功后追加一次 `removeAfterFetch=true`）、`FALSE`（永不清理）。
-- 日志会显示 `removeAfterFetch=<true|false>` 以便确认策略，若后端专门提供清理接口可按需开启。
+- 元数据刷新强制“两段式”取数：轮询阶段始终 `removeAfterFetch=false`，确认 `status=SUCCEEDED && resultAvailable=true` 后再追加一次 `removeAfterFetch=true` 的最终拉取，防止轮询阶段意外清理导致下一次请求直接 404。
+- 普通 SQL 查询沿用可配置策略：`ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER` 可设为 `AUTO`（默认，安全保留缓存）、`TRUE`（解析成功后追加一次清理）、`FALSE`（永不清理）。日志会显示 `removeAfterFetch=<true|false>` 便于确认行为。
+
+#### 会话粘性与业务 404 兜底
+- HTTP 客户端默认启用 CookieJar（基于 `CookieManager`），收到 `Set-Cookie` 会在后续请求自动携带，降低多实例/LB 下 submit/result 落到不同实例造成的 “Job not found”。
+- `/jobs/result` 返回 HTTP 404 且 message=Job not found 代表后端内存 jobStore 已清理或请求被路由到不同实例。元数据刷新会自动重提一次本批 SQL（重新 submit 再轮询），超过一次仍失败则报错并在日志中输出 jobId/lastKey。
+- HTTP 410 或 code=RESULT_EXPIRED 会抛出 `ResultExpiredException`，元数据刷新同样仅自动重提一次；`RESULT_NOT_READY`、status=ACCEPTED/QUEUED/RUNNING/CANCELLING 保持轮询；`archiveError` 立即失败。
+- 相关日志会输出 jobId/label/schema/lastKey/removeAfterFetch/httpStatus/status/success/code/message/resultAvailable/archived/archiveError/queuedAt/queueDelayMillis/overloaded/threadPool/archivedAt/expiresAt/lastAccessAt/returnedRowCount/actualRowCount/truncated/maxVisibleRows/batchSize，便于复现归档/过期/过载问题。
 
 #### 结果重试与自动重提
 - 结果请求的重试仍受上述退避参数控制，矛盾检测（status 已 SUCCEEDED 且 actualRowCount > 0 但返回 0 行）会自动切换 page 基准并视为暂不可用。
@@ -242,8 +247,8 @@
 - 重复列名展示规则：不再去重或裁剪列数，JTable 直接展示重复列头；必要时可在 UI 层追加序号，但默认保持与行值一一对应。
 
 #### removeAfterFetch 处理
-- 首次 `/jobs/result` 统一使用 `removeAfterFetch=false`，避免在可重试窗口内提前清空缓存；当配置为 `AUTO/TRUE` 且结果已成功解析后，会在后台追加一次 `removeAfterFetch=true` 清理请求以释放服务端缓存。
-- 若配置为 `FALSE`，则完全跳过清理请求，确保即便后端在 `removeAfterFetch=true` 后不允许重试也不会影响可用性。
+- 元数据刷新：轮询时永远 `removeAfterFetch=false`，仅在就绪时发送一次 `removeAfterFetch=true` 的最终拉取；若最终拉取失败（HTTP 404 job not found / 410 过期）会自动重提一次本批次再重复上述流程。
+- 其他查询：首个 `/jobs/result` 请求遵循 `ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER`，`AUTO/TRUE` 会在解析成功后后台追加一次 `removeAfterFetch=true` 清理，`FALSE` 则完全跳过清理请求。
 
 #### 分页策略与上限
 - 默认 `page=1`、`pageSize=200`，客户端与 README 都建议显式传入。`config.properties` 提供 `result.pageSize` 默认 200，`result.pageSize.max` 固定上限 1000。
