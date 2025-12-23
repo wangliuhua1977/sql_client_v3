@@ -288,11 +288,37 @@ public class SqlExecutionService {
         }
 
         context.cleanupResultIfNeeded(jobId, pageSize);
-        return new SqlExecResult(sql, firstPage.getColumns(), firstPage.getColumnDefs(), allRows, allRowMaps, allRows.size(), true, firstPage.getMessage(), jobId,
-                firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
-                firstPage.getRowsAffected(), firstPage.getReturnedRowCount(), firstPage.getActualRowCount(), firstPage.getMaxVisibleRows(),
-                firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), pageIndex + context.resolvedBase(), pageSize, hasNext,
-                truncated, note);
+        return new SqlExecResult(
+                sql,
+                firstPage.getColumns(),
+                firstPage.getColumnDefs(),
+                allRows,
+                allRowMaps,
+                allRows.size(),
+                true,
+                firstPage.getMessage(),
+                jobId,
+                firstPage.getStatus(),
+                firstPage.getProgressPercent(),
+                firstPage.getElapsedMillis(),
+                firstPage.getDurationMillis(),
+                firstPage.getRowsAffected(),
+                firstPage.getReturnedRowCount(),
+                firstPage.getActualRowCount(),
+                firstPage.getMaxVisibleRows(),
+                firstPage.getMaxTotalRows(),
+                firstPage.getHasResultSet(),
+                pageIndex + context.resolvedBase(),
+                pageSize,
+                hasNext,
+                truncated,
+                note,
+                firstPage.getQueuedAt(),
+                firstPage.getQueueDelayMillis(),
+                firstPage.getOverloaded(),
+                firstPage.getThreadPool()
+        );
+
     }
 
     private SqlExecResult requestResultPageWithRetry(String jobId,

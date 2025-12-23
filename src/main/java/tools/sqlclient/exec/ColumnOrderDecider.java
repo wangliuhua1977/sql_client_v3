@@ -104,33 +104,42 @@ public class ColumnOrderDecider {
         return result;
     }
 
-    private SqlExecResult cloneWith(SqlExecResult original, List<String> columns, List<ColumnDef> columnDefs,
-                                    List<List<String>> rows, List<Map<String, String>> rowMaps) {
+    private SqlExecResult cloneWith(SqlExecResult original,
+                                    List<String> columns,
+                                    List<ColumnDef> columnDefs,
+                                    List<List<String>> rows,
+                                    List<Map<String, String>> rowMaps) {
+
         return new SqlExecResult(
-                original.getSql(),
-                columns,
-                columnDefs,
-                rows,
-                rowMaps,
-                rows != null ? rows.size() : original.getRowsCount(),
-                original.isSuccess(),
-                original.getMessage(),
-                original.getJobId(),
-                original.getStatus(),
-                original.getProgressPercent(),
-                original.getElapsedMillis(),
-                original.getDurationMillis(),
-                original.getRowsAffected(),
-                original.getReturnedRowCount(),
-                original.getActualRowCount(),
-                original.getMaxVisibleRows(),
-                original.getMaxTotalRows(),
-                original.getHasResultSet(),
-                original.getPage(),
-                original.getPageSize(),
-                original.getHasNext(),
-                original.getTruncated(),
-                original.getNote()
+                original.getSql(),                               // 1
+                columns,                                         // 2
+                columnDefs,                                      // 3
+                rows,                                            // 4
+                rowMaps,                                         // 5
+                rows != null ? rows.size() : original.getRowsCount(), // 6
+                original.isSuccess(),                            // 7
+                original.getMessage(),                           // 8
+                original.getJobId(),                             // 9
+                original.getStatus(),                            // 10
+                original.getProgressPercent(),                   // 11
+                original.getElapsedMillis(),                     // 12
+                original.getDurationMillis(),                    // 13
+                original.getRowsAffected(),                      // 14
+                original.getReturnedRowCount(),                  // 15
+                original.getActualRowCount(),                    // 16
+                original.getMaxVisibleRows(),                    // 17
+                original.getMaxTotalRows(),                      // 18
+                original.getHasResultSet(),                      // 19
+                original.getPage(),                              // 20
+                original.getPageSize(),                          // 21
+                original.getHasNext(),                           // 22
+                original.getTruncated(),                         // 23
+                original.getNote(),                              // 24
+                null,                                            // 25 queuedAtMillis
+                null,                                            // 26 startedAtMillis
+                Boolean.FALSE,                                   // 27 persisted
+                null                                             // 28 threadPoolSnapshot
         );
     }
+
 }
