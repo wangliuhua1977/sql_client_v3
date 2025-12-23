@@ -343,7 +343,7 @@ public class SqlExecutionService {
                 body.addProperty("removeAfterFetch", context.shouldUseRemoveAfterFetch(pageIndex));
                 body.addProperty("page", page);
                 body.addProperty("pageSize", finalPageSize);
-                JsonObject resp = postJson("/jobs/result", body);
+                JsonObject resp = postJson("/jobs/result", body, true);
                 boolean success = resp.has("success") && resp.get("success").getAsBoolean();
                 String respStatus = resp.has("status") && !resp.get("status").isJsonNull() ? resp.get("status").getAsString() : null;
                 Integer returnedRowCount = resp.has("returnedRowCount") && !resp.get("returnedRowCount").isJsonNull()
@@ -821,7 +821,7 @@ public class SqlExecutionService {
                 body.addProperty("removeAfterFetch", true);
                 body.addProperty("page", page);
                 body.addProperty("pageSize", pageSize);
-                postJson("/jobs/result", body);
+                postJson("/jobs/result", body, true);
                 OperationLog.log("[" + jobId + "] 已使用 removeAfterFetch=true 清理结果缓存 (page=" + page + ")");
             } catch (Exception e) {
                 OperationLog.log("[" + jobId + "] 清理结果缓存失败: " + e.getMessage());
@@ -939,6 +939,10 @@ public class SqlExecutionService {
     }
 
     private JsonObject postJson(String path, JsonObject payload) {
+        return postJson(path, payload, false);
+    }
+
+    private JsonObject postJson(String path, JsonObject payload, boolean allow410) {
         try {
             String jsonBody = gson.toJson(payload);
             HttpRequest request = HttpRequest.newBuilder(AsyncSqlConfig.buildUri(path))
@@ -957,6 +961,19 @@ public class SqlExecutionService {
 
             // 任何 2xx 都视为成功（包括 202 Accepted）
             if (sc / 100 != 2) {
+                if (allow410 && sc == 410) {
+                    JsonObject obj = gson.fromJson(resp.body(), JsonObject.class);
+                    if (obj == null) {
+                        obj = new JsonObject();
+                    }
+                    if (!obj.has("code") || obj.get("code").isJsonNull()) {
+                        obj.addProperty("code", "RESULT_EXPIRED");
+                    }
+                    if (!obj.has("status") || obj.get("status").isJsonNull()) {
+                        obj.addProperty("status", "EXPIRED");
+                    }
+                    return obj;
+                }
                 String body = resp.body();
                 throw new RuntimeException("HTTP " + sc + " | " + body);
             }
