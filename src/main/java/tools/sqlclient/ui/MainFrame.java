@@ -14,6 +14,9 @@ import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnOrderDecider;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlExecutionService;
+import tools.sqlclient.lsp.pg.DiagnosticsStore;
+import tools.sqlclient.lsp.pg.PgLspBootstrap;
+import tools.sqlclient.lsp.pg.PgLspClient;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
@@ -30,6 +33,7 @@ import tools.sqlclient.ui.DockManager;
 import tools.sqlclient.ui.DockPosition;
 import tools.sqlclient.ui.LayoutState;
 import tools.sqlclient.ui.LogPanel;
+import tools.sqlclient.ui.ProblemsPanel;
 
 import javax.swing.*;
 import javax.swing.BorderFactory;
@@ -84,6 +88,9 @@ public class MainFrame extends JFrame {
     private final SqlHistoryRepository sqlHistoryRepository;
     private final MetadataService metadataService;
     private final EditorStyleRepository styleRepository;
+    private final PgLspBootstrap pgLspBootstrap = new PgLspBootstrap();
+    private PgLspClient pgLspClient;
+    private final DiagnosticsStore diagnosticsStore = new DiagnosticsStore();
     private final ThemeManager themeManager = new ThemeManager();
     private final AtomicInteger untitledIndex = new AtomicInteger(1);
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
@@ -144,6 +151,7 @@ public class MainFrame extends JFrame {
     private QuickSqlSnippetDialog quickSqlSnippetDialog;
     private ExecutionHistoryDialog executionHistoryDialog;
     private TrashBinDialog trashBinDialog;
+    private ProblemsPanel problemsPanel;
 
     public MainFrame() {
         // 需求 2：修改主窗体标题
@@ -174,6 +182,7 @@ public class MainFrame extends JFrame {
         this.columnOrderDecider = new ColumnOrderDecider(metadataService);
         this.defaultPageSize = sanitizePageSize(appStateRepository.loadDefaultPageSize(Config.getDefaultPageSize()));
         Config.overrideDefaultPageSize(defaultPageSize);
+        startLspClient();
         initTheme();
         // 加载笔记图标配置（noteId -> 图标规格）
         loadNoteIcons();
@@ -233,9 +242,27 @@ public class MainFrame extends JFrame {
                 cancelScheduledBackup();
                 scheduledBackupExecutor.shutdownNow();
                 persistLayoutState();
+                if (pgLspClient != null) {
+                    pgLspClient.shutdown();
+                }
             }
         });
         updateExecutionButtons();
+    }
+
+    private void startLspClient() {
+        this.pgLspClient = pgLspBootstrap.startIfPossible();
+        if (pgLspClient == null) {
+            return;
+        }
+        pgLspClient.setDiagnosticsHandler(args -> diagnosticsStore.update(args.uri(), args.diagnostics()));
+        pgLspClient.initialize().thenAccept(ok -> SwingUtilities.invokeLater(this::notifyPanelsLspReady));
+    }
+
+    private void notifyPanelsLspReady() {
+        for (EditorTabPanel panel : panelCache.values()) {
+            panel.onLspReady();
+        }
     }
 
     // ==================== 主窗体图标 ====================
@@ -1093,6 +1120,14 @@ public class MainFrame extends JFrame {
         bottomTabbedPane.addTab("日志", logPanel);
         bottomTabbedPane.addTab("任务", createJobsShortcutPanel());
         bottomTabbedPane.addTab("历史", createHistoryShortcutPanel());
+        problemsPanel = new ProblemsPanel();
+        problemsPanel.setOnNavigate(row -> {
+            EditorTabPanel panel = getCurrentPanel();
+            if (panel != null) {
+                panel.revealMatch(row.offset(), null);
+            }
+        });
+        bottomTabbedPane.addTab("Problems", problemsPanel);
         bottomTabbedPane.setMinimumSize(new Dimension(200, 160));
 
         rightTabbedPane = new JTabbedPane();
@@ -1467,7 +1502,10 @@ public class MainFrame extends JFrame {
                     resolveStyleForNote(note),
                     this::onPanelFocused,
                     this::openNoteByTitle,
-                    defaultPageSize
+                    defaultPageSize,
+                    pgLspClient,
+                    diagnosticsStore,
+                    problemsPanel
             );
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
