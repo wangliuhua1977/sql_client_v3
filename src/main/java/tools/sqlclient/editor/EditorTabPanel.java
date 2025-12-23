@@ -16,6 +16,11 @@ import tools.sqlclient.util.SuggestionEngine;
 import tools.sqlclient.util.ThreadPools;
 import tools.sqlclient.util.SqlBlockDetector;
 import tools.sqlclient.ui.QueryResultPanel;
+import tools.sqlclient.lsp.pg.CompletionMerger;
+import tools.sqlclient.lsp.pg.DiagnosticsStore;
+import tools.sqlclient.lsp.pg.PgLspClient;
+import tools.sqlclient.lsp.pg.PgLspDocumentSession;
+import tools.sqlclient.ui.ProblemsPanel;
 
 import javax.swing.*;
 import javax.swing.text.BadLocationException;
@@ -68,6 +73,12 @@ public class EditorTabPanel extends JPanel {
     private List<EditorStyle> styleOptions = new ArrayList<>();
     private Consumer<EditorStyle> styleSelectionHandler;
     private Runnable resetStyleHandler;
+    private PgLspDocumentSession lspSession;
+    private final PgLspClient pgLspClient;
+    private final DiagnosticsStore diagnosticsStore;
+    private final ProblemsPanel problemsPanel;
+    private final JPopupMenu completionPopup = new JPopupMenu();
+    private final JList<CompletionMerger.CompletionEntry> completionList = new JList<>();
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
@@ -78,11 +89,17 @@ public class EditorTabPanel extends JPanel {
                           EditorStyle style,
                           Consumer<EditorTabPanel> focusNotifier,
                           Consumer<String> linkOpener,
-                          int defaultPageSize) {
+                          int defaultPageSize,
+                          PgLspClient pgLspClient,
+                          DiagnosticsStore diagnosticsStore,
+                          ProblemsPanel problemsPanel) {
         super(new BorderLayout());
         this.defaultPageSize = Math.max(1, defaultPageSize);
         this.noteRepository = noteRepository;
         this.note = note;
+        this.pgLspClient = pgLspClient;
+        this.diagnosticsStore = diagnosticsStore;
+        this.problemsPanel = problemsPanel;
         this.databaseType = note.getDatabaseType();
         this.textArea = createEditor();
         this.currentStyle = style;
@@ -123,6 +140,7 @@ public class EditorTabPanel extends JPanel {
         installFocusHooks();
         this.textArea.setText(note.getContent());
         installExecuteShortcut();
+        installLspBindings();
         applyStyle(style);
         initLayout();
         LinkResolver.install(textArea, this::handleLinkClick);
@@ -147,6 +165,110 @@ public class EditorTabPanel extends JPanel {
                 }
             }
         });
+    }
+
+    private void installLspBindings() {
+        completionList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        completionList.setCellRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value, int index, boolean isSelected, boolean cellHasFocus) {
+                JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                if (value instanceof CompletionMerger.CompletionEntry entry) {
+                    label.setText(entry.label() + " [" + entry.source() + "]");
+                }
+                return label;
+            }
+        });
+        completionList.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() == 2) {
+                    commitCompletion();
+                }
+            }
+        });
+        completionPopup.add(new JScrollPane(completionList));
+
+        InputMap map = textArea.getInputMap(JComponent.WHEN_FOCUSED);
+        ActionMap am = textArea.getActionMap();
+        map.put(KeyStroke.getKeyStroke(KeyEvent.VK_SPACE, InputEvent.CTRL_DOWN_MASK), "lsp-completion");
+        am.put("lsp-completion", new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                triggerMergedCompletion();
+            }
+        });
+        map.put(KeyStroke.getKeyStroke(KeyEvent.VK_H, InputEvent.ALT_DOWN_MASK), "lsp-hover");
+        am.put("lsp-hover", new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                triggerHover();
+            }
+        });
+
+        if (pgLspClient != null && diagnosticsStore != null) {
+            lspSession = new PgLspDocumentSession(textArea, pgLspClient, diagnosticsStore);
+            if (problemsPanel != null) {
+                problemsPanel.bindStore(diagnosticsStore, lspSession.getUri(), textArea::getText);
+            }
+        }
+    }
+
+    public void onLspReady() {
+        if (lspSession != null) {
+            lspSession.ensureOpened();
+        }
+    }
+
+    private void triggerMergedCompletion() {
+        var snapshot = suggestionEngine.snapshotForCaret();
+        java.util.concurrent.CompletableFuture<java.util.List<org.eclipse.lsp4j.CompletionItem>> lspFuture =
+                lspSession != null ? lspSession.requestCompletion()
+                        : java.util.concurrent.CompletableFuture.completedFuture(java.util.List.of());
+        lspFuture.thenAcceptAsync(lspItems -> {
+            java.util.List<CompletionMerger.CompletionEntry> merged =
+                    CompletionMerger.merge(snapshot.items(), lspItems);
+            SwingUtilities.invokeLater(() -> showCompletionPopup(merged, snapshot.token()));
+        });
+    }
+
+    private void showCompletionPopup(java.util.List<CompletionMerger.CompletionEntry> items, String token) {
+        if (items == null || items.isEmpty()) {
+            completionPopup.setVisible(false);
+            return;
+        }
+        completionList.setListData(items.toArray(CompletionMerger.CompletionEntry[]::new));
+        completionList.setSelectedIndex(0);
+        try {
+            Rectangle view = textArea.modelToView(textArea.getCaretPosition());
+            completionPopup.show(textArea, view.x, view.y + view.height);
+            completionPopup.putClientProperty("replaceLength", token == null ? 0 : token.length());
+        } catch (Exception ex) {
+            completionPopup.setVisible(false);
+        }
+    }
+
+    private void commitCompletion() {
+        CompletionMerger.CompletionEntry entry = completionList.getSelectedValue();
+        if (entry == null) return;
+        int len = 0;
+        Object prop = completionPopup.getClientProperty("replaceLength");
+        if (prop instanceof Integer i) {
+            len = i;
+        }
+        int caret = textArea.getCaretPosition();
+        int start = Math.max(0, caret - len);
+        textArea.replaceRange(entry.insertText(), start, caret);
+        textArea.requestFocusInWindow();
+        completionPopup.setVisible(false);
+    }
+
+    private void triggerHover() {
+        if (lspSession == null) return;
+        lspSession.requestHover().thenAccept(text -> SwingUtilities.invokeLater(() -> {
+            String msg = (text == null || text.isBlank()) ? "无信息" : text;
+            JOptionPane.showMessageDialog(EditorTabPanel.this, msg, "Hover", JOptionPane.INFORMATION_MESSAGE);
+        }));
     }
 
     private void installFocusHooks() {
