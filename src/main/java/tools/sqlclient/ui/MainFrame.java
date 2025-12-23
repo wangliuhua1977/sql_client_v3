@@ -841,6 +841,32 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        tools.add(new JMenuItem(new AbstractAction("Refresh Metadata (Large)") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                OperationLog.log("开发者自测：大规模元数据刷新");
+                metadataService.refreshMetadataAsync(result -> {
+                    handleMetadataRefreshResult(result);
+                    SwingUtilities.invokeLater(() -> {
+                        String msg;
+                        int messageType;
+                        if (result != null && result.success()) {
+                            msg = String.format("刷新成功%n对象: %d%n列: %d%n批次: %d%n耗时: %d ms",
+                                    result.totalObjects(),
+                                    result.totalColumns(),
+                                    result.batches(),
+                                    result.durationMillis());
+                            messageType = JOptionPane.INFORMATION_MESSAGE;
+                        } else {
+                            msg = "刷新失败: " + (result == null ? "未知" : result.message());
+                            messageType = JOptionPane.ERROR_MESSAGE;
+                        }
+                        JOptionPane.showMessageDialog(MainFrame.this, msg, "Refresh Metadata (Large)", messageType);
+                    });
+                });
+            }
+        }));
+
         tools.add(new JMenuItem(new AbstractAction("重置元数据") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -2268,12 +2294,18 @@ public class MainFrame extends JFrame {
         if (result == null) return;
         if (result.success()) {
             String text = "元数据: " + result.totalObjects();
+            if (result.totalColumns() > 0) {
+                text += " / 列 " + result.totalColumns();
+            }
             if (result.changedObjects() > 0) {
                 text += " (变动 " + result.changedObjects() + ")";
             }
             metadataLabel.setText(text);
-            log.info("UI 展示元数据计数: {}", result.totalObjects());
-            OperationLog.log("UI 展示元数据计数: " + result.totalObjects());
+            log.info("UI 展示元数据计数: {} columns={}", result.totalObjects(), result.totalColumns());
+            OperationLog.log("UI 展示元数据计数: " + result.totalObjects()
+                    + " 列: " + result.totalColumns()
+                    + " 批次: " + result.batches()
+                    + " 用时: " + result.durationMillis() + "ms");
             if (!hasRunningExecutions()) {
                 statusLabel.setText("元数据已更新");
             }

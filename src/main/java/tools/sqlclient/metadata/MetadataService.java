@@ -3,8 +3,12 @@ package tools.sqlclient.metadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.SQLiteManager;
+import tools.sqlclient.exec.OverloadedException;
+import tools.sqlclient.exec.ResultExpiredException;
+import tools.sqlclient.exec.ResultNotReadyException;
+import tools.sqlclient.exec.ResultResponse;
 import tools.sqlclient.exec.SqlExecResult;
-import tools.sqlclient.exec.SqlExecutionService;
+import tools.sqlclient.util.Config;
 import tools.sqlclient.util.OperationLog;
 
 import javax.swing.*;
@@ -34,30 +38,69 @@ public class MetadataService {
     private static final String DEFAULT_SCHEMA = "leshan";
     private static final String METADATA_DB_USER = "leshan";
     private static final int METADATA_BATCH_SIZE = 1000;
-    private static final int METADATA_PAGE_SIZE = 1000;
     private static final int TRACE_ROW_LIMIT = 200;
-    private static final List<String> RESULT_EXPIRED_HINTS = List.of(
-            "result expired",
-            "not available anymore",
-            "结果已过期",
-            "结果不存在"
-    );
     private static final Pattern DDL_PATTERN = Pattern.compile(
             "^(?i)(create|drop|alter)\\s+(or\\s+replace\\s+)?(table|view|function|procedure)\\s+(if\\s+not\\s+exists\\s+|if\\s+exists\\s+)?([A-Za-z0-9_\\.\\\"]+)");
 
     private final SQLiteManager sqliteManager;
-    private final ExecutorService metadataPool = Executors.newFixedThreadPool(4, r -> new Thread(r, "metadata-pool"));
-    private final ExecutorService networkPool = Executors.newFixedThreadPool(6, r -> new Thread(r, "network-pool"));
-    private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
+    private final ExecutorService metadataPool = Executors.newFixedThreadPool(resolveMetadataConcurrency(), r -> new Thread(r, "metadata-pool"));
+    private final ExecutorService networkPool = Executors.newFixedThreadPool(resolveNetworkConcurrency(), r -> new Thread(r, "network-pool"));
+    private final MetadataRefreshService refreshService;
     private final Object dbWriteLock = new Object();
     private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
 
-    public record MetadataRefreshResult(boolean success, int totalObjects, int changedObjects, String message) {}
-    private record RemoteSnapshot(Map<String, List<String>> objects) {}
+    public record MetadataRefreshResult(boolean success,
+                                        int totalObjects,
+                                        int changedObjects,
+                                        int totalColumns,
+                                        int batches,
+                                        long durationMillis,
+                                        String message) {}
 
     public MetadataService(Path dbPath) {
         this.sqliteManager = new SQLiteManager(dbPath);
         this.sqliteManager.initSchema();
+        this.refreshService = new MetadataRefreshService(sqliteManager, dbWriteLock);
+    }
+
+    private static int resolveMetadataConcurrency() {
+        int configured = readInt("METADATA_REFRESH_CONCURRENCY", 1);
+        if (configured < 1) {
+            configured = 1;
+        }
+        if (configured > 2) {
+            configured = 2;
+        }
+        return configured;
+    }
+
+    private static int resolveNetworkConcurrency() {
+        int configured = readInt("METADATA_NETWORK_CONCURRENCY", resolveMetadataConcurrency());
+        if (configured < 1) {
+            configured = 1;
+        }
+        if (configured > 2) {
+            configured = 2;
+        }
+        return configured;
+    }
+
+    private static int readInt(String key, int defaultValue) {
+        String sys = System.getProperty(key);
+        if (sys != null && !sys.isBlank()) {
+            try {
+                return Integer.parseInt(sys.trim());
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        String raw = Config.getRawProperty(key);
+        if (raw != null && !raw.isBlank()) {
+            try {
+                return Integer.parseInt(raw.trim());
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return defaultValue;
     }
 
     public void refreshMetadataAsync(Runnable done) {
@@ -74,7 +117,7 @@ public class MetadataService {
                 .handle((result, ex) -> {
                     if (ex != null) {
                         log.error("刷新元数据失败", ex);
-                        return new MetadataRefreshResult(false, countCachedObjects(), 0, ex.getMessage());
+                        return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, 0L, ex.getMessage());
                     }
                     return result;
                 })
@@ -103,7 +146,7 @@ public class MetadataService {
         }, metadataPool).handle((result, ex) -> {
             if (ex != null) {
                 log.error("重置元数据失败", ex);
-                return new MetadataRefreshResult(false, countCachedObjects(), 0, ex.getMessage());
+                return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, 0L, ex.getMessage());
             }
             return result;
         }).whenComplete((result, ex) -> {
@@ -115,106 +158,17 @@ public class MetadataService {
 
     private MetadataRefreshResult refreshMetadata() {
         long startedAt = System.currentTimeMillis();
+        int beforeObjects = countCachedObjects();
         try {
-            OperationLog.log("开始刷新对象元数据（仅对象名称，分批 1000）");
-            RemoteSnapshot snapshot = fetchRemoteSnapshot();
-            int totalChanges = 0;
-            int totalObjects;
-            synchronized (dbWriteLock) {
-                try (Connection conn = sqliteManager.getConnection()) {
-                    conn.setAutoCommit(false);
-                    Map<String, String> snapshots = loadSnapshots(conn);
-                    totalChanges += syncObjects(conn, "table", snapshot.objects().get("table"), snapshots);
-                    totalChanges += syncObjects(conn, "view", snapshot.objects().get("view"), snapshots);
-                    totalChanges += syncObjects(conn, "function", snapshot.objects().get("function"), snapshots);
-                    totalChanges += syncObjects(conn, "procedure", snapshot.objects().get("procedure"), snapshots);
-                    conn.commit();
-                }
-            }
-            totalObjects = countCachedObjects();
-            long cost = System.currentTimeMillis() - startedAt;
-            OperationLog.log(String.format("对象同步完成：表 %d，视图 %d，函数 %d，过程 %d，变更 %d，用时 %d ms",
-                    snapshot.objects().getOrDefault("table", List.of()).size(),
-                    snapshot.objects().getOrDefault("view", List.of()).size(),
-                    snapshot.objects().getOrDefault("function", List.of()).size(),
-                    snapshot.objects().getOrDefault("procedure", List.of()).size(),
-                    totalChanges,
-                    cost));
-            return new MetadataRefreshResult(true, totalObjects, totalChanges, "刷新成功，用时 " + cost + " ms");
+            MetadataRefreshService.RefreshStats stats = refreshService.refreshAll(DEFAULT_SCHEMA, METADATA_DB_USER, this::handleRefreshProgress);
+            int totalObjects = stats.totalObjects();
+            int changed = Math.max(0, totalObjects - beforeObjects);
+            return new MetadataRefreshResult(true, totalObjects, changed, stats.totalColumns(), stats.batches(), stats.durationMillis(), stats.message());
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
-            return new MetadataRefreshResult(false, countCachedObjects(), 0, e.getMessage());
-        }
-    }
-
-    private RemoteSnapshot fetchRemoteSnapshot() throws Exception {
-        Map<String, List<String>> objects = new HashMap<>();
-        objects.put("table", fetchTables());
-        objects.put("view", fetchViews());
-        objects.put("function", fetchFunctionsWithFallback());
-        objects.put("procedure", fetchProceduresWithFallback());
-        return new RemoteSnapshot(objects);
-    }
-
-    private List<String> fetchTables() throws Exception {
-        String sqlTemplate = String.format("""
-                SELECT table_name AS object_name
-                FROM information_schema.tables
-                WHERE table_schema='%s' AND table_type='BASE TABLE' AND table_name > '%%s'
-                ORDER BY table_name
-                LIMIT %%d
-                """, DEFAULT_SCHEMA);
-        return fetchNamesByKeyset(sqlTemplate, METADATA_BATCH_SIZE);
-    }
-
-    private List<String> fetchViews() throws Exception {
-        String sqlTemplate = String.format("""
-                SELECT table_name AS object_name
-                FROM information_schema.views
-                WHERE table_schema='%s' AND table_name > '%%s'
-                ORDER BY table_name
-                LIMIT %%d
-                """, DEFAULT_SCHEMA);
-        return fetchNamesByKeyset(sqlTemplate, METADATA_BATCH_SIZE);
-    }
-
-    private List<String> fetchFunctionsWithFallback() throws Exception {
-        String sqlTemplate = String.format("""
-                SELECT p.proname AS object_name
-                FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-                WHERE n.nspname='%s' AND p.prokind='f' AND p.proname > '%%s'
-                ORDER BY p.proname
-                LIMIT %%d
-                """, DEFAULT_SCHEMA);
-        try {
-            return fetchNamesByKeyset(sqlTemplate, METADATA_BATCH_SIZE);
-        } catch (Exception ex) {
-            OperationLog.log("prokind 不可用，函数清单降级到 proisagg 过滤: " + ex.getMessage());
-            String fallback = String.format("""
-                    SELECT p.proname AS object_name
-                    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-                    WHERE n.nspname='%s' AND (p.prokind IS NULL OR p.proisagg = FALSE) AND p.proname > '%%s'
-                    ORDER BY p.proname
-                    LIMIT %%d
-                    """, DEFAULT_SCHEMA);
-            return fetchNamesByKeyset(fallback, METADATA_BATCH_SIZE);
-        }
-    }
-
-    private List<String> fetchProceduresWithFallback() throws Exception {
-        String sqlTemplate = String.format("""
-                SELECT p.proname AS object_name
-                FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-                WHERE n.nspname='%s' AND p.prokind='p' AND p.proname > '%%s'
-                ORDER BY p.proname
-                LIMIT %%d
-                """, DEFAULT_SCHEMA);
-        try {
-            return fetchNamesByKeyset(sqlTemplate, METADATA_BATCH_SIZE);
-        } catch (Exception ex) {
-            OperationLog.log("prokind 不可用，过程清单降级为空列表: " + ex.getMessage());
-            return List.of();
+            long cost = System.currentTimeMillis() - startedAt;
+            return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, cost, e.getMessage());
         }
     }
 
@@ -251,103 +205,51 @@ public class MetadataService {
         return names;
     }
 
-    private Map<String, String> loadSnapshots(Connection conn) {
-        Map<String, String> snapshot = new HashMap<>();
-        try (PreparedStatement ps = conn.prepareStatement("SELECT meta_type, meta_hash FROM meta_snapshot")) {
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    snapshot.put(rs.getString("meta_type"), rs.getString("meta_hash"));
-                }
-            }
-        } catch (Exception e) {
-            log.warn("读取 meta_snapshot 失败", e);
-        }
-        return snapshot;
-    }
-
-    private boolean isResultExpiredError(Throwable error) {
-        Throwable cursor = error;
-        while (cursor != null) {
-            String msg = cursor.getMessage();
-            if (msg != null) {
-                String lower = msg.toLowerCase(Locale.ROOT);
-                for (String hint : RESULT_EXPIRED_HINTS) {
-                    if (lower.contains(hint)) {
-                        return true;
-                    }
-                }
-            }
-            cursor = cursor.getCause();
-        }
-        return false;
-    }
-
-    private Map<String, String> loadObjectTypes(Connection conn) throws Exception {
-        Map<String, String> objectTypes = new HashMap<>();
-        try (PreparedStatement ps = conn.prepareStatement("SELECT object_name, object_type FROM objects")) {
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    objectTypes.put(rs.getString("object_name"), rs.getString("object_type"));
-                }
-            }
-        }
-        return objectTypes;
-    }
-
-    private void saveSnapshot(Connection conn, String type, String hash) throws Exception {
-        try (PreparedStatement ps = conn.prepareStatement("INSERT INTO meta_snapshot(meta_type, meta_hash, updated_at) VALUES(?,?,?) " +
-                "ON CONFLICT(meta_type) DO UPDATE SET meta_hash=excluded.meta_hash, updated_at=excluded.updated_at")) {
-            ps.setString(1, type);
-            ps.setString(2, hash);
-            ps.setLong(3, System.currentTimeMillis());
-            ps.executeUpdate();
-        }
-    }
-
-    private String digest(String payload) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] bytes = md.digest(Optional.ofNullable(payload).orElse("").getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : bytes) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "";
-        }
-    }
-
     private SqlExecResult runMetadataSql(String sql) throws Exception {
         OperationLog.log("执行元数据 SQL: " + OperationLog.abbreviate(sql.replaceAll("\\s+", " ").trim(), 200));
-        try {
-            return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
-        } catch (RuntimeException ex) {
-            if (isResultExpiredError(ex)) {
-                OperationLog.log("元数据结果已过期，自动重试一次: " + ex.getMessage());
-                return sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
+        int expiredAttempts = 0;
+        int overloadAttempts = 0;
+        long backoff = 500;
+        while (true) {
+            try {
+                ResultResponse resp = refreshService.runSinglePage(sql, METADATA_DB_USER, "meta:adhoc");
+                return toSqlExecResult(sql, resp);
+            } catch (ResultExpiredException rex) {
+                expiredAttempts++;
+                if (expiredAttempts > 1) {
+                    throw rex;
+                }
+                OperationLog.log("元数据结果过期，自动重试一次: " + rex.getMessage());
+            } catch (ResultNotReadyException rnre) {
+                try { Thread.sleep(300); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+            } catch (OverloadedException oe) {
+                overloadAttempts++;
+                if (overloadAttempts > 3) {
+                    throw oe;
+                }
+                try { Thread.sleep(backoff); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                backoff = Math.min(8000, backoff * 2);
             }
-            if (ex instanceof tools.sqlclient.exec.TransientResultUnavailableException tre) {
-                OperationLog.log("元数据结果暂不可用，自动重提任务: originalJobId=" + Optional.ofNullable(tre.getJobId()).orElse("<unknown>") + " msg=" + tre.getMessage());
-                SqlExecResult retried = sqlExecutionService.executeSyncAllPagesWithDbUser(sql, METADATA_DB_USER, METADATA_PAGE_SIZE);
-                OperationLog.log("元数据任务已重提 resubmitted=true originalJobId=" + Optional.ofNullable(tre.getJobId()).orElse("<unknown>")
-                        + " newJobId=" + Optional.ofNullable(retried.getJobId()).orElse("<unknown>"));
-                return retried;
-            }
-            throw ex;
         }
     }
 
-    private int syncObjects(Connection conn, String type, List<String> names, Map<String, String> snapshots) throws Exception {
-        if (names == null) names = List.of();
-        String hash = digest(String.join("\n", names));
-        if (hash.equals(snapshots.get(type))) {
-            OperationLog.log(type + " 未变化，跳过写入");
-            return 0;
+    private SqlExecResult toSqlExecResult(String sql, ResultResponse resp) {
+        List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
+        List<String> columns = resp.getColumns() != null ? resp.getColumns() : List.of();
+        List<List<String>> rows = new ArrayList<>();
+        for (java.util.Map<String, String> map : rowMaps) {
+            List<String> row = new ArrayList<>();
+            for (String col : columns) {
+                row.add(map.get(col));
+            }
+            rows.add(row);
         }
-        int changes = upsertObjects(conn, type, names);
-        saveSnapshot(conn, type, hash);
-        return changes;
+        int rowCount = resp.getReturnedRowCount() != null ? resp.getReturnedRowCount() : rowMaps.size();
+        return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, Boolean.TRUE.equals(resp.getSuccess()),
+                resp.getMessage(), resp.getJobId(), resp.getStatus(), null, null, null, null,
+                resp.getReturnedRowCount(), resp.getActualRowCount(), resp.getMaxVisibleRows(), resp.getMaxTotalRows(),
+                resp.getHasResultSet(), resp.getPage(), resp.getPageSize(), resp.getHasNext(), resp.getTruncated(),
+                resp.getMessage(), null, resp.getQueueDelayMillis(), resp.getOverloaded(), resp.getThreadPool());
     }
 
     private void recordTrace(String tag, String sql, SqlExecResult result) {
@@ -456,6 +358,20 @@ public class MetadataService {
         return 0;
     }
 
+    private int countCachedColumns() {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM columns")) {
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return rs.getInt(1);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("统计本地字段数量失败", e);
+        }
+        return 0;
+    }
+
     public void handleSqlSucceeded(String sql) {
         DdlInfo info = parseDdl(sql);
         if (info == null) {
@@ -526,6 +442,19 @@ public class MetadataService {
             }
         }
         OperationLog.log("已删除本地缓存: " + info.type() + " " + info.objectName());
+    }
+
+    private void handleRefreshProgress(MetadataRefreshService.Progress progress) {
+        if (progress == null) {
+            return;
+        }
+        String text = String.format("刷新进度[%s] 批次=%d%s 对象=%d 列=%d",
+                progress.phase(),
+                progress.completedBatches(),
+                progress.totalBatches() != null ? ("/" + progress.totalBatches()) : "",
+                progress.objects(),
+                progress.columns());
+        OperationLog.log(text);
     }
 
     private List<String> fetchNamesByExactType(String type, String objectName) throws Exception {
