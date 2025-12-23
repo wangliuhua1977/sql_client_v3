@@ -57,6 +57,14 @@
 ## 最近更新
 - 新增 Alt+E 联想开关、元数据状态提示与日志面板默认收拢，执行/停止按钮随焦点窗口切换。
 
+## 元数据刷新（3 万条规模）
+- **窗口硬约束**：后端单次返回窗口恒定 1000 行（`maxVisibleRows=1000`），page 1-based，`pageSize` 默认 200 且最大 1000，所有元数据 SQL 均固定 `LIMIT 1000` 并使用 `page=1`、`removeAfterFetch=true` 拉取，禁止依赖 `hasNext` 绕过上限。
+- **分批策略**：优先使用 keyset 分页（`object_name > :lastName ORDER BY object_name LIMIT 1000`，初始 `lastName=''`），当字符集排序不稳定时自动按前缀桶（0-9/a-c/.../x-z/其它）分桶后再做 keyset，防止卡在 1000 窗口内。表/视图/函数/过程各自独立循环，`lastName` 只以后端返回值推进，防御性检测到不推进即切换桶或终止。
+- **状态机与容错**：仅轮询 `/jobs/result`，间隔 300~500ms，单批次最长等待 60s；`RESULT_NOT_READY` 或 RUNNING/QUEUED/ACCEPTED 继续等待，`archiveError` 立即失败；HTTP 410 + `RESULT_EXPIRED` 自动重提同一批（最多 1 次）；`overloaded=true` 或提交被拒绝采用指数退避（500ms 起，最高 8s，最多 3 次）后重试本批。
+- **并发与清理**：元数据抓取全程后台线程串行提交（默认并发 1，可配置到 2），严格遵循“提交 -> 等待完成 -> 取结果 -> 立即释放”顺序，所有请求均带 `X-Request-Token: WAF_STATIC_TOKEN_202405` 与 AES/CBC/PKCS5Padding+Base64 加密的 SQL。
+- **本地缓存与 UI 性能**：批次结果先写入 SQLite 分区表 `objects_staging/columns_staging`，完成后一次性事务替换正式表，避免半成品污染；列信息按单表查询（每表通常 <1000 行），不会做全库 join 拉列；刷新、列抓取与日志输出均在后台线程执行，UI 仅接收进度文本，不会一次性把 3 万行塞进 JTable，列表/树继续惰性读取本地缓存。
+- **开发者自测入口**：工具菜单新增 “Refresh Metadata (Large)” 入口，执行完整批次刷新并弹窗展示 `tablesCount/columnsCount/batches/duration`，便于验证 3 万规模无超时、不过载、不卡 UI。
+
 ## 异步 SQL 执行前端适配说明
 ### 架构与数据流
 - 客户端不再直接调用旧的同步 SQL 接口，而是针对 `/waf/api/jobs/*` 异步接口：编辑器 SQL 文本 → AES/CBC/PKCS5Padding 加密 → `/jobs/submit` 提交返回 jobId → 后台线程轮询 `/jobs/status` → 完成后 `/jobs/result` 拉取结果集 → `QueryResultPanel` 展示。
