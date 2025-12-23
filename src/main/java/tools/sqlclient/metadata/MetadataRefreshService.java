@@ -2,6 +2,7 @@ package tools.sqlclient.metadata;
 
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.exec.AsyncSqlApiClient;
+import tools.sqlclient.exec.JobNotFoundException;
 import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
 import tools.sqlclient.exec.ResultNotReadyException;
@@ -31,7 +32,9 @@ class MetadataRefreshService {
     private static final int DEFAULT_PAGE_SIZE = 1000;
     private static final int MAX_OVERLOAD_RETRY = 3;
     private static final int MAX_EXPIRED_RETRY = 1;
-    private static final long PER_BATCH_TIMEOUT_MS = Duration.ofSeconds(60).toMillis();
+    private static final long PER_BATCH_TIMEOUT_MS = Long.getLong(
+            "ASYNC_SQL_META_BATCH_TIMEOUT_MS",
+            Duration.ofSeconds(60).toMillis());
     private static final long POLL_INTERVAL_MIN_MS = 300;
     private static final long POLL_INTERVAL_MAX_MS = 500;
     private static final long INITIAL_BACKOFF_MS = 500;
@@ -274,6 +277,7 @@ class MetadataRefreshService {
     private ResultResponse executeOne(String sql, String dbUser, String label, String lastName) throws Exception {
         int overloadAttempts = 0;
         int expiredAttempts = 0;
+        int notFoundAttempts = 0;
         long backoff = INITIAL_BACKOFF_MS;
         while (true) {
             try {
@@ -281,9 +285,10 @@ class MetadataRefreshService {
                 String jobId = submit.getJobId();
                 long deadline = System.currentTimeMillis() + PER_BATCH_TIMEOUT_MS;
                 ResultResponse ready = waitUntilReady(jobId, label, lastName, deadline);
-                ready.setJobId(jobId);
-                logBatch(label, jobId, lastName, ready);
-                return ready;
+                ResultResponse finalResp = apiClient.fetchResult(jobId, 1, DEFAULT_PAGE_SIZE, true);
+                finalResp.setJobId(jobId);
+                logBatch(label, jobId, lastName, finalResp, true);
+                return finalResp;
             } catch (OverloadedException oe) {
                 overloadAttempts++;
                 if (overloadAttempts > MAX_OVERLOAD_RETRY) {
@@ -296,7 +301,16 @@ class MetadataRefreshService {
                 if (expiredAttempts > MAX_EXPIRED_RETRY) {
                     throw re;
                 }
-                OperationLog.log("批次结果过期，自动重提一次 label=" + label + " lastName=" + lastName + " msg=" + re.getMessage());
+                OperationLog.log("批次结果过期，自动重提一次 label=" + label + " lastName=" + lastName
+                        + " msg=" + re.getMessage()
+                        + " expiresAt=" + re.getExpiresAt()
+                        + " lastAccessAt=" + re.getLastAccessAt());
+            } catch (JobNotFoundException jnfe) {
+                notFoundAttempts++;
+                if (notFoundAttempts > 1) {
+                    throw jnfe;
+                }
+                OperationLog.log("批次结果 Job not found，自动重提一次 label=" + label + " lastName=" + lastName + " msg=" + jnfe.getMessage());
             }
         }
     }
@@ -308,18 +322,32 @@ class MetadataRefreshService {
         ResultResponse latest = null;
         while (true) {
             try {
-                latest = apiClient.fetchResult(jobId, 1, DEFAULT_PAGE_SIZE, true);
-                boolean ready = Boolean.TRUE.equals(latest.getSuccess()) && (latest.getResultAvailable() == null || latest.getResultAvailable());
+                latest = apiClient.fetchResult(jobId, 1, DEFAULT_PAGE_SIZE, false);
+                if (Boolean.TRUE.equals(latest.getOverloaded())) {
+                    throw new OverloadedException(firstNonBlank(latest.getMessage(), "系统过载"));
+                }
+                boolean successReady = Boolean.TRUE.equals(latest.getSuccess())
+                        && "SUCCEEDED".equalsIgnoreCase(nullToEmpty(latest.getStatus()))
+                        && Boolean.TRUE.equals(latest.getResultAvailable());
+                boolean archivedReady = Boolean.TRUE.equals(latest.getResultAvailable()) && Boolean.TRUE.equals(latest.getArchived());
                 boolean stillRunning = latest.getStatus() != null && Set.of("RUNNING", "QUEUED", "ACCEPTED", "CANCELLING")
                         .contains(latest.getStatus().toUpperCase(Locale.ROOT));
                 if (latest.getArchiveError() != null && !latest.getArchiveError().isBlank()) {
-                    throw new RuntimeException("结果归档失败: " + latest.getArchiveError());
+                    throw new RuntimeException("结果归档失败: " + latest.getArchiveError() + " jobId=" + jobId);
                 }
-                if (ready && !stillRunning) {
+                if ("FAILED".equalsIgnoreCase(latest.getStatus())) {
+                    throw new RuntimeException("任务失败: " + firstNonBlank(latest.getErrorMessage(), latest.getMessage()));
+                }
+                if ("CANCELLED".equalsIgnoreCase(latest.getStatus())) {
+                    throw new RuntimeException("任务被取消: " + firstNonBlank(latest.getMessage(), latest.getErrorMessage()));
+                }
+                if (successReady && !stillRunning) {
+                    logBatch(label, jobId, lastName, latest, false);
                     return latest;
                 }
-                if (!ready && !"RESULT_NOT_READY".equalsIgnoreCase(latest.getCode())) {
-                    // fallthrough to sleep
+                if (archivedReady && !stillRunning) {
+                    logBatch(label, jobId, lastName, latest, false);
+                    return latest;
                 }
             } catch (ResultNotReadyException ignored) {
                 // continue polling
@@ -430,18 +458,48 @@ class MetadataRefreshService {
         }
     }
 
-    private void logBatch(String label, String jobId, String lastName, ResultResponse resp) {
+    private void logBatch(String label, String jobId, String lastName, ResultResponse resp, boolean removeAfterFetch) {
         int batchSize = resp.getReturnedRowCount() != null ? resp.getReturnedRowCount() : Optional.ofNullable(resp.getRowMaps()).orElse(List.of()).size();
         OperationLog.log("[meta] label=" + label
                 + " jobId=" + jobId
-                + " lastName=" + OperationLog.abbreviate(lastName == null ? "" : lastName, 50)
-                + " batchSize=" + batchSize
-                + (resp.getQueueDelayMillis() != null ? (" queueDelayMillis=" + resp.getQueueDelayMillis()) : "")
-                + (resp.getOverloaded() != null ? (" overloaded=" + resp.getOverloaded()) : "")
-                + (resp.getExpiresAt() != null ? (" expiresAt=" + resp.getExpiresAt()) : "")
-                + (resp.getLastAccessAt() != null ? (" lastAccessAt=" + resp.getLastAccessAt()) : "")
-                + (resp.getCode() != null ? (" code=" + resp.getCode()) : "")
-                + (resp.getThreadPool() != null ? (" threadPool=" + resp.getThreadPool()) : ""));
+                + " lastKey=" + OperationLog.abbreviate(lastName == null ? "" : lastName, 50)
+                + " removeAfterFetch=" + removeAfterFetch
+                + " httpStatus=200"
+                + " status=" + nullToEmpty(resp.getStatus())
+                + " success=" + resp.getSuccess()
+                + " code=" + nullToEmpty(resp.getCode())
+                + " message=" + OperationLog.abbreviate(firstNonBlank(resp.getMessage(), resp.getErrorMessage(), ""), 200)
+                + " resultAvailable=" + resp.getResultAvailable()
+                + " archived=" + resp.getArchived()
+                + " archiveError=" + nullToEmpty(resp.getArchiveError())
+                + " queuedAt=" + resp.getQueuedAt()
+                + " queueDelayMillis=" + resp.getQueueDelayMillis()
+                + " overloaded=" + resp.getOverloaded()
+                + " threadPool=" + resp.getThreadPool()
+                + " archivedAt=" + resp.getArchivedAt()
+                + " expiresAt=" + resp.getExpiresAt()
+                + " lastAccessAt=" + resp.getLastAccessAt()
+                + " returnedRowCount=" + resp.getReturnedRowCount()
+                + " actualRowCount=" + resp.getActualRowCount()
+                + " truncated=" + resp.getTruncated()
+                + " maxVisibleRows=" + resp.getMaxVisibleRows()
+                + " batchSize=" + batchSize);
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return "";
+        }
+        for (String v : values) {
+            if (v != null && !v.isBlank()) {
+                return v;
+            }
+        }
+        return "";
     }
 
     ResultResponse runSinglePage(String sql, String dbUser, String label) throws Exception {

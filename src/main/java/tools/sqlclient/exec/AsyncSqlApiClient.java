@@ -7,6 +7,9 @@ import com.google.gson.JsonObject;
 import tools.sqlclient.network.TrustAllHttpClient;
 import tools.sqlclient.util.OperationLog;
 
+import java.net.CookieManager;
+import java.net.CookiePolicy;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
@@ -16,13 +19,15 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 统一封装异步 SQL HTTP 调用，适配 HTTP 410、RESULT_NOT_READY、overloaded 等分支。
  */
 public class AsyncSqlApiClient {
     private static final int MAX_LOG_TEXT_LENGTH = 200_000;
-    private final HttpClient httpClient = TrustAllHttpClient.create();
+    private final CookieManager cookieManager = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
+    private final HttpClient httpClient = TrustAllHttpClient.create(cookieManager);
     private final Gson gson = new Gson();
 
     public SubmitResponse submit(String sql, String dbUser, String label, Integer maxResultRows, Integer pageSize) {
@@ -49,10 +54,15 @@ public class AsyncSqlApiClient {
     }
 
     public ResultResponse fetchResult(String jobId, int page, int pageSize, boolean removeAfterFetch) {
+        int normalizedPage = Math.max(1, page);
+        int normalizedPageSize = pageSize > 1000 ? 1000 : Math.max(pageSize, 1);
+        if (pageSize > 1000) {
+            OperationLog.log("pageSize=" + pageSize + " 超出上限，已裁剪到 1000 (fetchResult)");
+        }
         JsonObject body = new JsonObject();
         body.addProperty("jobId", jobId);
-        body.addProperty("page", page);
-        body.addProperty("pageSize", pageSize);
+        body.addProperty("page", normalizedPage);
+        body.addProperty("pageSize", normalizedPageSize);
         body.addProperty("removeAfterFetch", removeAfterFetch);
         boolean allow410 = true;
         JsonObject resp = postJson("/jobs/result", body, allow410);
@@ -61,7 +71,7 @@ public class AsyncSqlApiClient {
             throw new OverloadedException(rr.getMessage() != null ? rr.getMessage() : "系统过载");
         }
         if (rr.getCode() != null && "RESULT_EXPIRED".equalsIgnoreCase(rr.getCode())) {
-            throw new ResultExpiredException(jobId, rr.getMessage() != null ? rr.getMessage() : "结果已过期");
+            throw new ResultExpiredException(jobId, rr.getMessage() != null ? rr.getMessage() : "结果已过期", rr.getExpiresAt(), rr.getLastAccessAt());
         }
         if (rr.getCode() != null && "RESULT_NOT_READY".equalsIgnoreCase(rr.getCode())) {
             throw new ResultNotReadyException(jobId, rr.getMessage() != null ? rr.getMessage() : "结果暂不可用");
@@ -79,7 +89,11 @@ public class AsyncSqlApiClient {
     private JsonObject postJson(String path, JsonObject payload, boolean allow410) {
         try {
             String jsonBody = gson.toJson(payload);
-            HttpRequest request = HttpRequest.newBuilder(AsyncSqlConfig.buildUri(path))
+            String payloadJobId = payload != null && payload.has("jobId") && !payload.get("jobId").isJsonNull()
+                    ? payload.get("jobId").getAsString()
+                    : null;
+            URI uri = AsyncSqlConfig.buildUri(path);
+            HttpRequest request = HttpRequest.newBuilder(uri)
                     .header("Content-Type", "application/json;charset=UTF-8")
                     .header("X-Request-Token", AsyncSqlConfig.REQUEST_TOKEN)
                     .timeout(Duration.ofSeconds(30))
@@ -100,12 +114,24 @@ public class AsyncSqlApiClient {
                 obj.addProperty("status", "EXPIRED");
                 return obj;
             }
+            if (sc == 404 && bodyIndicatesJobNotFound(resp.body())) {
+                throw new JobNotFoundException(firstNonBlank(readString(gson.fromJson(resp.body(), JsonObject.class), "jobId"), payloadJobId),
+                        "Job not found");
+            }
+            if (sc == 410) {
+                JsonObject bodyObj = gson.fromJson(resp.body(), JsonObject.class);
+                throw new ResultExpiredException(firstNonBlank(readString(bodyObj, "jobId"), payloadJobId),
+                        firstNonBlank(readString(bodyObj, "message"), "Result expired"),
+                        readLong(bodyObj, "expiresAt"), readLong(bodyObj, "lastAccessAt"));
+            }
             if (sc / 100 != 2) {
                 throw new RuntimeException("HTTP " + sc + " | " + resp.body());
             }
             return gson.fromJson(resp.body(), JsonObject.class);
         } catch (ResultExpiredException re) {
             throw re;
+        } catch (JobNotFoundException jnfe) {
+            throw jnfe;
         } catch (Exception e) {
             throw new RuntimeException("请求失败: " + e.getMessage(), e);
         }
@@ -148,13 +174,16 @@ public class AsyncSqlApiClient {
         rr.setSuccess(readBoolean(obj, "success"));
         rr.setStatus(readString(obj, "status"));
         rr.setCode(readString(obj, "code"));
+        rr.setErrorMessage(readString(obj, "errorMessage"));
         rr.setResultAvailable(readBoolean(obj, "resultAvailable"));
         rr.setArchived(readBoolean(obj, "archived"));
         rr.setArchiveError(readString(obj, "archiveError"));
         rr.setExpiresAt(readLong(obj, "expiresAt"));
         rr.setLastAccessAt(readLong(obj, "lastAccessAt"));
+        rr.setArchivedAt(readLong(obj, "archivedAt"));
         rr.setOverloaded(readBoolean(obj, "overloaded"));
         rr.setQueueDelayMillis(readLong(obj, "queueDelayMillis"));
+        rr.setQueuedAt(readLong(obj, "queuedAt"));
         rr.setReturnedRowCount(readInt(obj, "returnedRowCount"));
         rr.setActualRowCount(readInt(obj, "actualRowCount"));
         rr.setMaxVisibleRows(readInt(obj, "maxVisibleRows"));
@@ -327,6 +356,9 @@ public class AsyncSqlApiClient {
         sb.append("Headers:\n");
         headers.map().forEach((k, v) -> sb.append("  ").append(k).append(": ")
                 .append(String.join(",", v)).append('\n'));
+        if (!headers.allValues("Set-Cookie").isEmpty()) {
+            sb.append("  <cookies> received set-cookie count=").append(headers.allValues("Set-Cookie").size()).append('\n');
+        }
         sb.append("Body:\n");
 
         String fullBody = body == null ? "" : body;
@@ -339,5 +371,30 @@ public class AsyncSqlApiClient {
         }
         sb.append('\n').append("--- HTTP RESPONSE END ---");
         OperationLog.log(sb.toString());
+    }
+
+    private boolean bodyIndicatesJobNotFound(String body) {
+        if (body == null || body.isBlank()) {
+            return false;
+        }
+        try {
+            JsonObject obj = gson.fromJson(body, JsonObject.class);
+            String message = readString(obj, "message");
+            return obj != null && Objects.equals("Job not found", message);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String v : values) {
+            if (v != null && !v.isBlank()) {
+                return v;
+            }
+        }
+        return null;
     }
 }

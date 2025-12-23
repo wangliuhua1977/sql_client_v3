@@ -9,11 +9,14 @@ public class ResultResponse {
     private Boolean success;
     private String status;
     private String code;
+    private String errorMessage;
     private Boolean resultAvailable;
     private Boolean archived;
     private String archiveError;
     private Long expiresAt;
     private Long lastAccessAt;
+    private Long archivedAt;
+    private Long queuedAt;
     private Boolean overloaded;
     private ThreadPoolSnapshot threadPool;
     private Long queueDelayMillis;
@@ -47,6 +50,10 @@ public class ResultResponse {
         return code;
     }
 
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
     public Boolean getResultAvailable() {
         return resultAvailable;
     }
@@ -65,6 +72,14 @@ public class ResultResponse {
 
     public Long getLastAccessAt() {
         return lastAccessAt;
+    }
+
+    public Long getArchivedAt() {
+        return archivedAt;
+    }
+
+    public Long getQueuedAt() {
+        return queuedAt;
     }
 
     public Boolean getOverloaded() {
@@ -147,6 +162,10 @@ public class ResultResponse {
         this.code = code;
     }
 
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
     public void setResultAvailable(Boolean resultAvailable) {
         this.resultAvailable = resultAvailable;
     }
@@ -165,6 +184,14 @@ public class ResultResponse {
 
     public void setLastAccessAt(Long lastAccessAt) {
         this.lastAccessAt = lastAccessAt;
+    }
+
+    public void setArchivedAt(Long archivedAt) {
+        this.archivedAt = archivedAt;
+    }
+
+    public void setQueuedAt(Long queuedAt) {
+        this.queuedAt = queuedAt;
     }
 
     public void setOverloaded(Boolean overloaded) {

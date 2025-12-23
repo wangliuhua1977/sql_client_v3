@@ -1,6 +1,8 @@
 package tools.sqlclient.network;
 
 import javax.net.ssl.*;
+import java.net.CookieManager;
+import java.net.CookiePolicy;
 import java.net.http.HttpClient;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
@@ -11,6 +13,10 @@ import java.security.cert.X509Certificate;
  */
 public class TrustAllHttpClient {
     public static HttpClient create() {
+        return create(new CookieManager(null, CookiePolicy.ACCEPT_ALL));
+    }
+
+    public static HttpClient create(CookieManager cookieManager) {
         try {
             TrustManager[] trustAllCerts = new TrustManager[]{
                     new X509TrustManager() {
@@ -21,10 +27,13 @@ public class TrustAllHttpClient {
             };
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, trustAllCerts, new SecureRandom());
-            return HttpClient.newBuilder()
+            HttpClient.Builder builder = HttpClient.newBuilder()
                     .sslContext(sslContext)
-                    .sslParameters(new SSLParameters() {{setEndpointIdentificationAlgorithm(null);}})
-                    .build();
+                    .sslParameters(new SSLParameters() {{setEndpointIdentificationAlgorithm(null);}});
+            if (cookieManager != null) {
+                builder.cookieHandler(cookieManager);
+            }
+            return builder.build();
         } catch (Exception e) {
             throw new IllegalStateException("无法创建信任所有证书的 HttpClient", e);
         }
