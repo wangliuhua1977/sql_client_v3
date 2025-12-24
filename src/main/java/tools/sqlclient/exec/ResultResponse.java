@@ -26,12 +26,18 @@ public class ResultResponse {
     private Integer maxVisibleRows;
     private Integer maxTotalRows;
     private Boolean hasResultSet;
+    private Boolean isSelect;
+    private String resultType;
+    private Integer updateCount;
+    private String commandTag;
     private Integer page;
     private Integer pageSize;
     private Boolean hasNext;
     private Boolean truncated;
     private String message;
     private String note;
+    private List<String> notices;
+    private List<String> warnings;
     private List<String> columns;
     private List<java.util.Map<String, String>> rowMaps;
     private JsonArray rawRows;
@@ -120,6 +126,22 @@ public class ResultResponse {
         return hasResultSet;
     }
 
+    public Boolean getIsSelect() {
+        return isSelect;
+    }
+
+    public String getResultType() {
+        return resultType;
+    }
+
+    public Integer getUpdateCount() {
+        return updateCount;
+    }
+
+    public String getCommandTag() {
+        return commandTag;
+    }
+
     public Integer getPage() {
         return page;
     }
@@ -142,6 +164,14 @@ public class ResultResponse {
 
     public String getNote() {
         return note;
+    }
+
+    public List<String> getNotices() {
+        return notices;
+    }
+
+    public List<String> getWarnings() {
+        return warnings;
     }
 
     public List<String> getColumns() {
@@ -240,6 +270,22 @@ public class ResultResponse {
         this.hasResultSet = hasResultSet;
     }
 
+    public void setIsSelect(Boolean isSelect) {
+        this.isSelect = isSelect;
+    }
+
+    public void setResultType(String resultType) {
+        this.resultType = resultType;
+    }
+
+    public void setUpdateCount(Integer updateCount) {
+        this.updateCount = updateCount;
+    }
+
+    public void setCommandTag(String commandTag) {
+        this.commandTag = commandTag;
+    }
+
     public void setPage(Integer page) {
         this.page = page;
     }
@@ -262,6 +308,14 @@ public class ResultResponse {
 
     public void setNote(String note) {
         this.note = note;
+    }
+
+    public void setNotices(List<String> notices) {
+        this.notices = notices;
+    }
+
+    public void setWarnings(List<String> warnings) {
+        this.warnings = warnings;
     }
 
     public void setColumns(List<String> columns) {

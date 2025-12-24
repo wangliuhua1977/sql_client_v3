@@ -21,6 +21,9 @@ public class ColumnOrderDecider {
         if (original == null) {
             return null;
         }
+        if (!shouldReorder(original)) {
+            return original;
+        }
         SelectProjectionParser.Projection projection = SelectProjectionParser.parse(original.getSql());
 
         Map<String, List<String>> metadataColumns = loadMetadataForStars(projection, original, onMetadataReloaded);
@@ -29,6 +32,34 @@ public class ColumnOrderDecider {
         ColumnLayoutBuilder.ColumnLayout layout = builder.build(projection, original.getColumns(), rowMaps);
 
         return cloneWith(original, layout.displayColumns(), layout.columnDefs(), layout.rows(), rowMaps);
+    }
+
+    private boolean shouldReorder(SqlExecResult original) {
+        Boolean hasResultSet = original.getHasResultSet();
+        if (Boolean.FALSE.equals(hasResultSet)) {
+            return false;
+        }
+        if (!Boolean.TRUE.equals(hasResultSet)
+                && SqlTopLevelClassifier.classify(original.getSql()) != SqlTopLevelClassifier.TopLevelType.RESULT_SET) {
+            return false;
+        }
+        List<String> columns = original.getColumns();
+        if (columns == null || columns.isEmpty()) {
+            return false;
+        }
+        if (original.getColumnDefs() != null && !original.getColumnDefs().isEmpty()
+                && original.getColumnDefs().size() != columns.size()) {
+            return false;
+        }
+        List<List<String>> rows = original.getRows();
+        if (rows != null) {
+            for (List<String> row : rows) {
+                if (row != null && row.size() != columns.size()) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private Map<String, List<String>> loadMetadataForStars(SelectProjectionParser.Projection projection,
@@ -130,7 +161,15 @@ public class ColumnOrderDecider {
                 original.getPageSize(),
                 original.getHasNext(),
                 original.getTruncated(),
-                original.getNote()
+                original.getNote(),
+                original.getQueuedAt(),
+                original.getQueueDelayMillis(),
+                original.getOverloaded(),
+                original.getThreadPool(),
+                original.getCommandTag(),
+                original.getUpdateCount(),
+                original.getNotices(),
+                original.getWarnings()
         );
     }
 }
