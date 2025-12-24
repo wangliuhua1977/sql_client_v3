@@ -259,12 +259,36 @@ public class MetadataService {
             affectedRows = CommandTagParser.parseAffectedRows(resp.getCommandTag()).orElse(null);
         }
 
-        return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, Boolean.TRUE.equals(resp.getSuccess()),
-                resp.getMessage(), resp.getJobId(), resp.getStatus(), null, null, null, affectedRows,
-                resp.getReturnedRowCount(), resp.getActualRowCount(), resp.getMaxVisibleRows(), resp.getMaxTotalRows(),
-                resp.getHasResultSet(), resp.getPage(), resp.getPageSize(), resp.getHasNext(), resp.getTruncated(),
-                resp.getMessage(), resp.getQueuedAt(), resp.getQueueDelayMillis(), resp.getOverloaded(), resp.getThreadPool(),
-                resp.getCommandTag(), resp.getUpdateCount(), resp.getNotices(), resp.getWarnings());
+        return SqlExecResult.builder(sql)
+                .columns(columns)
+                .columnDefs(null)
+                .rows(rows)
+                .rowMaps(rowMaps)
+                .rowCount(rowCount)
+                .success(Boolean.TRUE.equals(resp.getSuccess()))
+                .message(resp.getMessage())
+                .jobId(resp.getJobId())
+                .status(resp.getStatus())
+                .rowsAffected(affectedRows)
+                .returnedRowCount(resp.getReturnedRowCount())
+                .actualRowCount(resp.getActualRowCount())
+                .maxVisibleRows(resp.getMaxVisibleRows())
+                .maxTotalRows(resp.getMaxTotalRows())
+                .hasResultSet(resp.getHasResultSet())
+                .page(resp.getPage())
+                .pageSize(resp.getPageSize())
+                .hasNext(resp.getHasNext())
+                .truncated(resp.getTruncated())
+                .note(resp.getMessage())
+                .queuedAt(resp.getQueuedAt())
+                .queueDelayMillis(resp.getQueueDelayMillis())
+                .overloaded(resp.getOverloaded())
+                .threadPool(resp.getThreadPool())
+                .commandTag(resp.getCommandTag())
+                .updateCount(resp.getUpdateCount())
+                .notices(resp.getNotices())
+                .warnings(resp.getWarnings())
+                .build();
     }
 
     private void recordTrace(String tag, String sql, SqlExecResult result) {

@@ -137,39 +137,38 @@ public class ColumnOrderDecider {
 
     private SqlExecResult cloneWith(SqlExecResult original, List<String> columns, List<ColumnDef> columnDefs,
                                     List<List<String>> rows, List<Map<String, String>> rowMaps) {
-        return new SqlExecResult(
-                original.getSql(),
-                columns,
-                columnDefs,
-                rows,
-                rowMaps,
-                rows != null ? rows.size() : original.getRowsCount(),
-                original.isSuccess(),
-                original.getMessage(),
-                original.getJobId(),
-                original.getStatus(),
-                original.getProgressPercent(),
-                original.getElapsedMillis(),
-                original.getDurationMillis(),
-                original.getRowsAffected(),
-                original.getReturnedRowCount(),
-                original.getActualRowCount(),
-                original.getMaxVisibleRows(),
-                original.getMaxTotalRows(),
-                original.getHasResultSet(),
-                original.getPage(),
-                original.getPageSize(),
-                original.getHasNext(),
-                original.getTruncated(),
-                original.getNote(),
-                original.getQueuedAt(),
-                original.getQueueDelayMillis(),
-                original.getOverloaded(),
-                original.getThreadPool(),
-                original.getCommandTag(),
-                original.getUpdateCount(),
-                original.getNotices(),
-                original.getWarnings()
-        );
+        return SqlExecResult.builder(original.getSql())
+                .columns(columns)
+                .columnDefs(columnDefs)
+                .rows(rows)
+                .rowMaps(rowMaps)
+                .rowCount(rows != null ? rows.size() : original.getRowsCount())
+                .success(original.isSuccess())
+                .message(original.getMessage())
+                .jobId(original.getJobId())
+                .status(original.getStatus())
+                .progressPercent(original.getProgressPercent())
+                .elapsedMillis(original.getElapsedMillis())
+                .durationMillis(original.getDurationMillis())
+                .rowsAffected(original.getRowsAffected())
+                .returnedRowCount(original.getReturnedRowCount())
+                .actualRowCount(original.getActualRowCount())
+                .maxVisibleRows(original.getMaxVisibleRows())
+                .maxTotalRows(original.getMaxTotalRows())
+                .hasResultSet(original.getHasResultSet())
+                .page(original.getPage())
+                .pageSize(original.getPageSize())
+                .hasNext(original.getHasNext())
+                .truncated(original.getTruncated())
+                .note(original.getNote())
+                .queuedAt(original.getQueuedAt())
+                .queueDelayMillis(original.getQueueDelayMillis())
+                .overloaded(original.getOverloaded())
+                .threadPool(original.getThreadPool())
+                .commandTag(original.getCommandTag())
+                .updateCount(original.getUpdateCount())
+                .notices(original.getNotices())
+                .warnings(original.getWarnings())
+                .build();
     }
 }
