@@ -142,7 +142,6 @@ public class MetadataService {
 
     public void resetMetadataAsync(java.util.function.Consumer<MetadataRefreshResult> done) {
         CompletableFuture.supplyAsync(() -> {
-            clearLocalMetadata();
             return refreshMetadata();
         }, metadataPool).handle((result, ex) -> {
             if (ex != null) {
@@ -263,6 +262,8 @@ public class MetadataService {
         }
 
 
+        String message = pickMessage(resp);
+
         return SqlExecResult.builder(sql)
                 .columns(columns)
                 .columnDefs(null)
@@ -270,7 +271,7 @@ public class MetadataService {
                 .rowMaps(rowMaps)
                 .rowCount(rowCount)
                 .success(Boolean.TRUE.equals(resp.getSuccess()))
-                .message(resp.getMessage())
+                .message(message)
                 .jobId(resp.getJobId())
                 .status(resp.getStatus())
                 .rowsAffected(affectedRows)
@@ -283,7 +284,7 @@ public class MetadataService {
                 .pageSize(resp.getPageSize())
                 .hasNext(resp.getHasNext())
                 .truncated(resp.getTruncated())
-                .note(resp.getMessage())
+                .note(resp.getNote())
                 .queuedAt(resp.getQueuedAt())
                 .queueDelayMillis(resp.getQueueDelayMillis())
                 .overloaded(resp.getOverloaded())
@@ -413,6 +414,29 @@ public class MetadataService {
             log.warn("统计本地字段数量失败", e);
         }
         return 0;
+    }
+
+    private String pickMessage(ResultResponse resp) {
+        if (resp == null) {
+            return null;
+        }
+        String error = trimToNull(resp.getErrorMessage());
+        if (error != null) {
+            return error;
+        }
+        String message = trimToNull(resp.getMessage());
+        if (message != null) {
+            return message;
+        }
+        return trimToNull(resp.getNote());
+    }
+
+    private String trimToNull(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     public void handleSqlSucceeded(String sql) {

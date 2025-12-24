@@ -115,7 +115,7 @@
 - **清单 SQL 模板**：
   - 表：`SELECT table_schema AS schema_name, table_name AS object_name FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE' ORDER BY table_name OFFSET :offset LIMIT 1000`。
   - 视图：`SELECT table_schema AS schema_name, table_name AS object_name FROM information_schema.views WHERE table_schema='leshan' ORDER BY table_name OFFSET :offset LIMIT 1000`。
-  - 函数：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND (p.prokind='f' OR p.proisagg=FALSE) ORDER BY p.proname OFFSET :offset LIMIT 1000`。
+- 函数：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind IN ('f','w') ORDER BY p.proname OFFSET :offset LIMIT 1000`。
   - 过程：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='p' ORDER BY p.proname OFFSET :offset LIMIT 1000`（`prokind` 不可用时返回空列表以避免大包）。
 - **差分写库**：全量同步只对新增/删除对象做 INSERT/DELETE，移除的表/视图会顺带清理对应列缓存，避免全表重建带来的抖动。
 
@@ -138,6 +138,7 @@
 - 结果面板在重用 pending 面板时未必会重新应用渲染器，部分环境下 JTable 不会自动刷新背景与结构，易出现“已完成但表格空白”的错觉。
 - 现在每次渲染/报错都会重新绑定条纹渲染器、调用 `revalidate/repaint` 并重算列宽，确保列头/行数据即时出现在结果栏。
 - 结果计数、状态与 message 仍与后端字段同步；如仍为空白，可通过操作日志确认后端是否返回 `returnedRowCount`/`resultRows`。
+- 失败信息透传：无论 SELECT 还是非 SELECT，只要 `success=false`，客户端都会使用服务端返回的 `errorMessage/message/note` 作为结果面板与 OperationLog 的文案，避免“失败但无详情”的情况。非查询失败同样会展示完整错误原因。
 
 ## SQL 子窗口布局说明
 - 每个编辑 Tab 固定使用上下分割的 `JSplitPane`：上侧为编辑器工具条+正文，下侧为结果集/消息导航区，不再存在“编辑/结果”切换标签。
@@ -199,6 +200,7 @@
 - **/api/jobs/submit**：`{"encryptedSql": "<Base64 AES>", "maxResultRows":5000?, "dbUser":"leshan_app"?, "label":"xxx"?}`。`dbUser` 逻辑库用户默认 `leshan`，`maxResultRows` 仅影响首次内存快照，并不限制最终可见行数。
 - **/api/jobs/status**：`{"jobId":"..."}`，返回 `status/progressPercent/elapsedMillis` 等任务信息。
 - **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":true?, "page":1?, "pageSize":200?}`。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize`，客户端全部做空值兼容。
+- **removeAfterFetch 语义**：`removeAfterFetch=true` 时，后端在成功返回后会从内存缓存移除该 job，再次请求将返回 404。客户端仅在“确定不再翻页/重试”时才发起一次最终带 `removeAfterFetch=true` 的 `/jobs/result`，轮询阶段统一使用 `/jobs/status`，避免“先返回 200 再被 404 覆盖”的双请求。元数据刷新与普通查询都遵循该规则。
 
 #### 异步 SQL 结果一致性窗口与客户端重试策略
 - 状态 `SUCCEEDED` 但结果暂不可用时（`success=false` 且 message 含 “Result expired/not available” 或返回行/计数矛盾），前端自动进入自愈重试，不再直接宣告失败。
@@ -218,7 +220,7 @@
 - `ASYNC_SQL_RESULT_PAGE_BASE`：`AUTO`（默认，先 1-based 再按需回退）、`0`、`1`。通过 System Property 或 `config.properties` 覆盖。
 
 #### removeAfterFetch 策略选择
-- 元数据/短结果优先保证可重试性，首次拉取统一使用 `removeAfterFetch=false`。默认 `AUTO` 不会做二次清理，避免清理后无法重试；如确需主动清理，可设置为 `TRUE`。
+- 元数据/短结果优先保证可重试性：轮询阶段仅用 `/jobs/status`，最终确认无需再翻页时才发送一次 `removeAfterFetch=true` 的 `/jobs/result`，避免“先拉取成功又被 404 覆盖”。默认 `AUTO` 不会额外追加清理请求。
 - `ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER`：`AUTO`（默认，安全保留缓存）、`TRUE`（解析成功后追加一次 `removeAfterFetch=true`）、`FALSE`（永不清理）。
 - 日志会显示 `removeAfterFetch=<true|false>` 以便确认策略，若后端专门提供清理接口可按需开启。
 
@@ -291,9 +293,10 @@
 
 ### 元数据刷新实现（PG 12.7）
 - SQL 级分页：对象与字段均按 `ORDER BY schema/object/ordinal_position OFFSET :offset LIMIT 1000` 逐页提交，见 `MetadataRefreshService#fetchPagedObjects` 与 `#fetchColumns`。
-- 轮询与重试：`waitUntilReady` 使用 `/jobs/result` 轮询，`RESULT_NOT_READY` 继续等待，HTTP 410/`RESULT_EXPIRED` 重提一次；单批超时 60s；overload 采用 500ms 起步指数退避。
+- 轮询与重试：`waitUntilReady` 统一使用 `/jobs/status` 轮询，终态后只发送一次 `/jobs/result`（带 `removeAfterFetch=true`）获取最终数据或错误详情，避免“已移除再 404”的二次拉取。单批超时 60s；overload 采用 500ms 起步指数退避。
 - 取消：`MetadataService.cancelRefresh` 设置取消标记并调用 `/jobs/cancel`（reason=`Cancelled by UI`），取消后 staging 不会覆盖正式表。
 - 本地安全：结果先写入 `objects_staging/columns_staging`，成功后一次性 `swapFromStaging`；失败/取消保留旧缓存。
+- PG12 系统表兼容：针对 `pg_proc` 采用 `prokind IN ('f','w')` 过滤函数，聚合使用 `prokind='a'`，不再引用已废弃的 `proisagg` 字段，确保 SQL 可在 PostgreSQL 12.7 正常执行。
 
 ### 常见错误与排障
 - 401：Token 错误或缺失，`RemoteSqlClient` 会抛出 “HTTP 401 未授权” 并在 OperationLog 打印请求/响应；请确认 `X-Request-Token`。
