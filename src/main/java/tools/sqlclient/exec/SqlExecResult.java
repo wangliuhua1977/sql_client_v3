@@ -38,7 +38,7 @@ public class SqlExecResult {
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
         this(sql, columns, null, rows, null, rowsCount, true, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     public SqlExecResult(String sql,
