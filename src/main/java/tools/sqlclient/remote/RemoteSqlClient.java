@@ -410,7 +410,7 @@ public class RemoteSqlClient {
         StringBuilder sb = new StringBuilder();
         sb.append("--- HTTP RESPONSE BEGIN ---\n");
         sb.append("requestId: ").append(requestId).append('\n');
-        sb.append("URL: ").append(url).append('\n");
+        sb.append("URL: ").append(url).append("\n");
         sb.append("Status: ").append(status).append('\n');
         sb.append("Headers:\n");
         headers.map().forEach((k, v) -> sb.append("  ").append(k).append(": ")
