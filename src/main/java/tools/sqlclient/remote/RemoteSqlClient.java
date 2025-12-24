@@ -254,6 +254,7 @@ public class RemoteSqlClient {
         rr.setHasNext(readBoolean(obj, "hasNext"));
         rr.setTruncated(readBoolean(obj, "truncated"));
         rr.setMessage(readString(obj, "message"));
+        rr.setErrorMessage(readString(obj, "errorMessage"));
         rr.setNote(readString(obj, "note"));
         rr.setNotices(readStringList(obj, "notices"));
         rr.setWarnings(readStringList(obj, "warnings"));

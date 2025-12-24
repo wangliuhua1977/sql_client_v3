@@ -35,6 +35,7 @@ public class ResultResponse {
     private Boolean hasNext;
     private Boolean truncated;
     private String message;
+    private String errorMessage;
     private String note;
     private List<String> notices;
     private List<String> warnings;
@@ -160,6 +161,10 @@ public class ResultResponse {
 
     public String getMessage() {
         return message;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
     }
 
     public String getNote() {
@@ -304,6 +309,10 @@ public class ResultResponse {
 
     public void setMessage(String message) {
         this.message = message;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
     }
 
     public void setNote(String note) {

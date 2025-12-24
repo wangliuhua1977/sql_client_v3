@@ -310,7 +310,7 @@ public class SqlExecutionService {
                 Integer returnedRowCount = resp.getReturnedRowCount();
                 Integer actualRowCount = resp.getActualRowCount();
                 Boolean hasResultSet = resp.getHasResultSet();
-                String message = resp.getMessage();
+                String message = pickMessage(resp);
                 logAttempt(jobId, attempt, pageIndex, page, finalPageSize, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
 
                 boolean expectResult = shouldExpectResult(finalStatus, hasResultSet, actualRowCount, returnedRowCount, respStatus);
@@ -403,7 +403,7 @@ public class SqlExecutionService {
             Long queueDelayMillis = resp.getQueueDelayMillis();
             Boolean overloaded = resp.getOverloaded();
             ThreadPoolSnapshot threadPool = resp.getThreadPool();
-            String message = resp.getMessage();
+            String message = pickMessage(resp);
             List<String> notices = resp.getNotices();
             List<String> warnings = resp.getWarnings();
 
@@ -771,6 +771,29 @@ public class SqlExecutionService {
 
     private List<AsyncJobStatus> doList() {
         return remoteClient.listActiveJobs();
+    }
+
+    private String pickMessage(ResultResponse resp) {
+        if (resp == null) {
+            return null;
+        }
+        String error = trimToNull(resp.getErrorMessage());
+        String message = trimToNull(resp.getMessage());
+        if (error != null) {
+            return error;
+        }
+        if (message != null) {
+            return message;
+        }
+        return trimToNull(resp.getNote());
+    }
+
+    private String trimToNull(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private boolean isTerminal(String status) {
