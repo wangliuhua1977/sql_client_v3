@@ -16,6 +16,10 @@ public class ResultResponse {
     private Long lastAccessAt;
     private Boolean overloaded;
     private ThreadPoolSnapshot threadPool;
+    private Integer progressPercent;
+    private Long durationMillis;
+    private Integer rowsAffected;
+    private Long queuedAt;
     private Long queueDelayMillis;
     private Integer returnedRowCount;
     private Integer actualRowCount;
@@ -27,6 +31,7 @@ public class ResultResponse {
     private Boolean hasNext;
     private Boolean truncated;
     private String message;
+    private String note;
     private List<String> columns;
     private List<java.util.Map<String, String>> rowMaps;
     private JsonArray rawRows;
@@ -75,6 +80,22 @@ public class ResultResponse {
         return threadPool;
     }
 
+    public Integer getProgressPercent() {
+        return progressPercent;
+    }
+
+    public Long getDurationMillis() {
+        return durationMillis;
+    }
+
+    public Integer getRowsAffected() {
+        return rowsAffected;
+    }
+
+    public Long getQueuedAt() {
+        return queuedAt;
+    }
+
     public Long getQueueDelayMillis() {
         return queueDelayMillis;
     }
@@ -117,6 +138,10 @@ public class ResultResponse {
 
     public String getMessage() {
         return message;
+    }
+
+    public String getNote() {
+        return note;
     }
 
     public List<String> getColumns() {
@@ -175,6 +200,22 @@ public class ResultResponse {
         this.threadPool = threadPool;
     }
 
+    public void setProgressPercent(Integer progressPercent) {
+        this.progressPercent = progressPercent;
+    }
+
+    public void setDurationMillis(Long durationMillis) {
+        this.durationMillis = durationMillis;
+    }
+
+    public void setRowsAffected(Integer rowsAffected) {
+        this.rowsAffected = rowsAffected;
+    }
+
+    public void setQueuedAt(Long queuedAt) {
+        this.queuedAt = queuedAt;
+    }
+
     public void setQueueDelayMillis(Long queueDelayMillis) {
         this.queueDelayMillis = queueDelayMillis;
     }
@@ -217,6 +258,10 @@ public class ResultResponse {
 
     public void setMessage(String message) {
         this.message = message;
+    }
+
+    public void setNote(String note) {
+        this.note = note;
     }
 
     public void setColumns(List<String> columns) {

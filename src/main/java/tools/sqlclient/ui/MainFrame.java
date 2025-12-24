@@ -867,6 +867,14 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        tools.add(new JMenuItem(new AbstractAction("取消元数据刷新") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                OperationLog.log("用户请求取消元数据刷新");
+                metadataService.cancelRefresh();
+            }
+        }));
+
         tools.add(new JMenuItem(new AbstractAction("重置元数据") {
             @Override
             public void actionPerformed(ActionEvent e) {
