@@ -171,7 +171,9 @@ public class RemoteSqlClient {
                 if (!obj.has("code") || obj.get("code").isJsonNull()) {
                     obj.addProperty("code", "RESULT_EXPIRED");
                 }
-                obj.addProperty("status", "EXPIRED");
+                if (!obj.has("status") || obj.get("status").isJsonNull()) {
+                    obj.addProperty("status", "SUCCEEDED");
+                }
                 return obj;
             }
             if (sc == 401) {
@@ -205,8 +207,12 @@ public class RemoteSqlClient {
         String status = readString(obj, "status");
         Integer progress = readInt(obj, "progressPercent");
         Long elapsed = readLong(obj, "elapsedMillis");
+        Long submittedAt = readLong(obj, "submittedAt");
+        Long startedAt = readLong(obj, "startedAt");
+        Long finishedAt = readLong(obj, "finishedAt");
         String label = readString(obj, "label");
         String sqlSummary = readString(obj, "sqlSummary");
+        String dbUser = readString(obj, "dbUser");
         Integer rowsAffected = readInt(obj, "rowsAffected");
         Integer returnedRowCount = readInt(obj, "returnedRowCount");
         Integer actualRowCount = readInt(obj, "actualRowCount");
@@ -216,8 +222,9 @@ public class RemoteSqlClient {
         Boolean overloaded = readBoolean(obj, "overloaded");
         ThreadPoolSnapshot threadPool = parseThreadPool(obj);
         String message = readString(obj, "message");
-        return new AsyncJobStatus(jobId, success, status, progress, elapsed, label, sqlSummary, rowsAffected,
-                returnedRowCount, hasResultSet, actualRowCount, message, queuedAt, queueDelayMillis, overloaded, threadPool);
+        return new AsyncJobStatus(jobId, success, status, progress, elapsed, submittedAt, startedAt, finishedAt, label,
+                sqlSummary, dbUser, rowsAffected, returnedRowCount, hasResultSet, actualRowCount, message, queuedAt,
+                queueDelayMillis, overloaded, threadPool);
     }
 
     private ResultResponse parseResult(JsonObject obj) {
@@ -229,17 +236,27 @@ public class RemoteSqlClient {
         rr.setSuccess(readBoolean(obj, "success"));
         rr.setStatus(readString(obj, "status"));
         rr.setCode(readString(obj, "code"));
+        rr.setSubmittedAt(readLong(obj, "submittedAt"));
         rr.setResultAvailable(readBoolean(obj, "resultAvailable"));
         rr.setArchived(readBoolean(obj, "archived"));
+        rr.setArchiveStatus(readString(obj, "archiveStatus"));
         rr.setArchiveError(readString(obj, "archiveError"));
+        rr.setArchivedAt(readLong(obj, "archivedAt"));
         rr.setExpiresAt(readLong(obj, "expiresAt"));
         rr.setLastAccessAt(readLong(obj, "lastAccessAt"));
+        rr.setFinishedAt(readLong(obj, "finishedAt"));
+        rr.setStartedAt(readLong(obj, "startedAt"));
+        rr.setDbUser(readString(obj, "dbUser"));
+        rr.setLabel(readString(obj, "label"));
+        rr.setSqlSummary(readString(obj, "sqlSummary"));
         rr.setOverloaded(readBoolean(obj, "overloaded"));
         rr.setQueueDelayMillis(readLong(obj, "queueDelayMillis"));
         rr.setProgressPercent(readInt(obj, "progressPercent"));
         rr.setDurationMillis(readLong(obj, "durationMillis"));
         rr.setRowsAffected(readInt(obj, "rowsAffected"));
         rr.setQueuedAt(readLong(obj, "queuedAt"));
+        rr.setOffset(readInt(obj, "offset"));
+        rr.setLimit(readInt(obj, "limit"));
         rr.setReturnedRowCount(readInt(obj, "returnedRowCount"));
         rr.setActualRowCount(readInt(obj, "actualRowCount"));
         rr.setMaxVisibleRows(readInt(obj, "maxVisibleRows"));
