@@ -38,7 +38,7 @@ public class SqlExecResult {
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
         this(sql, columns, null, rows, null, rowsCount, true, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     public SqlExecResult(String sql,
@@ -97,6 +97,35 @@ public class SqlExecResult {
         this.queueDelayMillis = queueDelayMillis;
         this.overloaded = overloaded;
         this.threadPool = threadPool;
+    }
+
+    public SqlExecResult(String sql,
+                         List<String> columns,
+                         List<ColumnDef> columnDefs,
+                         List<List<String>> rows,
+                         List<java.util.Map<String, String>> rowMaps,
+                         int rowsCount,
+                         boolean success,
+                         String message,
+                         String jobId,
+                         String status,
+                         Integer progressPercent,
+                         Long elapsedMillis,
+                         Long durationMillis,
+                         Integer rowsAffected,
+                         Integer returnedRowCount,
+                         Integer actualRowCount,
+                         Integer maxVisibleRows,
+                         Integer maxTotalRows,
+                         Boolean hasResultSet,
+                         Integer page,
+                         Integer pageSize,
+                         Boolean hasNext,
+                         Boolean truncated,
+                         String note) {
+        this(sql, columns, columnDefs, rows, rowMaps, rowsCount, success, message, jobId, status, progressPercent,
+                elapsedMillis, durationMillis, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
+                hasResultSet, page, pageSize, hasNext, truncated, note, null, null, null, null);
     }
 
     public String getSql() {
