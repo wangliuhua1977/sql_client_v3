@@ -35,10 +35,14 @@ public class SqlExecResult {
     private final Long queueDelayMillis;
     private final Boolean overloaded;
     private final ThreadPoolSnapshot threadPool;
+    private final String commandTag;
+    private final Integer updateCount;
+    private final List<String> notices;
+    private final List<String> warnings;
 
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
         this(sql, columns, null, rows, null, rowsCount, true, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     public SqlExecResult(String sql,
@@ -68,7 +72,11 @@ public class SqlExecResult {
                          Long queuedAt,
                          Long queueDelayMillis,
                          Boolean overloaded,
-                         ThreadPoolSnapshot threadPool) {
+                         ThreadPoolSnapshot threadPool,
+                         String commandTag,
+                         Integer updateCount,
+                         List<String> notices,
+                         List<String> warnings) {
         this.sql = Objects.requireNonNullElse(sql, "");
         this.columns = columns;
         this.columnDefs = columnDefs;
@@ -97,6 +105,10 @@ public class SqlExecResult {
         this.queueDelayMillis = queueDelayMillis;
         this.overloaded = overloaded;
         this.threadPool = threadPool;
+        this.commandTag = commandTag;
+        this.updateCount = updateCount;
+        this.notices = notices;
+        this.warnings = warnings;
     }
 
     public SqlExecResult(String sql,
@@ -125,7 +137,8 @@ public class SqlExecResult {
                          String note) {
         this(sql, columns, columnDefs, rows, rowMaps, rowsCount, success, message, jobId, status, progressPercent,
                 elapsedMillis, durationMillis, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
-                hasResultSet, page, pageSize, hasNext, truncated, note, null, null, null, null);
+                hasResultSet, page, pageSize, hasNext, truncated, note, null, null, null, null,
+                null, null, null, null);
     }
 
     public String getSql() {
@@ -238,5 +251,21 @@ public class SqlExecResult {
 
     public ThreadPoolSnapshot getThreadPool() {
         return threadPool;
+    }
+
+    public String getCommandTag() {
+        return commandTag;
+    }
+
+    public Integer getUpdateCount() {
+        return updateCount;
+    }
+
+    public List<String> getNotices() {
+        return notices;
+    }
+
+    public List<String> getWarnings() {
+        return warnings;
     }
 }

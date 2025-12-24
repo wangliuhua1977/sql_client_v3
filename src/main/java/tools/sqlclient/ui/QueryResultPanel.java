@@ -3,14 +3,17 @@ package tools.sqlclient.ui;
 import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.SqlExecResult;
+import tools.sqlclient.exec.SqlTopLevelClassifier;
 
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
 import javax.swing.table.DefaultTableCellRenderer;
+import javax.swing.table.DefaultTableModel;
 import java.awt.*;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 通用结果面板，展示单条 SQL 执行的结果集与异步进度。
@@ -24,6 +27,16 @@ public class QueryResultPanel extends JPanel {
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final ColumnarTableModel model = new ColumnarTableModel();
     private final JTable table = new JTable(model);
+    private final DefaultTableModel infoModel = new DefaultTableModel(new Object[]{"字段", "值"}, 0) {
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return false;
+        }
+    };
+    private final JTable infoTable = new JTable(infoModel);
+    private final JPanel cards = new JPanel(new CardLayout());
+    private static final String CARD_TABLE = "table";
+    private static final String CARD_INFO = "info";
     private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
         private final Color even = new Color(250, 252, 255);
         private final Color odd = Color.WHITE;
@@ -76,7 +89,15 @@ public class QueryResultPanel extends JPanel {
         JScrollPane scrollPane = new JScrollPane(table);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
         scrollPane.getViewport().setBackground(Color.WHITE);
-        add(scrollPane, BorderLayout.CENTER);
+
+        infoTable.setFillsViewportHeight(true);
+        infoTable.setRowHeight(24);
+        JScrollPane infoScroll = new JScrollPane(infoTable);
+        infoScroll.getViewport().setBackground(Color.WHITE);
+
+        cards.add(scrollPane, CARD_TABLE);
+        cards.add(infoScroll, CARD_INFO);
+        add(cards, BorderLayout.CENTER);
 
         render(result);
     }
@@ -86,7 +107,7 @@ public class QueryResultPanel extends JPanel {
         List<List<String>> rows = List.of(List.of("任务已提交，等待执行..."));
         SqlExecResult res = new SqlExecResult(sqlText, cols, null, rows, List.of(), rows.size(), false,
                 "任务已提交", null, "QUEUED", 0, null, null, null, null, null, null, null, true,
-                null, null, null, null, null);
+                null, null, null, null, null, null, null, null);
         return new QueryResultPanel(res, sqlText);
     }
 
@@ -113,15 +134,21 @@ public class QueryResultPanel extends JPanel {
             messageLabel.setText(result.getNote());
         }
         countLabel.setText("记录数 " + result.getRowsCount() + " 条");
-
-        List<ColumnDef> defs = resolveColumns(result);
-        List<List<String>> rows = result.getRows() != null ? result.getRows() : List.of();
-        model.setData(defs, rows);
-        applyColumnIdentifiers(defs);
-        applyStripedRenderer();
-        table.revalidate();
-        table.repaint();
-        resizeColumns();
+        boolean renderTable = shouldRenderResultSet(result);
+        if (renderTable) {
+            List<ColumnDef> defs = resolveColumns(result);
+            List<List<String>> rows = result.getRows() != null ? result.getRows() : List.of();
+            model.setData(defs, rows);
+            applyColumnIdentifiers(defs);
+            applyStripedRenderer();
+            table.revalidate();
+            table.repaint();
+            resizeColumns();
+            switchCard(CARD_TABLE);
+        } else {
+            renderInfo(result);
+            switchCard(CARD_INFO);
+        }
     }
 
     public void fitColumns() {
@@ -206,6 +233,52 @@ public class QueryResultPanel extends JPanel {
             }
             table.getColumnModel().getColumn(col).setPreferredWidth(cellWidth);
         }
+    }
+
+    private void renderInfo(SqlExecResult result) {
+        infoModel.setRowCount(0);
+        addInfoRow("Status", result.getStatus());
+        addInfoRow("Command Tag", result.getCommandTag());
+        addInfoRow("Affected Rows", result.getRowsAffected() != null ? String.valueOf(result.getRowsAffected()) : "N/A");
+        Long elapsed = result.getElapsedMillis() != null ? result.getElapsedMillis() : result.getDurationMillis();
+        addInfoRow("Elapsed", elapsed != null ? elapsed + " ms" : "-");
+        addInfoRow("Job Id", result.getJobId());
+        addInfoRow("Message", result.getMessage());
+        addInfoRow("Notices", joinList(result.getNotices()));
+        addInfoRow("Warnings", joinList(result.getWarnings()));
+    }
+
+    private void addInfoRow(String key, String value) {
+        infoModel.addRow(new Object[]{key, value == null || value.isBlank() ? "-" : value});
+    }
+
+    private String joinList(List<String> list) {
+        if (list == null || list.isEmpty()) {
+            return "-";
+        }
+        List<String> cleaned = list.stream()
+                .filter(Objects::nonNull)
+                .filter(s -> !s.isBlank())
+                .toList();
+        if (cleaned.isEmpty()) {
+            return "-";
+        }
+        return String.join("; ", cleaned);
+    }
+
+    private void switchCard(String card) {
+        CardLayout cl = (CardLayout) cards.getLayout();
+        cl.show(cards, card);
+    }
+
+    private boolean shouldRenderResultSet(SqlExecResult result) {
+        if (Boolean.TRUE.equals(result.getHasResultSet())) {
+            return true;
+        }
+        if (Boolean.FALSE.equals(result.getHasResultSet())) {
+            return false;
+        }
+        return SqlTopLevelClassifier.classify(result.getSql()) == SqlTopLevelClassifier.TopLevelType.RESULT_SET;
     }
 
     private List<ColumnDef> resolveColumns(SqlExecResult result) {

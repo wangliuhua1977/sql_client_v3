@@ -245,12 +245,18 @@ public class RemoteSqlClient {
         rr.setMaxVisibleRows(readInt(obj, "maxVisibleRows"));
         rr.setMaxTotalRows(readInt(obj, "maxTotalRows"));
         rr.setHasResultSet(readBoolean(obj, "hasResultSet"));
+        rr.setIsSelect(readBoolean(obj, "isSelect"));
+        rr.setResultType(readString(obj, "resultType"));
+        rr.setUpdateCount(readInt(obj, "updateCount"));
+        rr.setCommandTag(readString(obj, "commandTag"));
         rr.setPage(readInt(obj, "page"));
         rr.setPageSize(readInt(obj, "pageSize"));
         rr.setHasNext(readBoolean(obj, "hasNext"));
         rr.setTruncated(readBoolean(obj, "truncated"));
         rr.setMessage(readString(obj, "message"));
         rr.setNote(readString(obj, "note"));
+        rr.setNotices(readStringList(obj, "notices"));
+        rr.setWarnings(readStringList(obj, "warnings"));
         rr.setThreadPool(parseThreadPool(obj));
         rr.setColumns(extractColumns(obj));
         JsonArray rows = extractRows(obj);
@@ -381,6 +387,20 @@ public class RemoteSqlClient {
         if (obj == null || !obj.has(key) || obj.get(key).isJsonNull()) return null;
         try {
             return obj.get(key).getAsBoolean();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private List<String> readStringList(JsonObject obj, String key) {
+        if (obj == null || !obj.has(key) || obj.get(key).isJsonNull()) return null;
+        try {
+            JsonArray arr = obj.get(key).getAsJsonArray();
+            List<String> list = new ArrayList<>();
+            for (JsonElement el : arr) {
+                list.add(el != null && !el.isJsonNull() ? el.getAsString() : null);
+            }
+            return list;
         } catch (Exception e) {
             return null;
         }
