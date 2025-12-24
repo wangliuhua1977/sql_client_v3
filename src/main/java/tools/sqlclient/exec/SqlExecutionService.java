@@ -418,8 +418,10 @@ public class SqlExecutionService {
         if (candidate != null) {
             return candidate;
         }
-        return CommandTagParser.parseAffectedRows(commandTag).orElse(null);
+        java.util.OptionalInt parsed = CommandTagParser.parseAffectedRows(commandTag);
+        return parsed.isPresent() ? parsed.getAsInt() : null;
     }
+
 
     private boolean determineHasResultSet(String sql, Boolean respHasResultSet, Boolean isSelect, String resultType) {
         if (respHasResultSet != null) {
