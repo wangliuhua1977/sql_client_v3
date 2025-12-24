@@ -1,6 +1,6 @@
 # SQL Notebook 用户操作指引
 
-面向 Windows 11 风格的多标签 SQL 笔记本，基于 Java 22 + Swing + RSyntaxTextArea，支持 PostgreSQL / Hive 的编辑、执行与本地元数据缓存。
+面向 Windows 11 风格的多标签 SQL 笔记本，基于 Java 22 + Swing + RSyntaxTextArea，支持 PostgreSQL / Hive 的编辑、执行与本地元数据缓存。目标数据库版本固定：PostgreSQL 12.7 on x86_64-pc-linux-gnu（gcc 4.8.5）。
 
 ## 快速开始
 1. 安装 JDK 22 与 Maven，并确保可以访问 Maven Central。
@@ -100,6 +100,13 @@
 - Token 错误或网络异常时，日志与状态栏会提示失败原因；SQL 本身失败会在结果面板呈现后端返回的 errorMessage。
 
 ## 前端开发技术文档：元数据获取与列顺序
+
+### SqlExecResult 构建规范与非查询结果展示
+- 统一通过 `SqlExecResult.builder(sql)` 构建结果对象，业务代码禁止直接 `new SqlExecResult(...)`。旧构造器仅用于类内部或兼容调用，字段新增/删减时只需调整 Builder 默认值。
+- Builder 默认提供空列表与安全兜底：columns/rows/rowMaps/notices/warnings 为空时自动替换为 `List.of()`，`rowsCount` 默认为行数或 rowMaps 大小，`success` 默认为 `true`，`hasResultSet` 自动从列/行是否为空推断（可显式覆盖）。
+- 查询结果：显式设置 `hasResultSet=true`，并填充 columns/rows/rowMaps，确保行列长度一致。
+- 非查询结果（DDL/DML/无结果集）：`hasResultSet=false`，columns/rows/rowMaps 置空，同时填充 `rowsAffected/updateCount/commandTag` 中至少一项，以便 UI 显示影响行数。
+- 影响行数展示优先级：`rowsAffected` 优先，其次 `updateCount`，再次尝试从 `commandTag` 解析（如 `INSERT 0 3` => 3）。缺失时显示为空，不再因 null 传入 primitive 触发编译或拆箱异常。
 
 ### 元数据同步（本地优先 + 分批差分）
 - **本地优先**：对象树、模糊联想与列提示全部只读本地 SQLite，常规操作不触发任何远端调用。

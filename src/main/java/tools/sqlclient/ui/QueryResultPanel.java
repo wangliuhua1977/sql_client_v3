@@ -13,6 +13,7 @@ import java.awt.*;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -105,9 +106,18 @@ public class QueryResultPanel extends JPanel {
     public static QueryResultPanel pending(String sqlText) {
         List<String> cols = List.of("消息");
         List<List<String>> rows = List.of(List.of("任务已提交，等待执行..."));
-        SqlExecResult res = new SqlExecResult(sqlText, cols, null, rows, List.of(), rows.size(), false,
-                "任务已提交", null, "QUEUED", 0, null, null, null, null, null, null, null, true,
-                null, null, null, null, null, null, null, null);
+        List<java.util.Map<String, String>> rowMaps = List.of(Map.of("消息", "任务已提交，等待执行..."));
+        SqlExecResult res = SqlExecResult.builder(sqlText)
+                .columns(cols)
+                .rows(rows)
+                .rowMaps(rowMaps)
+                .rowCount(rows.size())
+                .success(false)
+                .message("任务已提交")
+                .status("QUEUED")
+                .progressPercent(0)
+                .hasResultSet(true)
+                .build();
         return new QueryResultPanel(res, sqlText);
     }
 

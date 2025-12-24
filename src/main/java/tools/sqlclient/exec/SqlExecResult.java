@@ -1,6 +1,8 @@
 package tools.sqlclient.exec;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -40,11 +42,17 @@ public class SqlExecResult {
     private final List<String> notices;
     private final List<String> warnings;
 
+    /**
+     * 仅用于兼容旧代码的 4 参构造器，内部委托 Builder，后续请统一使用 {@link #builder(String)}。
+     */
     public SqlExecResult(String sql, List<String> columns, List<List<String>> rows, int rowsCount) {
-        this(sql, columns, null, rows, null, rowsCount, true, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null);
+        this(builder(sql).columns(columns).rows(rows).rowCount(rowsCount));
     }
 
+    /**
+     * 仅用于兼容旧代码的中间构造器，禁止在业务代码中继续调用，统一改用 Builder。
+     */
+    @Deprecated
     public SqlExecResult(String sql,
                          List<String> columns,
                          List<ColumnDef> columnDefs,
@@ -77,40 +85,44 @@ public class SqlExecResult {
                          Integer updateCount,
                          List<String> notices,
                          List<String> warnings) {
-        this.sql = Objects.requireNonNullElse(sql, "");
-        this.columns = columns;
-        this.columnDefs = columnDefs;
-        this.rows = rows;
-        this.rowMaps = rowMaps;
-        this.rowsCount = rowsCount;
-        this.success = success;
-        this.message = message;
-        this.jobId = jobId;
-        this.status = status;
-        this.progressPercent = progressPercent;
-        this.elapsedMillis = elapsedMillis;
-        this.durationMillis = durationMillis;
-        this.rowsAffected = rowsAffected;
-        this.returnedRowCount = returnedRowCount;
-        this.actualRowCount = actualRowCount;
-        this.maxVisibleRows = maxVisibleRows;
-        this.maxTotalRows = maxTotalRows;
-        this.hasResultSet = hasResultSet;
-        this.page = page;
-        this.pageSize = pageSize;
-        this.hasNext = hasNext;
-        this.truncated = truncated;
-        this.note = note;
-        this.queuedAt = queuedAt;
-        this.queueDelayMillis = queueDelayMillis;
-        this.overloaded = overloaded;
-        this.threadPool = threadPool;
-        this.commandTag = commandTag;
-        this.updateCount = updateCount;
-        this.notices = notices;
-        this.warnings = warnings;
+        this(builder(sql)
+                .columns(columns)
+                .columnDefs(columnDefs)
+                .rows(rows)
+                .rowMaps(rowMaps)
+                .rowCount(rowsCount)
+                .success(success)
+                .message(message)
+                .jobId(jobId)
+                .status(status)
+                .progressPercent(progressPercent)
+                .elapsedMillis(elapsedMillis)
+                .durationMillis(durationMillis)
+                .rowsAffected(rowsAffected)
+                .returnedRowCount(returnedRowCount)
+                .actualRowCount(actualRowCount)
+                .maxVisibleRows(maxVisibleRows)
+                .maxTotalRows(maxTotalRows)
+                .hasResultSet(hasResultSet)
+                .page(page)
+                .pageSize(pageSize)
+                .hasNext(hasNext)
+                .truncated(truncated)
+                .note(note)
+                .queuedAt(queuedAt)
+                .queueDelayMillis(queueDelayMillis)
+                .overloaded(overloaded)
+                .threadPool(threadPool)
+                .commandTag(commandTag)
+                .updateCount(updateCount)
+                .notices(notices)
+                .warnings(warnings));
     }
 
+    /**
+     * 长参数构造器仅供 Builder 调用，外部禁止直接使用。
+     */
+    @Deprecated
     public SqlExecResult(String sql,
                          List<String> columns,
                          List<ColumnDef> columnDefs,
@@ -135,10 +147,296 @@ public class SqlExecResult {
                          Boolean hasNext,
                          Boolean truncated,
                          String note) {
-        this(sql, columns, columnDefs, rows, rowMaps, rowsCount, success, message, jobId, status, progressPercent,
-                elapsedMillis, durationMillis, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
-                hasResultSet, page, pageSize, hasNext, truncated, note, null, null, null, null,
-                null, null, null, null);
+        this(builder(sql)
+                .columns(columns)
+                .columnDefs(columnDefs)
+                .rows(rows)
+                .rowMaps(rowMaps)
+                .rowCount(rowsCount)
+                .success(success)
+                .message(message)
+                .jobId(jobId)
+                .status(status)
+                .progressPercent(progressPercent)
+                .elapsedMillis(elapsedMillis)
+                .durationMillis(durationMillis)
+                .rowsAffected(rowsAffected)
+                .returnedRowCount(returnedRowCount)
+                .actualRowCount(actualRowCount)
+                .maxVisibleRows(maxVisibleRows)
+                .maxTotalRows(maxTotalRows)
+                .hasResultSet(hasResultSet)
+                .page(page)
+                .pageSize(pageSize)
+                .hasNext(hasNext)
+                .truncated(truncated)
+                .note(note));
+    }
+
+    private SqlExecResult(Builder builder) {
+        this.sql = Objects.requireNonNullElse(builder.sql, "");
+        this.columns = defaultList(builder.columns);
+        this.columnDefs = defaultList(builder.columnDefs);
+        this.rows = defaultList(builder.rows);
+        this.rowMaps = defaultList(builder.rowMaps);
+        this.rowsCount = builder.rowsCount != null ? builder.rowsCount : deriveRowCount();
+        this.success = builder.success != null ? builder.success : true;
+        this.message = builder.message;
+        this.jobId = builder.jobId;
+        this.status = builder.status;
+        this.progressPercent = builder.progressPercent;
+        this.elapsedMillis = builder.elapsedMillis;
+        this.durationMillis = builder.durationMillis;
+        this.rowsAffected = builder.rowsAffected;
+        this.returnedRowCount = builder.returnedRowCount;
+        this.actualRowCount = builder.actualRowCount;
+        this.maxVisibleRows = builder.maxVisibleRows;
+        this.maxTotalRows = builder.maxTotalRows;
+        this.hasResultSet = builder.hasResultSet != null ? builder.hasResultSet : guessHasResultSet();
+        this.page = builder.page;
+        this.pageSize = builder.pageSize;
+        this.hasNext = builder.hasNext;
+        this.truncated = builder.truncated;
+        this.note = builder.note;
+        this.queuedAt = builder.queuedAt;
+        this.queueDelayMillis = builder.queueDelayMillis;
+        this.overloaded = builder.overloaded;
+        this.threadPool = builder.threadPool;
+        this.commandTag = builder.commandTag;
+        this.updateCount = builder.updateCount;
+        this.notices = defaultList(builder.notices);
+        this.warnings = defaultList(builder.warnings);
+    }
+
+    private int deriveRowCount() {
+        if (rows != null && !rows.isEmpty()) {
+            return rows.size();
+        }
+        if (rowMaps != null && !rowMaps.isEmpty()) {
+            return rowMaps.size();
+        }
+        return 0;
+    }
+
+    private Boolean guessHasResultSet() {
+        return !(columns == null || columns.isEmpty()) || (rows != null && !rows.isEmpty()) || (rowMaps != null && !rowMaps.isEmpty());
+    }
+
+    private static <T> List<T> defaultList(List<T> list) {
+        if (list == null) {
+            return List.of();
+        }
+        if (list instanceof ArrayList) {
+            return list;
+        }
+        return List.copyOf(list);
+    }
+
+    public static Builder builder(String sql) {
+        return new Builder(sql);
+    }
+
+    public static final class Builder {
+        private String sql;
+        private List<String> columns;
+        private List<ColumnDef> columnDefs;
+        private List<List<String>> rows;
+        private List<Map<String, String>> rowMaps;
+        private Integer rowsCount;
+        private Boolean success;
+        private String message;
+        private String jobId;
+        private String status;
+        private Integer progressPercent;
+        private Long elapsedMillis;
+        private Long durationMillis;
+        private Integer rowsAffected;
+        private Integer returnedRowCount;
+        private Integer actualRowCount;
+        private Integer maxVisibleRows;
+        private Integer maxTotalRows;
+        private Boolean hasResultSet;
+        private Integer page;
+        private Integer pageSize;
+        private Boolean hasNext;
+        private Boolean truncated;
+        private String note;
+        private Long queuedAt;
+        private Long queueDelayMillis;
+        private Boolean overloaded;
+        private ThreadPoolSnapshot threadPool;
+        private String commandTag;
+        private Integer updateCount;
+        private List<String> notices;
+        private List<String> warnings;
+
+        private Builder(String sql) {
+            this.sql = sql;
+        }
+
+        public Builder sql(String sql) {
+            this.sql = sql;
+            return this;
+        }
+
+        public Builder columns(List<String> columns) {
+            this.columns = columns;
+            return this;
+        }
+
+        public Builder columnDefs(List<ColumnDef> columnDefs) {
+            this.columnDefs = columnDefs;
+            return this;
+        }
+
+        public Builder rows(List<List<String>> rows) {
+            this.rows = rows;
+            return this;
+        }
+
+        public Builder rowMaps(List<Map<String, String>> rowMaps) {
+            this.rowMaps = rowMaps;
+            return this;
+        }
+
+        public Builder rowCount(Integer rowsCount) {
+            this.rowsCount = rowsCount;
+            return this;
+        }
+
+        public Builder success(Boolean success) {
+            this.success = success;
+            return this;
+        }
+
+        public Builder message(String message) {
+            this.message = message;
+            return this;
+        }
+
+        public Builder jobId(String jobId) {
+            this.jobId = jobId;
+            return this;
+        }
+
+        public Builder status(String status) {
+            this.status = status;
+            return this;
+        }
+
+        public Builder progressPercent(Integer progressPercent) {
+            this.progressPercent = progressPercent;
+            return this;
+        }
+
+        public Builder elapsedMillis(Long elapsedMillis) {
+            this.elapsedMillis = elapsedMillis;
+            return this;
+        }
+
+        public Builder durationMillis(Long durationMillis) {
+            this.durationMillis = durationMillis;
+            return this;
+        }
+
+        public Builder rowsAffected(Integer rowsAffected) {
+            this.rowsAffected = rowsAffected;
+            return this;
+        }
+
+        public Builder returnedRowCount(Integer returnedRowCount) {
+            this.returnedRowCount = returnedRowCount;
+            return this;
+        }
+
+        public Builder actualRowCount(Integer actualRowCount) {
+            this.actualRowCount = actualRowCount;
+            return this;
+        }
+
+        public Builder maxVisibleRows(Integer maxVisibleRows) {
+            this.maxVisibleRows = maxVisibleRows;
+            return this;
+        }
+
+        public Builder maxTotalRows(Integer maxTotalRows) {
+            this.maxTotalRows = maxTotalRows;
+            return this;
+        }
+
+        public Builder hasResultSet(Boolean hasResultSet) {
+            this.hasResultSet = hasResultSet;
+            return this;
+        }
+
+        public Builder page(Integer page) {
+            this.page = page;
+            return this;
+        }
+
+        public Builder pageSize(Integer pageSize) {
+            this.pageSize = pageSize;
+            return this;
+        }
+
+        public Builder hasNext(Boolean hasNext) {
+            this.hasNext = hasNext;
+            return this;
+        }
+
+        public Builder truncated(Boolean truncated) {
+            this.truncated = truncated;
+            return this;
+        }
+
+        public Builder note(String note) {
+            this.note = note;
+            return this;
+        }
+
+        public Builder queuedAt(Long queuedAt) {
+            this.queuedAt = queuedAt;
+            return this;
+        }
+
+        public Builder queueDelayMillis(Long queueDelayMillis) {
+            this.queueDelayMillis = queueDelayMillis;
+            return this;
+        }
+
+        public Builder overloaded(Boolean overloaded) {
+            this.overloaded = overloaded;
+            return this;
+        }
+
+        public Builder threadPool(ThreadPoolSnapshot threadPool) {
+            this.threadPool = threadPool;
+            return this;
+        }
+
+        public Builder commandTag(String commandTag) {
+            this.commandTag = commandTag;
+            return this;
+        }
+
+        public Builder updateCount(Integer updateCount) {
+            this.updateCount = updateCount;
+            return this;
+        }
+
+        public Builder notices(List<String> notices) {
+            this.notices = notices;
+            return this;
+        }
+
+        public Builder warnings(List<String> warnings) {
+            this.warnings = warnings;
+            return this;
+        }
+
+        public SqlExecResult build() {
+            return new SqlExecResult(this);
+        }
     }
 
     public String getSql() {
