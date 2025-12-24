@@ -256,7 +256,8 @@ public class SqlExecutionService {
                 firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
                 firstPage.getRowsAffected(), firstPage.getReturnedRowCount(), firstPage.getActualRowCount(), firstPage.getMaxVisibleRows(),
                 firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), pageIndex + context.resolvedBase(), pageSize, hasNext,
-                truncated, note);
+                truncated, note, firstPage.getQueuedAt(), firstPage.getQueueDelayMillis(), firstPage.getOverloaded(), firstPage.getThreadPool(),
+                firstPage.getCommandTag(), firstPage.getUpdateCount(), firstPage.getNotices(), firstPage.getWarnings());
     }
 
     private SqlExecResult requestResultPageWithRetry(String jobId,
@@ -362,6 +363,10 @@ public class SqlExecutionService {
             Integer maxVisibleRows = resp.getMaxVisibleRows();
             Integer maxTotalRows = resp.getMaxTotalRows();
             Boolean hasResultSet = resp.getHasResultSet();
+            Boolean isSelect = resp.getIsSelect();
+            String resultType = resp.getResultType();
+            Integer updateCount = resp.getUpdateCount();
+            String commandTag = resp.getCommandTag();
             Boolean hasNext = resp.getHasNext() != null ? resp.getHasNext() : false;
             Boolean truncated = resp.getTruncated();
             Integer respPage = resp.getPage() != null ? resp.getPage() : requestedPage;
@@ -372,6 +377,11 @@ public class SqlExecutionService {
             Boolean overloaded = resp.getOverloaded();
             ThreadPoolSnapshot threadPool = resp.getThreadPool();
             String message = resp.getMessage();
+            List<String> notices = resp.getNotices();
+            List<String> warnings = resp.getWarnings();
+
+            Integer affectedRows = resolveAffectedRows(rowsAffected, updateCount, commandTag);
+            boolean finalHasResultSet = determineHasResultSet(sql, hasResultSet, isSelect, resultType);
 
             if (!success) {
                 OperationLog.log("[" + jobId + "] 任务失败/未完成: " + message);
@@ -386,23 +396,57 @@ public class SqlExecutionService {
             logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
                     hasNext, truncated, note, columns, resp.getRawRows(), rows, queuedAt, queueDelayMillis, overloaded, threadPool);
 
-            if (hasResultSet != null && !hasResultSet) {
-                List<String> messageCols = List.of("消息");
-                List<List<String>> messageRows = new ArrayList<>();
-                String info = rowsAffected != null ? ("影响行数: " + rowsAffected) : (message != null ? message : "执行成功");
-                messageRows.add(List.of(info));
-                return new SqlExecResult(sql, messageCols, null, messageRows, List.of(), messageRows.size(), true, message, jobId, status, progress,
-                        null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
-                        respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool);
+            if (!finalHasResultSet) {
+                return new SqlExecResult(sql, List.of(), null, List.of(), List.of(), 0, true, message, jobId, status, progress,
+                        null, duration, affectedRows, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, false,
+                        respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool,
+                        commandTag, updateCount, notices, warnings);
             }
 
             return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, true, message, jobId, status, progress,
-                    null, duration, rowsAffected, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, hasResultSet,
-                    respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool);
+                    null, duration, affectedRows, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, finalHasResultSet,
+                    respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool,
+                    commandTag, updateCount, notices, warnings);
         } catch (Exception e) {
             OperationLog.log("[" + jobId + "] 解析 /jobs/result 失败: " + e.getMessage());
             throw new RuntimeException("解析结果失败: " + e.getMessage(), e);
         }
+    }
+
+    private Integer resolveAffectedRows(Integer rowsAffected, Integer updateCount, String commandTag) {
+        Integer candidate = firstNonNegative(rowsAffected, updateCount);
+        if (candidate != null) {
+            return candidate;
+        }
+        return CommandTagParser.parseAffectedRows(commandTag).orElse(null);
+    }
+
+    private boolean determineHasResultSet(String sql, Boolean respHasResultSet, Boolean isSelect, String resultType) {
+        if (respHasResultSet != null) {
+            return respHasResultSet;
+        }
+        if (isSelect != null) {
+            return isSelect;
+        }
+        if (resultType != null) {
+            if ("RESULT_SET".equalsIgnoreCase(resultType)) {
+                return true;
+            }
+            if ("NON_QUERY".equalsIgnoreCase(resultType)) {
+                return false;
+            }
+        }
+        return SqlTopLevelClassifier.classify(sql) == SqlTopLevelClassifier.TopLevelType.RESULT_SET;
+    }
+
+    private Integer firstNonNegative(Integer... values) {
+        if (values == null) return null;
+        for (Integer v : values) {
+            if (v != null && v >= 0) {
+                return v;
+            }
+        }
+        return null;
     }
 
     private int resolvePageSize(Integer desired) {
