@@ -156,6 +156,11 @@ public class MetadataService {
         });
     }
 
+    public void cancelRefresh() {
+        refreshService.cancelRefresh();
+        OperationLog.log("用户请求取消元数据刷新");
+    }
+
     private MetadataRefreshResult refreshMetadata() {
         long startedAt = System.currentTimeMillis();
         int beforeObjects = countCachedObjects();

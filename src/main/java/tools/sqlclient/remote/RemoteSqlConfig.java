@@ -1,17 +1,18 @@
-package tools.sqlclient.exec;
+package tools.sqlclient.remote;
 
 import java.net.URI;
 
 /**
- * 异步 SQL 执行相关的默认配置。
+ * 统一管理异步 SQL 服务的默认配置。
  */
-public class AsyncSqlConfig {
+public final class RemoteSqlConfig {
     public static final String BASE_URL = "https://leshan.paas.sc.ctc.com/waf/api";
     public static final String REQUEST_TOKEN = "WAF_STATIC_TOKEN_202405";
     public static final String AES_KEY = "LeshanAESKey1234";
     public static final String AES_IV = "LeshanAESIv12345";
+    public static final int SERVER_MAX_PAGE_SIZE = 1000;
 
-    private AsyncSqlConfig() {
+    private RemoteSqlConfig() {
     }
 
     public static URI buildUri(String path) {
