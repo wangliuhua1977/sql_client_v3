@@ -328,3 +328,11 @@ $result = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/result" -Headers $h
 $cancelBody = @{ jobId = $jobId; reason = "Cancelled by UI" } | ConvertTo-Json
 $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $headers -Body $cancelBody
 ```
+
+## SQL 顶层类型与结果渲染规则（PostgreSQL 12.7 on x86_64-pc-linux-gnu，gcc 4.8.5）
+- **顶层语句分类**：`SqlTopLevelClassifier` 逐字符跳过空白、`--`/`/* */` 注释与字符串字面量，仅读取顶层首关键字；`WITH ...` 会定位到主语句。
+  - SELECT/VALUES/SHOW/EXPLAIN（含 WITH 主语句为这些）视为 **ResultSet**。
+  - 其他顶层关键字（INSERT/UPDATE/DELETE/CREATE/DROP/ALTER/GRANT 等）统一视为 **非查询**。
+- **ResultSet 渲染**：仅当后端标记 `hasResultSet/isSelect/resultType` 为 true，或分类器判定为 ResultSet 时才进入列适配/投影解析；列定义数量与每行数据列数必须一致，否则跳过重排以避免“多列表头 + 空白行”。
+- **非查询渲染**：顶层非查询或 `hasResultSet=false` 时走消息视图，显示状态、commandTag、affectedRows、elapsed/jobId 等，不做任何列解析/星号展开。CommandTag 与 affectedRows 会直接展示，无法判定时标记为 N/A。
+- **影响行数获取策略**：优先使用后端 `updateCount/affectedRows(rowsAffected)` 且值≥0；否则从 commandTag 匹配 `^(INSERT|UPDATE|DELETE|SELECT)\s+\d+` 补齐；仍不可得时显示 N/A，但 commandTag 依然保留。

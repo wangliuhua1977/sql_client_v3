@@ -7,6 +7,7 @@ import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
 import tools.sqlclient.exec.ResultNotReadyException;
 import tools.sqlclient.exec.ResultResponse;
+import tools.sqlclient.exec.CommandTagParser;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.util.Config;
 import tools.sqlclient.util.OperationLog;
@@ -250,11 +251,20 @@ public class MetadataService {
             rows.add(row);
         }
         int rowCount = resp.getReturnedRowCount() != null ? resp.getReturnedRowCount() : rowMaps.size();
+        Integer affectedRows = resp.getRowsAffected();
+        if ((affectedRows == null || affectedRows < 0) && resp.getUpdateCount() != null && resp.getUpdateCount() >= 0) {
+            affectedRows = resp.getUpdateCount();
+        }
+        if ((affectedRows == null || affectedRows < 0) && resp.getCommandTag() != null) {
+            affectedRows = CommandTagParser.parseAffectedRows(resp.getCommandTag()).orElse(null);
+        }
+
         return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, Boolean.TRUE.equals(resp.getSuccess()),
-                resp.getMessage(), resp.getJobId(), resp.getStatus(), null, null, null, null,
+                resp.getMessage(), resp.getJobId(), resp.getStatus(), null, null, null, affectedRows,
                 resp.getReturnedRowCount(), resp.getActualRowCount(), resp.getMaxVisibleRows(), resp.getMaxTotalRows(),
                 resp.getHasResultSet(), resp.getPage(), resp.getPageSize(), resp.getHasNext(), resp.getTruncated(),
-                resp.getMessage(), null, resp.getQueueDelayMillis(), resp.getOverloaded(), resp.getThreadPool());
+                resp.getMessage(), resp.getQueuedAt(), resp.getQueueDelayMillis(), resp.getOverloaded(), resp.getThreadPool(),
+                resp.getCommandTag(), resp.getUpdateCount(), resp.getNotices(), resp.getWarnings());
     }
 
     private void recordTrace(String tag, String sql, SqlExecResult result) {
