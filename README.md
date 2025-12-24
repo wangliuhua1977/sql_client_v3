@@ -57,13 +57,18 @@
 ## 最近更新
 - 新增 Alt+E 联想开关、元数据状态提示与日志面板默认收拢，执行/停止按钮随焦点窗口切换。
 
+## 问题根因与修复说明
+- **失败链路**：元数据刷新在拉取表/视图/字段时直接调用 `/waf/api/jobs/result`，SQL 只做 `LIMIT 1000` 的 keyset 分页，未在客户端裁剪 pageSize 或使用 SQL 级 OFFSET 分页；当 schema 超过 1000 行时，后端窗口被截断并返回 `RESULT_NOT_READY` / HTTP 410 `RESULT_EXPIRED`，旧逻辑在 60s 超时时抛出异常，刷新失败且 staging 未写回。代码可见 `MetadataRefreshService#waitUntilReady` 的轮询与超时逻辑。
+- **直接原因**：客户端缺少与服务端 README 对齐的 1000 行硬上限裁剪与 SQL 级分页，也未对 `RESULT_NOT_READY/RESULT_EXPIRED` 做语义化分支，导致 `/jobs/result` 在未归档或过期时直接失败。
+- **修复方案**：新增 `tools.sqlclient.remote.RemoteSqlClient` 统一封装 submit/status/result/list/cancel，自动注入 Token + AES/CBC，加上 pageSize/limit≤1000 裁剪与 401/410 友好提示；`MetadataRefreshService#fetchPagedObjects` 与 `#fetchColumns` 改用 `ORDER BY + OFFSET/LIMIT` SQL 分页循环，`waitUntilReady` 区分 `RESULT_NOT_READY/RESULT_EXPIRED`，取消时调用 `/jobs/cancel` 并保持本地缓存不被覆盖。
+
 ## 元数据刷新（3 万条规模）
-- **窗口硬约束**：后端单次返回窗口恒定 1000 行（`maxVisibleRows=1000`），page 1-based，`pageSize` 默认 200 且最大 1000，所有元数据 SQL 均固定 `LIMIT 1000` 并使用 `page=1`、`removeAfterFetch=true` 拉取，禁止依赖 `hasNext` 绕过上限。
-- **分批策略**：优先使用 keyset 分页（`object_name > :lastName ORDER BY object_name LIMIT 1000`，初始 `lastName=''`），当字符集排序不稳定时自动按前缀桶（0-9/a-c/.../x-z/其它）分桶后再做 keyset，防止卡在 1000 窗口内。表/视图/函数/过程各自独立循环，`lastName` 只以后端返回值推进，防御性检测到不推进即切换桶或终止。
-- **状态机与容错**：仅轮询 `/jobs/result`，间隔 300~500ms，单批次最长等待 60s；`RESULT_NOT_READY` 或 RUNNING/QUEUED/ACCEPTED 继续等待，`archiveError` 立即失败；HTTP 410 + `RESULT_EXPIRED` 自动重提同一批（最多 1 次）；`overloaded=true` 或提交被拒绝采用指数退避（500ms 起，最高 8s，最多 3 次）后重试本批。
-- **并发与清理**：元数据抓取全程后台线程串行提交（默认并发 1，可配置到 2），严格遵循“提交 -> 等待完成 -> 取结果 -> 立即释放”顺序，所有请求均带 `X-Request-Token: WAF_STATIC_TOKEN_202405` 与 AES/CBC/PKCS5Padding+Base64 加密的 SQL。
-- **本地缓存与 UI 性能**：批次结果先写入 SQLite 分区表 `objects_staging/columns_staging`，完成后一次性事务替换正式表，避免半成品污染；列信息按单表查询（每表通常 <1000 行），不会做全库 join 拉列；刷新、列抓取与日志输出均在后台线程执行，UI 仅接收进度文本，不会一次性把 3 万行塞进 JTable，列表/树继续惰性读取本地缓存。
-- **开发者自测入口**：工具菜单新增 “Refresh Metadata (Large)” 入口，执行完整批次刷新并弹窗展示 `tablesCount/columnsCount/batches/duration`，便于验证 3 万规模无超时、不过载、不卡 UI。
+- **窗口硬约束**：后端单页最多 1000 行，客户端在调用 `/jobs/result` 时强制裁剪 `pageSize/limit` 到 1000，并在日志中提示被裁剪的请求参数，避免误解为可以绕过上限。
+- **SQL 级分页**：所有对象与字段都使用 `ORDER BY + OFFSET/LIMIT` 分页，LIMIT 恒定 1000（PG12.7 兼容），直到某页返回行数 < 1000 为止。实现集中在 `MetadataRefreshService#fetchPagedObjects/fetchColumns`，按 schema、对象名、字段顺序排序，保证页内稳定性。
+- **状态机与容错**：单批次最长等待 60s，遇到 `RESULT_NOT_READY` 继续轮询，HTTP 410/`RESULT_EXPIRED` 会自动重提一次，`overloaded=true` 采用 500ms 起步的指数退避（最高 8s，最多 3 次）。归档报错会立即失败并回滚 staging。
+- **取消与清理**：工具菜单新增“取消元数据刷新”，会设置本地取消标记并对正在运行的 job 调用 `/jobs/cancel`（reason=`Cancelled by UI`），取消后不覆盖本地缓存。
+- **本地缓存与 UI 性能**：批次结果先写入 SQLite 分区表 `objects_staging/columns_staging`，成功完成后一次性事务替换正式表；刷新、列抓取与日志输出均在后台线程执行，UI 仅接收进度文本，不会一次性把 3 万行塞进 JTable。
+- **开发者自测入口**：工具菜单的 “Refresh Metadata (Large)” 入口会执行完整刷新并弹窗展示 `tablesCount/columnsCount/batches/duration`，用于验证大规模情况下不会超时或卡死。
 
 ## 异步 SQL 执行前端适配说明
 ### 架构与数据流
@@ -72,8 +77,9 @@
 
 ### 核心类职责
 - `tools.sqlclient.exec.SqlExecutionService`：封装提交、轮询与结果获取；日志中输出 jobId、进度与耗时。
-- `tools.sqlclient.exec.AsyncSqlConfig`：默认的 BASE_URL、Token、AES Key/IV 配置与 URL 构造工具。
-- `tools.sqlclient.util.AesEncryptor`：负责将 SQL 明文加密成 Base64 AES 密文，供 `/jobs/submit` 使用。
+- `tools.sqlclient.remote.RemoteSqlClient`：统一封装 submit/status/result/list/cancel 的 HTTPS POST 调用，自动注入 Token/Header、AES/CBC/PKCS5Padding 加密，并处理 401/410/RESULT_NOT_READY 分支。
+- `tools.sqlclient.remote.RemoteSqlConfig`：默认的 BASE_URL、Token、AES Key/IV 配置与 URL 构造工具。
+- `tools.sqlclient.remote.AesCbc`：负责将 SQL 明文加密/解密成 Base64 AES 密文，供 `/jobs/submit` 使用，并配有回环单测。
 - `tools.sqlclient.exec.AsyncJobStatus`：表示后台任务的状态、进度与摘要。
 - `tools.sqlclient.ui.QueryResultPanel`：支持进度条、状态/耗时展示，并在任务完成后渲染结果集或错误信息。
 - `tools.sqlclient.ui.AsyncJobListDialog`：展示当前后台任务列表，提供刷新与取消入口。
@@ -85,7 +91,7 @@
 - 工具栏的“停止”按钮会向后端发送 `/jobs/cancel` 请求，状态栏提示“已发送取消请求”，最终状态由后续轮询决定。
 
 ### 配置覆盖
-- 默认 BASE_URL/Token/AES Key/IV 定义在 `AsyncSqlConfig` 中，可按环境需要改写；如已有外部配置中心，可在初始化时覆盖这些常量。
+- 默认 BASE_URL/Token/AES Key/IV 定义在 `RemoteSqlConfig` 中，可按环境需要改写；如已有外部配置中心，可在初始化时覆盖这些常量（也可通过 `-DASYNC_SQL_BASE_URL` 覆盖基础域名）。
 - 仍复用已有的 WAF 域名/证书忽略策略，HttpClient 创建逻辑保持不变。
 
 ### 调试与常见问题
@@ -98,16 +104,16 @@
 ### 元数据同步（本地优先 + 分批差分）
 - **本地优先**：对象树、模糊联想与列提示全部只读本地 SQLite，常规操作不触发任何远端调用。
 - **全量同步仅两处**：程序启动后异步拉取一次表/视图/函数/过程名单；工具栏“刷新元数据”会再次按相同逻辑执行，全程不触碰字段。
-- **Keyset 分批**：所有清单统一使用 `name > :lastName ORDER BY name LIMIT 1000`，批量 SQL 自带 `LIMIT 1000`，请求 `pageSize` 固定 1000，不依赖 `/jobs/result` 的 `hasNext`。
+- **SQL 分页**：所有清单统一使用 `ORDER BY name OFFSET :offset LIMIT 1000`，批量 SQL 自带 `LIMIT 1000`，按页递增直到返回不足 1000 行，不依赖 `/jobs/result` 的 `hasNext`。
 - **清单 SQL 模板**：
-  - 表：`SELECT table_name AS object_name FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE' AND table_name > :lastName ORDER BY table_name LIMIT 1000`。
-  - 视图：`SELECT table_name AS object_name FROM information_schema.views WHERE table_schema='leshan' AND table_name > :lastName ORDER BY table_name LIMIT 1000`。
-  - 函数：`SELECT p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='f' AND p.proname > :lastName ORDER BY p.proname LIMIT 1000`（缺少 `prokind` 时降级到 `proisagg=false`）。
-  - 过程：`SELECT p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='p' AND p.proname > :lastName ORDER BY p.proname LIMIT 1000`（`prokind` 不可用时返回空列表以避免大包）。
+  - 表：`SELECT table_schema AS schema_name, table_name AS object_name FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE' ORDER BY table_name OFFSET :offset LIMIT 1000`。
+  - 视图：`SELECT table_schema AS schema_name, table_name AS object_name FROM information_schema.views WHERE table_schema='leshan' ORDER BY table_name OFFSET :offset LIMIT 1000`。
+  - 函数：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND (p.prokind='f' OR p.proisagg=FALSE) ORDER BY p.proname OFFSET :offset LIMIT 1000`。
+  - 过程：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='p' ORDER BY p.proname OFFSET :offset LIMIT 1000`（`prokind` 不可用时返回空列表以避免大包）。
 - **差分写库**：全量同步只对新增/删除对象做 INSERT/DELETE，移除的表/视图会顺带清理对应列缓存，避免全表重建带来的抖动。
 
 ### 批次拉取与分页限制
-- 后端 `/jobs/result` 单页可见行数上限 1000，不再依赖 `hasNext`，每批 SQL 自行限制 1000 行并通过 `name > lastName` 循环。
+- 后端 `/jobs/result` 单页可见行数上限 1000，不再依赖 `hasNext`，每批 SQL 自行限制 1000 行并按 `OFFSET = page*1000` 循环，直到返回行数不足 1000。
 - 请求头、Token 与 HTTPS POST 仍复用异步执行链路，但默认只在启动/手动刷新/DDL 后的局部校验中触发。
 
 ### 字段按需与联想
@@ -137,7 +143,7 @@
 - 常见排查：确认两侧组件的 visible 状态、`lastDividerLocation` 记录以及分隔条位置，必要时重置预设即可恢复界面。
 
 ### 配置与排错
-- 相关配置集中在 `AsyncSqlConfig`，包含 BASE_URL、Token、AES Key/IV 等；证书忽略逻辑在 `TrustAllHttpClient`。
+- 相关配置集中在 `RemoteSqlConfig`，包含 BASE_URL、Token、AES Key/IV 等；证书忽略逻辑在 `TrustAllHttpClient`。
 - 元数据或查询列顺序异常时，可开启操作日志观察“执行元数据 SQL”与任务完成日志，确认返回的列名顺序；必要时清空本地 SQLite（工具-重置元数据）后重试。
 
 ### 常见排查（列顺序 / 空列头 / pageSize 裁剪）
@@ -148,13 +154,13 @@
 ## 日志与元数据修复补充说明
 
 ### HTTPS 全量日志输出
-- 网络层统一在 `SqlExecutionService#postJson` 中拦截，向右侧“操作日志”打印完整请求/响应：URL、方法、请求头、请求体 JSON、HTTP 状态码、响应头与响应体。
+- 网络层统一在 `RemoteSqlClient` 中拦截，向右侧“操作日志”打印完整请求/响应：URL、方法、请求头、请求体 JSON、HTTP 状态码、响应头与响应体。
 - 若响应体超过 200,000 字符，会写入 `%USERPROFILE%\\.Sql_client_v3\\logs\\http-YYYYMMDD.log` 并在日志面板提示文件路径，同时仅展示前 200,000 字符以防 UI 卡顿。
 - 元数据刷新、SQL submit/status/result/cancel/list 均复用此日志通道，便于排障。
 
 ### 元数据分页同步与差分策略
 - 固定 schema/dbUser 均为 `leshan`，对象树不再依赖用户选择的 dbUser，避免串台。
-- **Keyset 分批 1000 行**：对象清单按 `name > lastName ORDER BY name LIMIT 1000` 循环，避免 offset/hasNext 带来的截断问题。
+- **SQL 分页 1000 行**：对象清单按 `ORDER BY name OFFSET :offset LIMIT 1000` 循环，避免超过服务端硬上限时被截断；分页变量只由客户端控制。
 - **差分策略**：仅增量插入/删除对象记录，删除表/视图时同步清理列缓存；字段始终按需拉取，不再全库级扫描。
 - **字段顺序保证**：单表列请求固定按 `ordinal_position` 排序并落库为 `sort_no`，UI 直接按该顺序展示，缺失缓存时回退到后端顺序。
 - **可追溯调试**：每批请求的 SQL 与返回前 200 行会写入 `%USERPROFILE%\.Sql_client_v3\logs\metadata-*.log`，OperationLog 仅输出批次计数和耗时。
@@ -260,3 +266,65 @@
 - **pageSize 被裁剪**：日志出现 “pageSize=3000 超出上限，已裁剪到 1000” 时，实际请求体为 1000，符合后端硬上限。
 - **结果被截断**：响应 `truncated=true` 或 `note` 提示“maxVisibleRows=1000”时，客户端会在日志提示且无法再通过翻页取更多数据。
 - **TTL 过期**：`success=false` 且消息为空时，前端统一提示“结果已过期，请重新执行 SQL”，不会导致崩溃。
+
+## 前端开发技术文档（sql_client_v3）
+
+### 协议与配置
+- BASE_URL：默认 `https://leshan.paas.sc.ctc.com/waf/api`（`RemoteSqlConfig.BASE_URL`）。可通过 `-DASYNC_SQL_BASE_URL` 覆盖。
+- 必需 Header：`Content-Type=application/json;charset=UTF-8`、`X-Request-Token: WAF_STATIC_TOKEN_202405`。
+- AES：算法 `AES/CBC/PKCS5Padding`，Key=`LeshanAESKey1234`，IV=`LeshanAESIv12345`，UTF-8 编码，Base64 传输（`RemoteSqlConfig`/`AesCbc`，单测 `AesCbcTest` 覆盖加解密回环）。
+- 所有接口一律 POST，SSL 仍沿用信任所有证书的 HttpClient。
+
+### 接口字段速查
+- `/jobs/submit`：请求 `encryptedSql`（必填，AES+Base64 后的 SQL）、`maxResultRows?`、`dbUser?`（默认 `leshan`，白名单 `leshan`/`leshan_app`）、`label?`；响应包含 `jobId/status/progressPercent/queuedAt/queueDelayMillis/overloaded/message/threadPool`。
+- `/jobs/status`：请求 `jobId`；响应同上，用于轮询进度。
+- `/jobs/result`：请求 `jobId` + `removeAfterFetch?` + **分页**（二选一：`page/pageSize` 或 `offset/limit`，客户端会把 `pageSize/limit` 裁剪到 ≤1000 并在 `note`/日志提示）；响应 `success/status/code (RESULT_NOT_READY|RESULT_EXPIRED)/resultAvailable/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/threadPool/message`。
+- `/jobs/list`：请求体 `{}`，响应 `jobs:[<status 对象>]`。
+- `/jobs/cancel`：请求 `jobId`、`reason?`；响应同 status。
+
+### 元数据刷新实现（PG 12.7）
+- SQL 级分页：对象与字段均按 `ORDER BY schema/object/ordinal_position OFFSET :offset LIMIT 1000` 逐页提交，见 `MetadataRefreshService#fetchPagedObjects` 与 `#fetchColumns`。
+- 轮询与重试：`waitUntilReady` 使用 `/jobs/result` 轮询，`RESULT_NOT_READY` 继续等待，HTTP 410/`RESULT_EXPIRED` 重提一次；单批超时 60s；overload 采用 500ms 起步指数退避。
+- 取消：`MetadataService.cancelRefresh` 设置取消标记并调用 `/jobs/cancel`（reason=`Cancelled by UI`），取消后 staging 不会覆盖正式表。
+- 本地安全：结果先写入 `objects_staging/columns_staging`，成功后一次性 `swapFromStaging`；失败/取消保留旧缓存。
+
+### 常见错误与排障
+- 401：Token 错误或缺失，`RemoteSqlClient` 会抛出 “HTTP 401 未授权” 并在 OperationLog 打印请求/响应；请确认 `X-Request-Token`。
+- 410/`RESULT_EXPIRED`：结果已过期，UI 提示“结果已过期”，元数据刷新会跳过覆盖，可重新执行提交。
+- `RESULT_NOT_READY`：表示结果仍在落盘，客户端会继续轮询；日志会显示 attempt/page 信息。
+- AES 解密失败：检查 Key/IV 与 UTF-8，参考 `AesCbcTest` 或下方 PowerShell 脚本生成密文。
+- pageSize/limit >1000：客户端自动裁剪并在 `ResultResponse.note` 与日志中提示裁剪值。
+
+### PowerShell 最小验证清单（HTTPS POST）
+```powershell
+# 1) 准备 AES 密文（保持 UTF-8）
+$plainSql = "SELECT 1 as demo"
+$key = [Text.Encoding]::UTF8.GetBytes("LeshanAESKey1234")
+$iv = [Text.Encoding]::UTF8.GetBytes("LeshanAESIv12345")
+$aes = [System.Security.Cryptography.Aes]::Create()
+$aes.Mode = "CBC"; $aes.Padding = "PKCS7"; $aes.Key = $key; $aes.IV = $iv
+$encryptor = $aes.CreateEncryptor()
+$input = [Text.Encoding]::UTF8.GetBytes($plainSql)
+$cipherBytes = $encryptor.TransformFinalBlock($input,0,$input.Length)
+$encryptedSql = [Convert]::ToBase64String($cipherBytes)
+
+$baseUrl = "https://leshan.paas.sc.ctc.com/waf/api"
+$headers = @{ "X-Request-Token" = "WAF_STATIC_TOKEN_202405"; "Content-Type"="application/json;charset=UTF-8" }
+
+# 2) submit
+$submitBody = @{ encryptedSql = $encryptedSql; dbUser = "leshan"; label = "ps-test" } | ConvertTo-Json
+$submit = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/submit" -Headers $headers -Body $submitBody
+$jobId = $submit.jobId
+
+# 3) status
+$statusBody = @{ jobId = $jobId } | ConvertTo-Json
+$status = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/status" -Headers $headers -Body $statusBody
+
+# 4) result（pageSize 不要超过 1000）
+$resultBody = @{ jobId = $jobId; page = 1; pageSize = 200; removeAfterFetch = $true } | ConvertTo-Json
+$result = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/result" -Headers $headers -Body $resultBody
+
+# 5) cancel（需要时调用）
+$cancelBody = @{ jobId = $jobId; reason = "Cancelled by UI" } | ConvertTo-Json
+$cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $headers -Body $cancelBody
+```
