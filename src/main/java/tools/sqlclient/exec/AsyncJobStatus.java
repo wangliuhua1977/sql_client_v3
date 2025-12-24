@@ -9,8 +9,12 @@ public class AsyncJobStatus {
     private final String status;
     private final Integer progressPercent;
     private final Long elapsedMillis;
+    private final Long submittedAt;
+    private final Long startedAt;
+    private final Long finishedAt;
     private final String label;
     private final String sqlSummary;
+    private final String dbUser;
     private final Integer rowsAffected;
     private final Integer returnedRowCount;
     private final Boolean hasResultSet;
@@ -26,8 +30,12 @@ public class AsyncJobStatus {
                           String status,
                           Integer progressPercent,
                           Long elapsedMillis,
+                          Long submittedAt,
+                          Long startedAt,
+                          Long finishedAt,
                           String label,
                           String sqlSummary,
+                          String dbUser,
                           Integer rowsAffected,
                           Integer returnedRowCount,
                           Boolean hasResultSet,
@@ -42,8 +50,12 @@ public class AsyncJobStatus {
         this.status = status;
         this.progressPercent = progressPercent;
         this.elapsedMillis = elapsedMillis;
+        this.submittedAt = submittedAt;
+        this.startedAt = startedAt;
+        this.finishedAt = finishedAt;
         this.label = label;
         this.sqlSummary = sqlSummary;
+        this.dbUser = dbUser;
         this.rowsAffected = rowsAffected;
         this.returnedRowCount = returnedRowCount;
         this.hasResultSet = hasResultSet;
@@ -75,12 +87,28 @@ public class AsyncJobStatus {
         return elapsedMillis;
     }
 
+    public Long getSubmittedAt() {
+        return submittedAt;
+    }
+
+    public Long getStartedAt() {
+        return startedAt;
+    }
+
+    public Long getFinishedAt() {
+        return finishedAt;
+    }
+
     public String getLabel() {
         return label;
     }
 
     public String getSqlSummary() {
         return sqlSummary;
+    }
+
+    public String getDbUser() {
+        return dbUser;
     }
 
     public Integer getRowsAffected() {

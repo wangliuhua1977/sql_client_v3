@@ -9,11 +9,19 @@ public class ResultResponse {
     private Boolean success;
     private String status;
     private String code;
+    private Long submittedAt;
     private Boolean resultAvailable;
     private Boolean archived;
+    private String archiveStatus;
     private String archiveError;
+    private Long archivedAt;
     private Long expiresAt;
     private Long lastAccessAt;
+    private Long startedAt;
+    private Long finishedAt;
+    private String dbUser;
+    private String label;
+    private String sqlSummary;
     private Boolean overloaded;
     private ThreadPoolSnapshot threadPool;
     private Integer progressPercent;
@@ -21,6 +29,8 @@ public class ResultResponse {
     private Integer rowsAffected;
     private Long queuedAt;
     private Long queueDelayMillis;
+    private Integer offset;
+    private Integer limit;
     private Integer returnedRowCount;
     private Integer actualRowCount;
     private Integer maxVisibleRows;
@@ -59,6 +69,10 @@ public class ResultResponse {
         return code;
     }
 
+    public Long getSubmittedAt() {
+        return submittedAt;
+    }
+
     public Boolean getResultAvailable() {
         return resultAvailable;
     }
@@ -67,8 +81,16 @@ public class ResultResponse {
         return archived;
     }
 
+    public String getArchiveStatus() {
+        return archiveStatus;
+    }
+
     public String getArchiveError() {
         return archiveError;
+    }
+
+    public Long getArchivedAt() {
+        return archivedAt;
     }
 
     public Long getExpiresAt() {
@@ -77,6 +99,26 @@ public class ResultResponse {
 
     public Long getLastAccessAt() {
         return lastAccessAt;
+    }
+
+    public Long getStartedAt() {
+        return startedAt;
+    }
+
+    public Long getFinishedAt() {
+        return finishedAt;
+    }
+
+    public String getDbUser() {
+        return dbUser;
+    }
+
+    public String getLabel() {
+        return label;
+    }
+
+    public String getSqlSummary() {
+        return sqlSummary;
     }
 
     public Boolean getOverloaded() {
@@ -105,6 +147,14 @@ public class ResultResponse {
 
     public Long getQueueDelayMillis() {
         return queueDelayMillis;
+    }
+
+    public Integer getOffset() {
+        return offset;
+    }
+
+    public Integer getLimit() {
+        return limit;
     }
 
     public Integer getReturnedRowCount() {
@@ -207,6 +257,10 @@ public class ResultResponse {
         this.code = code;
     }
 
+    public void setSubmittedAt(Long submittedAt) {
+        this.submittedAt = submittedAt;
+    }
+
     public void setResultAvailable(Boolean resultAvailable) {
         this.resultAvailable = resultAvailable;
     }
@@ -215,8 +269,16 @@ public class ResultResponse {
         this.archived = archived;
     }
 
+    public void setArchiveStatus(String archiveStatus) {
+        this.archiveStatus = archiveStatus;
+    }
+
     public void setArchiveError(String archiveError) {
         this.archiveError = archiveError;
+    }
+
+    public void setArchivedAt(Long archivedAt) {
+        this.archivedAt = archivedAt;
     }
 
     public void setExpiresAt(Long expiresAt) {
@@ -225,6 +287,26 @@ public class ResultResponse {
 
     public void setLastAccessAt(Long lastAccessAt) {
         this.lastAccessAt = lastAccessAt;
+    }
+
+    public void setStartedAt(Long startedAt) {
+        this.startedAt = startedAt;
+    }
+
+    public void setFinishedAt(Long finishedAt) {
+        this.finishedAt = finishedAt;
+    }
+
+    public void setDbUser(String dbUser) {
+        this.dbUser = dbUser;
+    }
+
+    public void setLabel(String label) {
+        this.label = label;
+    }
+
+    public void setSqlSummary(String sqlSummary) {
+        this.sqlSummary = sqlSummary;
     }
 
     public void setOverloaded(Boolean overloaded) {
@@ -253,6 +335,14 @@ public class ResultResponse {
 
     public void setQueueDelayMillis(Long queueDelayMillis) {
         this.queueDelayMillis = queueDelayMillis;
+    }
+
+    public void setOffset(Integer offset) {
+        this.offset = offset;
+    }
+
+    public void setLimit(Integer limit) {
+        this.limit = limit;
     }
 
     public void setReturnedRowCount(Integer returnedRowCount) {
