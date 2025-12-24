@@ -11,15 +11,14 @@ class ColumnOrderDeciderTest {
 
     @Test
     void keepsOriginalOrderForCastExpression() {
-        SqlExecResult original = new SqlExecResult(
-                "select acct_id::varchar from wlh_acct_item_owe a limit 2",
-                List.of("acct_id::varchar"),
-                List.of(
+        SqlExecResult original = SqlExecResult.builder("select acct_id::varchar from wlh_acct_item_owe a limit 2")
+                .columns(List.of("acct_id::varchar"))
+                .rows(List.of(
                         List.of("1001"),
                         List.of("1002")
-                ),
-                2
-        );
+                ))
+                .rowCount(2)
+                .build();
 
         ColumnOrderDecider decider = new ColumnOrderDecider(null);
         SqlExecResult reordered = decider.reorder(original, null);
@@ -38,12 +37,11 @@ class ColumnOrderDeciderTest {
                 List.of("Y", "100", "100"),
                 List.of("N", "200", "200")
         );
-        SqlExecResult original = new SqlExecResult(
-                "select a.lx_flag, * from wlh_acct_item_owe a limit 2",
-                columns,
-                rows,
-                2
-        );
+        SqlExecResult original = SqlExecResult.builder("select a.lx_flag, * from wlh_acct_item_owe a limit 2")
+                .columns(columns)
+                .rows(rows)
+                .rowCount(2)
+                .build();
 
         ColumnOrderDecider decider = new ColumnOrderDecider(null);
         SqlExecResult reordered = decider.reorder(original, null);

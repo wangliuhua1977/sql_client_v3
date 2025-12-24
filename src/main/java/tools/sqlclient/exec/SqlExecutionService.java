@@ -252,12 +252,39 @@ public class SqlExecutionService {
         }
 
         context.cleanupResultIfNeeded(jobId, pageSize);
-        return new SqlExecResult(sql, firstPage.getColumns(), firstPage.getColumnDefs(), allRows, allRowMaps, allRows.size(), true, firstPage.getMessage(), jobId,
-                firstPage.getStatus(), firstPage.getProgressPercent(), firstPage.getElapsedMillis(), firstPage.getDurationMillis(),
-                firstPage.getRowsAffected(), firstPage.getReturnedRowCount(), firstPage.getActualRowCount(), firstPage.getMaxVisibleRows(),
-                firstPage.getMaxTotalRows(), firstPage.getHasResultSet(), pageIndex + context.resolvedBase(), pageSize, hasNext,
-                truncated, note, firstPage.getQueuedAt(), firstPage.getQueueDelayMillis(), firstPage.getOverloaded(), firstPage.getThreadPool(),
-                firstPage.getCommandTag(), firstPage.getUpdateCount(), firstPage.getNotices(), firstPage.getWarnings());
+        return SqlExecResult.builder(sql)
+                .columns(firstPage.getColumns())
+                .columnDefs(firstPage.getColumnDefs())
+                .rows(allRows)
+                .rowMaps(allRowMaps)
+                .rowCount(allRows.size())
+                .success(true)
+                .message(firstPage.getMessage())
+                .jobId(jobId)
+                .status(firstPage.getStatus())
+                .progressPercent(firstPage.getProgressPercent())
+                .elapsedMillis(firstPage.getElapsedMillis())
+                .durationMillis(firstPage.getDurationMillis())
+                .rowsAffected(firstPage.getRowsAffected())
+                .returnedRowCount(firstPage.getReturnedRowCount())
+                .actualRowCount(firstPage.getActualRowCount())
+                .maxVisibleRows(firstPage.getMaxVisibleRows())
+                .maxTotalRows(firstPage.getMaxTotalRows())
+                .hasResultSet(firstPage.getHasResultSet())
+                .page(pageIndex + context.resolvedBase())
+                .pageSize(pageSize)
+                .hasNext(hasNext)
+                .truncated(truncated)
+                .note(note)
+                .queuedAt(firstPage.getQueuedAt())
+                .queueDelayMillis(firstPage.getQueueDelayMillis())
+                .overloaded(firstPage.getOverloaded())
+                .threadPool(firstPage.getThreadPool())
+                .commandTag(firstPage.getCommandTag())
+                .updateCount(firstPage.getUpdateCount())
+                .notices(firstPage.getNotices())
+                .warnings(firstPage.getWarnings())
+                .build();
     }
 
     private SqlExecResult requestResultPageWithRetry(String jobId,
@@ -396,17 +423,47 @@ public class SqlExecutionService {
             logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
                     hasNext, truncated, note, columns, resp.getRawRows(), rows, queuedAt, queueDelayMillis, overloaded, threadPool);
 
+            SqlExecResult.Builder builder = SqlExecResult.builder(sql)
+                    .columns(columns)
+                    .rows(rows)
+                    .rowMaps(rowMaps)
+                    .rowCount(rowCount)
+                    .success(true)
+                    .message(message)
+                    .jobId(jobId)
+                    .status(status)
+                    .progressPercent(progress)
+                    .durationMillis(duration)
+                    .rowsAffected(affectedRows)
+                    .returnedRowCount(returnedRowCount)
+                    .actualRowCount(actualRowCount)
+                    .maxVisibleRows(maxVisibleRows)
+                    .maxTotalRows(maxTotalRows)
+                    .page(respPage)
+                    .pageSize(respPageSize)
+                    .hasNext(hasNext)
+                    .truncated(truncated)
+                    .note(note)
+                    .queuedAt(queuedAt)
+                    .queueDelayMillis(queueDelayMillis)
+                    .overloaded(overloaded)
+                    .threadPool(threadPool)
+                    .commandTag(commandTag)
+                    .updateCount(updateCount)
+                    .notices(notices)
+                    .warnings(warnings);
+
             if (!finalHasResultSet) {
-                return new SqlExecResult(sql, List.of(), null, List.of(), List.of(), 0, true, message, jobId, status, progress,
-                        null, duration, affectedRows, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, false,
-                        respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool,
-                        commandTag, updateCount, notices, warnings);
+                return builder
+                        .columns(List.of())
+                        .rows(List.of())
+                        .rowMaps(List.of())
+                        .rowCount(0)
+                        .hasResultSet(false)
+                        .build();
             }
 
-            return new SqlExecResult(sql, columns, null, rows, rowMaps, rowCount, true, message, jobId, status, progress,
-                    null, duration, affectedRows, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows, finalHasResultSet,
-                    respPage, respPageSize, hasNext, truncated, note, queuedAt, queueDelayMillis, overloaded, threadPool,
-                    commandTag, updateCount, notices, warnings);
+            return builder.hasResultSet(finalHasResultSet).build();
         } catch (Exception e) {
             OperationLog.log("[" + jobId + "] 解析 /jobs/result 失败: " + e.getMessage());
             throw new RuntimeException("解析结果失败: " + e.getMessage(), e);
