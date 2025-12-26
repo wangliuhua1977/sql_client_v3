@@ -18,6 +18,8 @@ import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.pg.PgRoutineService;
+import tools.sqlclient.pg.RoutineInfo;
 import tools.sqlclient.ui.ThemeManager;
 import tools.sqlclient.ui.ThemeOption;
 import tools.sqlclient.ui.QueryResultPanel;
@@ -60,6 +62,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 主窗口，符合 Windows 11 扁平化风格，全部中文。
@@ -89,6 +93,7 @@ public class MainFrame extends JFrame {
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private final Map<Long, java.util.List<RunningJobHandle>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
+    private final PgRoutineService pgRoutineService = new PgRoutineService(sqlExecutionService);
     private final ColumnOrderDecider columnOrderDecider;
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
     // 笔记图标持久化：noteId -> 图标规格
@@ -133,6 +138,8 @@ public class MainFrame extends JFrame {
     private boolean debugMode = false;
     private static final String DEBUG_SECRET = "yy181911a";
     private static final String RESTORE_SECRET = "我决定今天请小胖哥吃饭喝咖啡";
+    private static final Pattern LINE_PATTERN = Pattern.compile("LINE\\s+(\\d+)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern POSITION_PATTERN = Pattern.compile("Position:\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
     // 记住上一次备份/恢复使用的目录
     private static final String BACKUP_DIR_STATE_KEY = "last_backup_dir";
     private final ScheduledExecutorService scheduledBackupExecutor = Executors.newSingleThreadScheduledExecutor();
@@ -1186,7 +1193,18 @@ public class MainFrame extends JFrame {
         manage.addActionListener(e -> openManageDialog());
         JButton browse = new JButton("浏览器");
         browse.addActionListener(e -> {
-            ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
+            ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
+                    new ObjectBrowserDialog.RoutineActionHandler() {
+                        @Override
+                        public void openRoutine(RoutineInfo info, boolean editable) {
+                            openRoutineEditor(info, editable);
+                        }
+
+                        @Override
+                        public void runRoutine(RoutineInfo info) {
+                            runRoutineWithDialog(info);
+                        }
+                    });
             dialog.setVisible(true);
         });
         JPanel headerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
@@ -2300,7 +2318,18 @@ public class MainFrame extends JFrame {
 
     private void showObjectBrowser() {
         if (objectBrowserDialog == null) {
-            objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
+            objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
+                    new ObjectBrowserDialog.RoutineActionHandler() {
+                        @Override
+                        public void openRoutine(RoutineInfo info, boolean editable) {
+                            openRoutineEditor(info, editable);
+                        }
+
+                        @Override
+                        public void runRoutine(RoutineInfo info) {
+                            runRoutineWithDialog(info);
+                        }
+                    });
         }
         objectBrowserDialog.setVisible(true);
         objectBrowserDialog.reload();
@@ -2309,6 +2338,179 @@ public class MainFrame extends JFrame {
     private void refreshObjectBrowserTree() {
         if (objectBrowserDialog != null && objectBrowserDialog.isVisible()) {
             SwingUtilities.invokeLater(() -> objectBrowserDialog.reload());
+        }
+    }
+
+    private void openRoutineEditor(RoutineInfo info, boolean editable) {
+        showRoutineDdlAndOpen(info, editable, null);
+    }
+
+    private void runRoutineWithDialog(RoutineInfo info) {
+        showRoutineDdlAndOpen(info, false, panel -> {
+            RoutineRunDialog dialog = new RoutineRunDialog(this, info);
+            dialog.setVisible(true);
+            RoutineRunDialog.Result result = dialog.getResult();
+            if (result == null || !result.confirmed() || result.sql() == null || result.sql().isBlank()) {
+                return;
+            }
+            executeRoutineSql(panel, result.sql(), info, null, msg -> locateErrorInEditor(panel, msg));
+        });
+    }
+
+    private void showRoutineDdlAndOpen(RoutineInfo info, boolean editable, java.util.function.Consumer<EditorTabPanel> afterOpen) {
+        if (info == null) {
+            return;
+        }
+        JDialog progress = showProgressDialog("正在获取源码...");
+        pgRoutineService.loadRoutineDdl(info.oid()).whenComplete((ddl, ex) -> SwingUtilities.invokeLater(() -> {
+            if (progress != null) {
+                progress.dispose();
+            }
+            if (ex != null) {
+                JOptionPane.showMessageDialog(this, "获取源码失败: " + ex.getMessage());
+                return;
+            }
+            String title = buildRoutineTitle(info);
+            Note note = noteRepository.findOrCreateByTitle(title);
+            try {
+                noteRepository.updateContent(note, ddl);
+            } catch (Exception ignored) {
+            }
+            EditorTabPanel panel = getOrCreatePanel(note);
+            panel.setTextContent(ddl);
+            panel.configureRoutineContext("例程: " + info.displayName(), editable, () -> publishRoutine(panel, info));
+            panel.setReadOnly(!editable);
+            openNoteInCurrentMode(note);
+            if (afterOpen != null) {
+                afterOpen.accept(panel);
+            }
+            statusLabel.setText("已载入: " + info.displayName());
+        }));
+    }
+
+    private String buildRoutineTitle(RoutineInfo info) {
+        String args = info.identityArgs() == null ? "" : info.identityArgs();
+        return info.schemaName() + "." + info.objectName() + "(" + args + ")";
+    }
+
+    private JDialog showProgressDialog(String message) {
+        JDialog dialog = new JDialog(this, "执行中", false);
+        dialog.setLayout(new BorderLayout());
+        dialog.add(new JLabel(message), BorderLayout.NORTH);
+        JProgressBar bar = new JProgressBar();
+        bar.setIndeterminate(true);
+        dialog.add(bar, BorderLayout.CENTER);
+        dialog.setSize(320, 100);
+        dialog.setLocationRelativeTo(this);
+        dialog.setAlwaysOnTop(true);
+        dialog.setVisible(true);
+        return dialog;
+    }
+
+    private void publishRoutine(EditorTabPanel panel, RoutineInfo info) {
+        if (panel == null || info == null) {
+            return;
+        }
+        String ddl = panel.getSqlText();
+        if (ddl == null || ddl.isBlank()) {
+            JOptionPane.showMessageDialog(this, "没有可发布的源码");
+            return;
+        }
+        executeRoutineSql(panel, ddl, info, this::refreshObjectBrowserTree, msg -> locateErrorInEditor(panel, msg));
+    }
+
+    private void executeRoutineSql(EditorTabPanel panel, String sql, RoutineInfo info,
+                                   Runnable onSuccess, java.util.function.Consumer<String> onError) {
+        if (panel == null || sql == null || sql.isBlank()) {
+            JOptionPane.showMessageDialog(this, "SQL 为空，无法执行");
+            return;
+        }
+        long noteId = panel.getNote().getId();
+        if (runningExecutions.getOrDefault(noteId, List.of()).size() > 0) {
+            JOptionPane.showMessageDialog(this, "当前窗口正在执行，请先停止或等待结束");
+            return;
+        }
+
+        if (windowMode) {
+            panel.clearLocalResults();
+        } else {
+            SharedResultView target = ensureSharedView();
+            target.clear();
+            collapseSharedResults();
+        }
+        resultTabCounters.put(noteId, new java.util.concurrent.atomic.AtomicInteger(1));
+        statusLabel.setText("执行中...");
+        panel.setExecutionRunning(true);
+        runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
+        List<RunningJobHandle> execList = runningExecutions.get(noteId);
+
+        QueryResultPanel pendingPanel = addPendingResultPanel(noteId, panel, sql);
+        RunningJobHandle handle = new RunningJobHandle();
+        handle.panel = pendingPanel;
+        handle.sql = sql;
+
+        CompletableFuture<Void> future = sqlExecutionService.execute(
+                sql,
+                panel.getSelectedDbUser(),
+                panel.getPreferredPageSize(),
+                res -> {
+                    SqlExecResult normalized = columnOrderDecider.reorder(res,
+                            refreshed -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, refreshed, pendingPanel)));
+                    SwingUtilities.invokeLater(() -> {
+                        renderResult(noteId, panel, normalized, pendingPanel);
+                        if (onSuccess != null) {
+                            onSuccess.run();
+                        }
+                    });
+                },
+                ex -> SwingUtilities.invokeLater(() -> {
+                    renderError(noteId, panel, sql, ex.getMessage(), pendingPanel);
+                    if (onError != null) {
+                        onError.accept(ex.getMessage());
+                    }
+                }),
+                status -> SwingUtilities.invokeLater(() -> handleStatusUpdate(handle, status, panel))
+        );
+
+        handle.future = future;
+        execList.add(handle);
+
+        future.whenComplete((vv, ex) -> SwingUtilities.invokeLater(() -> {
+            List<RunningJobHandle> list = runningExecutions.get(noteId);
+            if (list != null) {
+                list.remove(handle);
+                if (list.isEmpty()) {
+                    runningExecutions.remove(noteId);
+                    panel.setExecutionRunning(false);
+                    statusLabel.setText("就绪");
+                }
+            }
+            updateExecutionButtons();
+        }));
+
+        updateExecutionButtons();
+    }
+
+    private void locateErrorInEditor(EditorTabPanel panel, String message) {
+        if (panel == null || message == null || message.isBlank()) {
+            return;
+        }
+        Matcher lineMatcher = LINE_PATTERN.matcher(message);
+        if (lineMatcher.find()) {
+            try {
+                int line = Integer.parseInt(lineMatcher.group(1));
+                panel.highlightLine(line);
+                return;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher posMatcher = POSITION_PATTERN.matcher(message);
+        if (posMatcher.find()) {
+            try {
+                int pos = Integer.parseInt(posMatcher.group(1));
+                panel.highlightPosition(pos);
+            } catch (NumberFormatException ignored) {
+            }
         }
     }
 

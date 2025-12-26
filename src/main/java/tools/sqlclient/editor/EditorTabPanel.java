@@ -62,6 +62,9 @@ public class EditorTabPanel extends JPanel {
     private boolean editorMaximized;
     private javax.swing.Timer execTimer;
     private Runnable executeHandler;
+    private JButton routinePublishButton;
+    private JLabel routineLabel;
+    private Runnable routinePublishHandler;
     private EditorStyle currentStyle;
     private EditorStyle defaultStyle;
     private int runtimeFontSize;
@@ -435,6 +438,19 @@ public class EditorTabPanel extends JPanel {
         toolBar.add(new JLabel("pageSize:"));
         toolBar.add(pageSizeSelector);
 
+        routineLabel = new JLabel();
+        routineLabel.setVisible(false);
+        routinePublishButton = new JButton("保存/发布");
+        routinePublishButton.setVisible(false);
+        routinePublishButton.addActionListener(e -> {
+            if (routinePublishHandler != null) {
+                routinePublishHandler.run();
+            }
+        });
+        toolBar.addSeparator();
+        toolBar.add(routineLabel);
+        toolBar.add(routinePublishButton);
+
         installLayoutShortcuts(toolBar);
         return toolBar;
     }
@@ -761,6 +777,91 @@ public class EditorTabPanel extends JPanel {
         textArea.requestFocusInWindow();
         textArea.replaceRange(sql, start, end);
         textArea.setCaretPosition(start + sql.length());
+    }
+
+    public void setTextContent(String text) {
+        SwingUtilities.invokeLater(() -> {
+            textArea.setText(text == null ? "" : text);
+            textArea.setCaretPosition(0);
+        });
+    }
+
+    public String getSqlText() {
+        return textArea.getText();
+    }
+
+    public void setReadOnly(boolean readOnly) {
+        SwingUtilities.invokeLater(() -> {
+            textArea.setEditable(!readOnly);
+            if (routinePublishButton != null) {
+                routinePublishButton.setEnabled(!readOnly && routinePublishButton.isVisible());
+            }
+        });
+    }
+
+    public void configureRoutineContext(String label, boolean editable, Runnable publishHandler) {
+        SwingUtilities.invokeLater(() -> {
+            routinePublishHandler = publishHandler;
+            if (routineLabel != null) {
+                routineLabel.setText(label == null ? "" : label);
+                routineLabel.setVisible(true);
+            }
+            if (routinePublishButton != null) {
+                routinePublishButton.setVisible(true);
+                routinePublishButton.setEnabled(editable);
+            }
+            textArea.setEditable(editable);
+        });
+    }
+
+    public void clearRoutineContext() {
+        SwingUtilities.invokeLater(() -> {
+            routinePublishHandler = null;
+            if (routineLabel != null) {
+                routineLabel.setVisible(false);
+                routineLabel.setText("");
+            }
+            if (routinePublishButton != null) {
+                routinePublishButton.setVisible(false);
+            }
+            textArea.setEditable(true);
+        });
+    }
+
+    public void highlightLine(int lineNumber) {
+        if (lineNumber <= 0) return;
+        SwingUtilities.invokeLater(() -> {
+            try {
+                int target = textArea.getLineStartOffset(Math.max(0, lineNumber - 1));
+                int end = textArea.getLineEndOffset(Math.max(0, lineNumber - 1));
+                textArea.requestFocusInWindow();
+                textArea.setCaretPosition(target);
+                textArea.select(target, end);
+                Rectangle2D view = textArea.modelToView2D(target);
+                if (view != null) {
+                    textArea.scrollRectToVisible(view.getBounds());
+                }
+            } catch (BadLocationException ignored) {
+            }
+        });
+    }
+
+    public void highlightPosition(int position) {
+        if (position <= 0) return;
+        SwingUtilities.invokeLater(() -> {
+            int target = Math.max(0, Math.min(position - 1, textArea.getDocument().getLength()));
+            textArea.requestFocusInWindow();
+            textArea.setCaretPosition(target);
+            int end = Math.min(textArea.getDocument().getLength(), target + 1);
+            textArea.select(target, end);
+            try {
+                Rectangle2D view = textArea.modelToView2D(target);
+                if (view != null) {
+                    textArea.scrollRectToVisible(view.getBounds());
+                }
+            } catch (BadLocationException ignored) {
+            }
+        });
     }
 
     private String extractStatementAtCaret() {
