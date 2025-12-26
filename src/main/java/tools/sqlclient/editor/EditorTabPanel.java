@@ -68,6 +68,8 @@ public class EditorTabPanel extends JPanel {
     private List<EditorStyle> styleOptions = new ArrayList<>();
     private Consumer<EditorStyle> styleSelectionHandler;
     private Runnable resetStyleHandler;
+    private JScrollBar editorVerticalScrollBar;
+    private boolean scrollBarWheelHooked;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
@@ -159,6 +161,23 @@ public class EditorTabPanel extends JPanel {
         textArea.addFocusListener(adapter);
         resultArea.addFocusListener(adapter);
         this.addFocusListener(adapter);
+    }
+
+    private void installScrollBarWheelSupport() {
+        if (scrollBarWheelHooked || editorVerticalScrollBar == null) {
+            return;
+        }
+        editorVerticalScrollBar.addMouseWheelListener(e -> {
+            int units = e.getUnitsToScroll();
+            int increment = editorVerticalScrollBar.getUnitIncrement(units);
+            int delta = units * increment;
+            int min = editorVerticalScrollBar.getMinimum();
+            int max = editorVerticalScrollBar.getMaximum() - editorVerticalScrollBar.getVisibleAmount();
+            int target = Math.max(min, Math.min(editorVerticalScrollBar.getValue() + delta, max));
+            editorVerticalScrollBar.setValue(target);
+            e.consume();
+        });
+        scrollBarWheelHooked = true;
     }
 
     private void installSmartParseMenu() {
@@ -354,6 +373,8 @@ public class EditorTabPanel extends JPanel {
     private void initLayout() {
         RTextScrollPane scrollPane = new RTextScrollPane(textArea);
         scrollPane.setFoldIndicatorEnabled(true);
+        editorVerticalScrollBar = scrollPane.getVerticalScrollBar();
+        installScrollBarWheelSupport();
         editorPanel = new JPanel(new BorderLayout());
         editorPanel.add(scrollPane, BorderLayout.CENTER);
 

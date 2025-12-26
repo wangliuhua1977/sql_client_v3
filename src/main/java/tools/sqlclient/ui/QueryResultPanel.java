@@ -5,11 +5,17 @@ import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlTopLevelClassifier;
 
+import tools.sqlclient.ui.table.TableCopySupport;
+
 import javax.swing.*;
 import javax.swing.border.TitledBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.util.Arrays;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.List;
@@ -81,6 +87,7 @@ public class QueryResultPanel extends JPanel {
         table.setRowHeight(24);
         table.setFillsViewportHeight(true);
         table.setBorder(BorderFactory.createLineBorder(new Color(180, 186, 198)));
+        installCopySupport();
 
         Color headerBg = new Color(240, 244, 250);
         table.getTableHeader().setBackground(headerBg);
@@ -129,6 +136,7 @@ public class QueryResultPanel extends JPanel {
         if (status.getMessage() != null) {
             messageLabel.setText(status.getMessage());
         }
+        setBusy(!isTerminalStatus(status.getStatus()));
     }
 
     public void render(SqlExecResult result) {
@@ -159,6 +167,7 @@ public class QueryResultPanel extends JPanel {
             renderInfo(result);
             switchCard(CARD_INFO);
         }
+        setBusy(!isTerminalStatus(result.getStatus()));
     }
 
     public void fitColumns() {
@@ -189,6 +198,7 @@ public class QueryResultPanel extends JPanel {
         table.revalidate();
         table.repaint();
         resizeColumns();
+        setBusy(false);
     }
 
     private void applyStripedRenderer() {
@@ -304,5 +314,134 @@ public class QueryResultPanel extends JPanel {
             seq++;
         }
         return defs;
+    }
+
+    public void setBusy(boolean busy) {
+        SwingUtilities.invokeLater(() -> {
+            progressBar.setVisible(busy);
+            progressBar.setIndeterminate(busy);
+            if (!busy) {
+                progressBar.setValue(0);
+                progressBar.setString("-");
+            }
+        });
+    }
+
+    private boolean isTerminalStatus(String status) {
+        if (status == null) {
+            return true;
+        }
+        return switch (status.toUpperCase()) {
+            case "SUCCEEDED", "FAILED", "CANCELLED", "FINISHED", "COMPLETED", "ERROR" -> true;
+            default -> false;
+        };
+    }
+
+    private void installCopySupport() {
+        table.setCellSelectionEnabled(true);
+        table.setRowSelectionAllowed(true);
+        table.setColumnSelectionAllowed(true);
+        table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        table.getColumnModel().getSelectionModel().setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+
+        InputMap inputMap = table.getInputMap(JComponent.WHEN_FOCUSED);
+        ActionMap actionMap = table.getActionMap();
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_C, InputEvent.CTRL_DOWN_MASK), "copy-cells");
+        actionMap.put("copy-cells", new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                copySelectedCells();
+            }
+        });
+
+        JPopupMenu popupMenu = new JPopupMenu();
+        JMenuItem copyCellsItem = new JMenuItem("复制选中单元格");
+        JMenuItem copyColumnsItem = new JMenuItem("复制选中列内容");
+        JMenuItem copyColumnNamesItem = new JMenuItem("复制选中列名（逗号分隔）");
+
+        copyCellsItem.addActionListener(e -> copySelectedCells());
+        copyColumnsItem.addActionListener(e -> copySelectedColumns());
+        copyColumnNamesItem.addActionListener(e -> copySelectedColumnNames());
+
+        popupMenu.add(copyCellsItem);
+        popupMenu.add(copyColumnsItem);
+        popupMenu.add(copyColumnNamesItem);
+
+        table.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                maybeShowMenu(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                maybeShowMenu(e);
+            }
+
+            private void maybeShowMenu(MouseEvent e) {
+                if (e.isPopupTrigger()) {
+                    ensureLeadSelection(e);
+                    boolean hasData = table.getRowCount() > 0 && table.getColumnCount() > 0;
+                    boolean hasCellSelection = hasData && table.getSelectedRowCount() > 0 && table.getSelectedColumnCount() > 0;
+                    boolean hasColumns = hasData && !resolveTargetColumns().isEmpty();
+                    copyCellsItem.setEnabled(hasCellSelection);
+                    copyColumnsItem.setEnabled(hasColumns);
+                    copyColumnNamesItem.setEnabled(hasColumns);
+                    popupMenu.show(table, e.getX(), e.getY());
+                }
+            }
+
+            private void ensureLeadSelection(MouseEvent e) {
+                int row = table.rowAtPoint(e.getPoint());
+                int col = table.columnAtPoint(e.getPoint());
+                if (row >= 0 && col >= 0 && !table.isCellSelected(row, col)) {
+                    table.changeSelection(row, col, false, false);
+                }
+            }
+        });
+
+        table.setComponentPopupMenu(popupMenu);
+    }
+
+    private void copySelectedCells() {
+        String text = TableCopySupport.buildCellSelectionTsv(table);
+        if (!text.isEmpty()) {
+            TableCopySupport.copyToClipboard(text);
+        }
+    }
+
+    private void copySelectedColumns() {
+        java.util.List<Integer> cols = resolveTargetColumns();
+        if (cols.isEmpty()) {
+            return;
+        }
+        String text = TableCopySupport.buildSelectedColumnValuesTsv(table, cols);
+        TableCopySupport.copyToClipboard(text);
+    }
+
+    private void copySelectedColumnNames() {
+        java.util.List<Integer> cols = resolveTargetColumns();
+        if (cols.isEmpty()) {
+            return;
+        }
+        String text = TableCopySupport.buildSelectedColumnNamesCsv(table, cols);
+        if (!text.isEmpty()) {
+            TableCopySupport.copyToClipboard(text);
+        }
+    }
+
+    private java.util.List<Integer> resolveTargetColumns() {
+        int[] selected = table.getSelectedColumns();
+        if (selected != null && selected.length > 0) {
+            return Arrays.stream(selected).sorted().boxed().toList();
+        }
+        int lead = table.getSelectedColumn();
+        if (lead < 0) {
+            lead = table.getColumnModel().getSelectionModel().getLeadSelectionIndex();
+        }
+        if (lead >= 0) {
+            return java.util.List.of(lead);
+        }
+        return java.util.List.of();
     }
 }
