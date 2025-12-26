@@ -50,6 +50,7 @@ public class SQLiteManager {
                     "schema_name TEXT, object_name TEXT, column_name TEXT, sort_no INTEGER, " +
                     "use_count INTEGER DEFAULT 0, last_used_at INTEGER, " +
                     "PRIMARY KEY(schema_name, object_name, column_name))");
+            st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_columns_schema_object ON columns(schema_name, object_name)");
             st.executeUpdate("CREATE TABLE IF NOT EXISTS columns_snapshot (" +
                     "object_name TEXT PRIMARY KEY, " +
                     "cols_hash TEXT NOT NULL, " +
