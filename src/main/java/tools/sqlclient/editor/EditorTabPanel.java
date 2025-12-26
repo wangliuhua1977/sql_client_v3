@@ -8,6 +8,7 @@ import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.ui.scroll.EditorWheelScrollSupport;
 import tools.sqlclient.ui.swing.ScrollBarWheelSupport;
 import tools.sqlclient.util.AutoSaveService;
 import tools.sqlclient.util.Config;
@@ -356,6 +357,7 @@ public class EditorTabPanel extends JPanel {
         RTextScrollPane scrollPane = new RTextScrollPane(textArea);
         scrollPane.setFoldIndicatorEnabled(true);
         ScrollBarWheelSupport.enableWheelOnVerticalScrollBar(scrollPane);
+        EditorWheelScrollSupport.install(textArea, scrollPane);
         editorPanel = new JPanel(new BorderLayout());
         editorPanel.add(scrollPane, BorderLayout.CENTER);
 
