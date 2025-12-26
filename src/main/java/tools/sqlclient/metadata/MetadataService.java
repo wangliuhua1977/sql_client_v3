@@ -38,6 +38,7 @@ public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
     private static final String METADATA_DB_USER = "leshan";
+    private static final int OBJECT_PAGE_SIZE = 900;
     private static final int METADATA_BATCH_SIZE = 1000;
     private static final int TRACE_ROW_LIMIT = 200;
     private static final Pattern DDL_PATTERN = Pattern.compile(
@@ -49,6 +50,27 @@ public class MetadataService {
     private final MetadataRefreshService refreshService;
     private final Object dbWriteLock = new Object();
     private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
+
+    record RemoteSignature(long count, String signature) {
+    }
+
+    record RemoteObject(String schemaName, String objectName) {
+        String key() {
+            return (schemaName == null ? DEFAULT_SCHEMA : schemaName) + "." + objectName;
+        }
+    }
+
+    record MetadataSnapshot(String objectType, long remoteCount, String remoteSignature, String checkedAt) {
+    }
+
+    record ObjectSyncStats(String objectType, int totalObjects, int inserted, int deleted, int batches, boolean skipped) {
+    }
+
+    record DiffResult(int inserted, int deleted, int totalRemote) {
+    }
+
+    record FetchResult(Set<RemoteObject> objects, int batches) {
+    }
 
     public record MetadataRefreshResult(boolean success,
                                         int totalObjects,
@@ -105,7 +127,7 @@ public class MetadataService {
     }
 
     public void refreshMetadataAsync(Runnable done) {
-        refreshMetadataAsync(result -> {
+        refreshMetadataAsync(false, result -> {
             if (done != null) {
                 done.run();
             }
@@ -113,8 +135,12 @@ public class MetadataService {
     }
 
     public void refreshMetadataAsync(java.util.function.Consumer<MetadataRefreshResult> done) {
+        refreshMetadataAsync(false, done);
+    }
+
+    public void refreshMetadataAsync(boolean forceFullFetch, java.util.function.Consumer<MetadataRefreshResult> done) {
         CompletableFuture
-                .supplyAsync(this::refreshMetadata, metadataPool)
+                .supplyAsync(() -> refreshMetadata(forceFullFetch), metadataPool)
                 .handle((result, ex) -> {
                     if (ex != null) {
                         log.error("刷新元数据失败", ex);
@@ -140,9 +166,27 @@ public class MetadataService {
         });
     }
 
+    public void syncMetadataOnStartup(java.util.function.Consumer<MetadataRefreshResult> done) {
+        CompletableFuture
+                .supplyAsync(() -> refreshMetadata(false), metadataPool)
+                .handle((result, ex) -> {
+                    if (ex != null) {
+                        log.error("启动同步元数据失败", ex);
+                        return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, 0L, ex.getMessage());
+                    }
+                    return result;
+                })
+                .whenComplete((result, ex) -> {
+                    if (done != null) {
+                        SwingUtilities.invokeLater(() -> done.accept(result));
+                    }
+                });
+    }
+
     public void resetMetadataAsync(java.util.function.Consumer<MetadataRefreshResult> done) {
         CompletableFuture.supplyAsync(() -> {
-            return refreshMetadata();
+            clearLocalMetadata();
+            return refreshMetadata(true);
         }, metadataPool).handle((result, ex) -> {
             if (ex != null) {
                 log.error("重置元数据失败", ex);
@@ -161,19 +205,319 @@ public class MetadataService {
         OperationLog.log("用户请求取消元数据刷新");
     }
 
-    private MetadataRefreshResult refreshMetadata() {
+    private MetadataRefreshResult refreshMetadata(boolean forceFullFetch) {
         long startedAt = System.currentTimeMillis();
         int beforeObjects = countCachedObjects();
         try {
-            MetadataRefreshService.RefreshStats stats = refreshService.refreshAll(DEFAULT_SCHEMA, METADATA_DB_USER, this::handleRefreshProgress);
-            int totalObjects = stats.totalObjects();
-            int changed = Math.max(0, totalObjects - beforeObjects);
-            return new MetadataRefreshResult(true, totalObjects, changed, stats.totalColumns(), stats.batches(), stats.durationMillis(), stats.message());
+            List<ObjectSyncStats> stats = syncAllObjectTypes(forceFullFetch);
+            int totalObjects = countCachedObjects();
+            int changed = stats.stream().mapToInt(s -> s.inserted() + s.deleted()).sum();
+            int batches = stats.stream().mapToInt(ObjectSyncStats::batches).sum();
+            long duration = System.currentTimeMillis() - startedAt;
+            String message = stats.stream()
+                    .map(s -> s.objectType() + (s.skipped() ? "(skip)" : "") + " +" + s.inserted() + " -" + s.deleted())
+                    .collect(Collectors.joining(", "));
+            OperationLog.log(String.format("元数据同步完成 对象=%d 变动=%d 批次=%d 用时=%dms", totalObjects, changed, batches, duration));
+            return new MetadataRefreshResult(true, totalObjects, Math.max(0, totalObjects - beforeObjects), 0, batches, duration, message);
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
             long cost = System.currentTimeMillis() - startedAt;
             return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, cost, e.getMessage());
+        }
+    }
+
+    private List<ObjectSyncStats> syncAllObjectTypes(boolean forceFullFetch) throws Exception {
+        List<ObjectSyncStats> stats = new ArrayList<>();
+        stats.add(syncObjectType("table", forceFullFetch));
+        stats.add(syncObjectType("view", forceFullFetch));
+        stats.add(syncObjectType("function", forceFullFetch));
+        stats.add(syncObjectType("procedure", forceFullFetch));
+        return stats;
+    }
+
+    private ObjectSyncStats syncObjectType(String objectType, boolean forceFullFetch) throws Exception {
+        long startedAt = System.currentTimeMillis();
+        RemoteSignature remoteSignature = fetchRemoteSignature(objectType);
+        MetadataSnapshot snapshot = loadSnapshot(objectType);
+        boolean matched = !forceFullFetch
+                && snapshot != null
+                && snapshot.remoteCount() == remoteSignature.count()
+                && Objects.equals(snapshot.remoteSignature(), remoteSignature.signature());
+        if (matched) {
+            saveSnapshot(objectType, remoteSignature);
+            OperationLog.log(String.format("[meta] %s 远程签名命中，跳过拉取 cnt=%d sig=%s", objectType, remoteSignature.count(), remoteSignature.signature()));
+            return new ObjectSyncStats(objectType, (int) remoteSignature.count(), 0, 0, 0, true);
+        }
+        FetchResult fetchResult = fetchRemoteObjects(objectType);
+        DiffResult diff = diffAndApply(objectType, fetchResult.objects());
+        saveSnapshot(objectType, remoteSignature);
+        long cost = System.currentTimeMillis() - startedAt;
+        OperationLog.log(String.format("[meta] %s cnt=%d sig=%s 插入=%d 删除=%d 批次=%d 用时=%dms", objectType, remoteSignature.count(), remoteSignature.signature(), diff.inserted(), diff.deleted(), fetchResult.batches(), cost));
+        return new ObjectSyncStats(objectType, diff.totalRemote(), diff.inserted(), diff.deleted(), fetchResult.batches(), false);
+    }
+
+    RemoteSignature fetchRemoteSignature(String objectType) throws Exception {
+        String sql;
+        switch (objectType) {
+            case "table" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || c.relname, 0))::text, '0') AS sig
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind IN ('r','p')
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            case "view" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || c.relname, 0))::text, '0') AS sig
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind='v'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            case "function" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || p.proname, 0))::text, '0') AS sig
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='f'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            case "procedure" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || p.proname, 0))::text, '0') AS sig
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='p'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            default -> throw new IllegalArgumentException("Unsupported objectType: " + objectType);
+        }
+        SqlExecResult result = runMetadataSql(sql);
+        List<List<String>> rows = result.getRows();
+        Map<String, Integer> idx = indexColumns(result.getColumns());
+        long cnt = 0L;
+        String sig = "0";
+        if (rows != null && !rows.isEmpty()) {
+            List<String> row = rows.get(0);
+            cnt = parseLong(valueAt(row, idx.getOrDefault("cnt", -1)), 0L);
+            String remoteSig = valueAt(row, idx.getOrDefault("sig", -1));
+            if (remoteSig != null && !remoteSig.isBlank()) {
+                sig = remoteSig.trim();
+            }
+        }
+        return new RemoteSignature(cnt, sig);
+    }
+
+    FetchResult fetchRemoteObjects(String objectType) throws Exception {
+        int offset = 0;
+        int batches = 0;
+        Set<RemoteObject> merged = new LinkedHashSet<>();
+        while (true) {
+            List<RemoteObject> page = fetchRemoteObjectsPaged(objectType, offset);
+            batches++;
+            merged.addAll(page);
+            if (page.size() < OBJECT_PAGE_SIZE) {
+                break;
+            }
+            offset += OBJECT_PAGE_SIZE;
+        }
+        return new FetchResult(merged, batches);
+    }
+
+    List<RemoteObject> fetchRemoteObjectsPaged(String objectType, int offset) throws Exception {
+        String sql;
+        switch (objectType) {
+            case "table" -> sql = """
+                    SELECT n.nspname AS schema_name, c.relname AS object_name
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind IN ('r','p')
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            case "view" -> sql = """
+                    SELECT n.nspname AS schema_name, c.relname AS object_name
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind='v'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            case "function" -> sql = """
+                    SELECT n.nspname AS schema_name, p.proname AS object_name
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='f'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            case "procedure" -> sql = """
+                    SELECT n.nspname AS schema_name, p.proname AS object_name
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='p'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            default -> throw new IllegalArgumentException("Unsupported objectType: " + objectType);
+        }
+        SqlExecResult result = runMetadataSql(sql);
+        Map<String, Integer> idx = indexColumns(result.getColumns());
+        int schemaIdx = idx.getOrDefault("schema_name", -1);
+        int nameIdx = idx.getOrDefault("object_name", -1);
+        List<RemoteObject> list = new ArrayList<>();
+        if (result.getRows() != null) {
+            for (List<String> row : result.getRows()) {
+                String name = valueAt(row, nameIdx);
+                if (name == null || name.isBlank()) {
+                    continue;
+                }
+                String schema = valueAt(row, schemaIdx);
+                list.add(new RemoteObject(schema != null ? schema.trim() : DEFAULT_SCHEMA, name.trim()));
+            }
+        }
+        return list;
+    }
+
+    DiffResult diffAndApply(String objectType, Set<RemoteObject> remoteObjects) throws Exception {
+        Map<String, RemoteObject> remoteMap = new HashMap<>();
+        for (RemoteObject ro : remoteObjects) {
+            remoteMap.put(ro.key(), ro);
+        }
+        synchronized (dbWriteLock) {
+            try (Connection conn = sqliteManager.getConnection()) {
+                boolean auto = conn.getAutoCommit();
+                if (auto) {
+                    conn.setAutoCommit(false);
+                }
+                java.sql.Savepoint sp = conn.setSavepoint("obj_diff");
+                try {
+                    Map<String, RemoteObject> localMap = new HashMap<>();
+                    try (PreparedStatement ps = conn.prepareStatement("SELECT schema_name, object_name FROM objects WHERE object_type=?")) {
+                        ps.setString(1, objectType);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            while (rs.next()) {
+                                String schema = rs.getString("schema_name");
+                                String obj = rs.getString("object_name");
+                                if (obj != null) {
+                                    RemoteObject ro = new RemoteObject(schema != null ? schema : DEFAULT_SCHEMA, obj);
+                                    localMap.put(ro.key(), ro);
+                                }
+                            }
+                        }
+                    }
+
+                    Set<String> toInsert = new HashSet<>(remoteMap.keySet());
+                    toInsert.removeAll(localMap.keySet());
+                    Set<String> toDelete = new HashSet<>(localMap.keySet());
+                    toDelete.removeAll(remoteMap.keySet());
+
+                    try (PreparedStatement ins = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type, use_count, last_used_at) VALUES(?,?,?,?,?)");
+                         PreparedStatement delObj = conn.prepareStatement("DELETE FROM objects WHERE schema_name=? AND object_name=? AND object_type=?");
+                         PreparedStatement delCols = conn.prepareStatement("DELETE FROM columns WHERE object_name=?");
+                         PreparedStatement delColSnap = conn.prepareStatement("DELETE FROM columns_snapshot WHERE object_name=?")) {
+                        long now = System.currentTimeMillis();
+                        for (String key : toInsert) {
+                            RemoteObject ro = remoteMap.get(key);
+                            if (ro == null) continue;
+                            ins.setString(1, ro.schemaName() == null ? DEFAULT_SCHEMA : ro.schemaName());
+                            ins.setString(2, ro.objectName());
+                            ins.setString(3, objectType);
+                            ins.setInt(4, 0);
+                            ins.setLong(5, now);
+                            ins.addBatch();
+                        }
+                        ins.executeBatch();
+
+                        for (String key : toDelete) {
+                            RemoteObject ro = localMap.get(key);
+                            if (ro == null) continue;
+                            String schema = ro.schemaName() == null ? DEFAULT_SCHEMA : ro.schemaName();
+                            delObj.setString(1, schema);
+                            delObj.setString(2, ro.objectName());
+                            delObj.setString(3, objectType);
+                            delObj.addBatch();
+                            delCols.setString(1, ro.objectName());
+                            delCols.addBatch();
+                            delColSnap.setString(1, ro.objectName());
+                            delColSnap.addBatch();
+                        }
+                        delObj.executeBatch();
+                        delCols.executeBatch();
+                        delColSnap.executeBatch();
+                    }
+
+                    conn.releaseSavepoint(sp);
+                    conn.commit();
+                    if (auto) {
+                        conn.setAutoCommit(true);
+                    }
+                    return new DiffResult(toInsert.size(), toDelete.size(), remoteObjects.size());
+                } catch (Exception e) {
+                    try {
+                        conn.rollback(sp);
+                    } catch (Exception ignore) {
+                    }
+                    throw e;
+                }
+            }
+        }
+    }
+
+    private MetadataSnapshot loadSnapshot(String objectType) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement("SELECT object_type, remote_count, remote_signature, checked_at FROM metadata_snapshot WHERE object_type=?")) {
+            ps.setString(1, objectType);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return new MetadataSnapshot(
+                            rs.getString("object_type"),
+                            rs.getLong("remote_count"),
+                            rs.getString("remote_signature"),
+                            rs.getString("checked_at")
+                    );
+                }
+            }
+        } catch (Exception e) {
+            log.debug("读取元数据快照失败: {}", objectType, e);
+        }
+        return null;
+    }
+
+    private void saveSnapshot(String objectType, RemoteSignature sig) {
+        synchronized (dbWriteLock) {
+            try (Connection conn = sqliteManager.getConnection();
+                 PreparedStatement ps = conn.prepareStatement("INSERT INTO metadata_snapshot(object_type, remote_count, remote_signature, checked_at) VALUES(?,?,?,?) ON CONFLICT(object_type) DO UPDATE SET remote_count=excluded.remote_count, remote_signature=excluded.remote_signature, checked_at=excluded.checked_at")) {
+                ps.setString(1, objectType);
+                ps.setLong(2, sig.count());
+                ps.setString(3, sig.signature());
+                ps.setString(4, Instant.now().toString());
+                ps.executeUpdate();
+            } catch (Exception e) {
+                log.warn("更新元数据签名失败: {}", objectType, e);
+            }
         }
     }
 
@@ -378,6 +722,7 @@ public class MetadataService {
                 st.executeUpdate("DELETE FROM objects");
                 st.executeUpdate("DELETE FROM meta_snapshot");
                 st.executeUpdate("DELETE FROM columns_snapshot");
+                st.executeUpdate("DELETE FROM metadata_snapshot");
                 conn.commit();
                 if (auto) conn.setAutoCommit(true);
                 OperationLog.log("已清空本地元数据");
@@ -742,6 +1087,17 @@ public class MetadataService {
         }
         try {
             return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private long parseLong(String value, long fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        try {
+            return Long.parseLong(value.trim());
         } catch (NumberFormatException e) {
             return fallback;
         }

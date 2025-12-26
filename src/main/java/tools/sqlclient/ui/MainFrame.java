@@ -118,6 +118,7 @@ public class MainFrame extends JFrame {
     private JTabbedPane rightTabbedPane;
     private JPanel leftPanel;
     private JPanel rightPanel;
+    private ObjectBrowserDialog objectBrowserDialog;
     private boolean leftVisible = true;
     private boolean rightVisible = false;
     private boolean bottomVisible = true;
@@ -224,7 +225,7 @@ public class MainFrame extends JFrame {
         buildStatusBar();
         OperationLog.setAppender(line -> logPanel.appendLine(line));
         metadataLabel.setText("元数据: " + metadataService.countCachedObjects());
-        metadataService.refreshMetadataAsync(this::handleMetadataRefreshResult);
+        metadataService.syncMetadataOnStartup(this::handleMetadataRefreshResult);
         installGlobalShortcuts();
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
@@ -845,7 +846,7 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 OperationLog.log("开发者自测：大规模元数据刷新");
-                metadataService.refreshMetadataAsync(result -> {
+                metadataService.refreshMetadataAsync(true, result -> {
                     handleMetadataRefreshResult(result);
                     SwingUtilities.invokeLater(() -> {
                         String msg;
@@ -982,8 +983,7 @@ public class MainFrame extends JFrame {
         view.add(new JMenuItem(new AbstractAction("对象浏览器") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
-                dialog.setVisible(true);
+                showObjectBrowser();
             }
         }));
 
@@ -2298,6 +2298,20 @@ public class MainFrame extends JFrame {
         panel.insertSqlAtCaret(sql);
     }
 
+    private void showObjectBrowser() {
+        if (objectBrowserDialog == null) {
+            objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
+        }
+        objectBrowserDialog.setVisible(true);
+        objectBrowserDialog.reload();
+    }
+
+    private void refreshObjectBrowserTree() {
+        if (objectBrowserDialog != null && objectBrowserDialog.isVisible()) {
+            SwingUtilities.invokeLater(() -> objectBrowserDialog.reload());
+        }
+    }
+
     private void handleMetadataRefreshResult(MetadataService.MetadataRefreshResult result) {
         if (result == null) return;
         if (result.success()) {
@@ -2317,6 +2331,7 @@ public class MainFrame extends JFrame {
             if (!hasRunningExecutions()) {
                 statusLabel.setText("元数据已更新");
             }
+            refreshObjectBrowserTree();
         } else {
             String reason = result.message() == null ? "获取失败" : result.message();
             metadataLabel.setText("元数据: 使用本地缓存 (" + reason + ")");

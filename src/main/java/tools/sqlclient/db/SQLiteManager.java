@@ -55,6 +55,12 @@ public class SQLiteManager {
                     "cols_hash TEXT NOT NULL, " +
                     "updated_at INTEGER NOT NULL)"
             );
+            st.executeUpdate("CREATE TABLE IF NOT EXISTS metadata_snapshot (" +
+                    "object_type TEXT PRIMARY KEY, " +
+                    "remote_count INTEGER NOT NULL, " +
+                    "remote_signature TEXT NOT NULL, " +
+                    "checked_at TEXT NOT NULL)"
+            );
             st.executeUpdate("CREATE TABLE IF NOT EXISTS meta_snapshot (" +
                     "meta_type TEXT PRIMARY KEY, " +
                     "meta_hash TEXT NOT NULL, " +
