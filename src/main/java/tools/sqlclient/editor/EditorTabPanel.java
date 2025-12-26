@@ -168,9 +168,15 @@ public class EditorTabPanel extends JPanel {
             return;
         }
         editorVerticalScrollBar.addMouseWheelListener(e -> {
-            int units = e.getUnitsToScroll();
-            int increment = editorVerticalScrollBar.getUnitIncrement(units);
-            int delta = units * increment;
+            int direction = e.getWheelRotation() < 0 ? -1 : 1;
+            int increment = editorVerticalScrollBar.getUnitIncrement(direction);
+            if (increment <= 0) {
+                increment = editorVerticalScrollBar.getBlockIncrement(direction);
+            }
+            if (increment <= 0) {
+                increment = 16;
+            }
+            int delta = e.getScrollAmount() * increment * direction;
             int min = editorVerticalScrollBar.getMinimum();
             int max = editorVerticalScrollBar.getMaximum() - editorVerticalScrollBar.getVisibleAmount();
             int target = Math.max(min, Math.min(editorVerticalScrollBar.getValue() + delta, max));
