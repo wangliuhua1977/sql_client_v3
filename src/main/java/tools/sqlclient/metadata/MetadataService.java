@@ -1465,6 +1465,43 @@ public class MetadataService {
         }
     }
 
+    public List<TableEntry> listRoutines(String keyword, String type) {
+        String like = (keyword == null || keyword.isBlank()) ? "%" : toLikePattern(keyword);
+        if (like == null) like = "%";
+        List<String> types = new ArrayList<>();
+        if (type == null || type.isBlank()) {
+            types.add("function");
+            types.add("procedure");
+        } else {
+            types.add(type.toLowerCase());
+        }
+
+        String placeholders = types.stream().map(t -> "?").collect(java.util.stream.Collectors.joining(","));
+        String sql = "SELECT object_name, object_type FROM objects WHERE object_type IN (" + placeholders + ")" +
+                ("%".equals(like) ? "" : " AND lower(object_name) LIKE ?") +
+                " ORDER BY object_name";
+
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            for (String t : types) {
+                ps.setString(idx++, t);
+            }
+            if (!"%".equals(like)) ps.setString(idx, like);
+
+            List<TableEntry> list = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    list.add(new TableEntry(rs.getString("object_name"), rs.getString("object_type")));
+                }
+            }
+            return list;
+        } catch (Exception e) {
+            log.error("查询 routine 浏览器数据失败", e);
+            return List.of();
+        }
+    }
+
     public List<String> loadColumnsFromCache(String tableName) {
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(
