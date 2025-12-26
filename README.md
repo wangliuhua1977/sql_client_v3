@@ -173,6 +173,16 @@
 - **字段顺序保证**：单表列请求固定按 `ordinal_position` 排序并落库为 `sort_no`，UI 直接按该顺序展示，缺失缓存时回退到后端顺序。
 - **可追溯调试**：每批请求的 SQL 与返回前 200 行会写入 `%USERPROFILE%\.Sql_client_v3\logs\metadata-*.log`，OperationLog 仅输出批次计数和耗时。
 
+### 前端开发技术文档（元数据模块）
+- **启动链路**：先读取 `metadata_snapshot` 做对象级签名比对；签名一致则跳过远端拉取，签名不一致时按 900 行分页拉取对象清单、差分写入本地 SQLite，并回写新的 snapshot。
+- **手动刷新**：菜单触发的刷新与启动链路一致，仅同步对象列表（table/view/function/procedure），不会拉取字段、也不会调用 `ensureColumnsLoaded`。
+- **字段懒加载**：只有在联想/列顺序/对象浏览器需要某表字段且本地 columns 缓存为空时，才调用 `ensureColumnsLoaded(schema, table)` 向远端查询。若缓存命中直接返回，缓存缺失会创建/复用以 `schema.table` 为键的 in-flight Future，成功写入后刷新 UI。
+- **去重策略**：对象级跳过依赖 `metadata_snapshot`，列级避免重复依赖 columns 表缓存命中；同一表的并发请求会被 in-flight map 复用，失败后自动清理以便下次重试。
+- **字段 SQL（PG12.7 兼容）**：`SELECT ... FROM pg_attribute a JOIN pg_class c ... WHERE n.nspname=:schema AND c.relname=:table ORDER BY a.attnum;` 单表查询无需分页且按 `attnum` 稳定排序，参数在拼接前会做标识符校验/转义。
+- **SQLite 结构**：objects(schema_name, object_name, object_type, use_count, last_used_at, PK(schema_name, object_name))；columns(schema_name, object_name, column_name, sort_no, use_count, last_used_at, PK 同步，索引 `idx_columns_schema_object` 支持 `(schema,table)` 快速命中)；columns_snapshot(object_name, cols_hash, updated_at)；metadata_snapshot(object_type, remote_count, remote_signature, checked_at)；meta_snapshot 仅存储补充信息哈希。
+- **清理与刷新**：差分同步或 DDL 删除对象时会同步删除 columns/columns_snapshot 记录；手动“重置元数据”仅清空本地缓存，后续依然按对象差分 + 懒加载列重新写库。
+- **关键日志**：OperationLog 会输出 `[meta] columns cache hit/miss`、`inflight reused`、`fetched count` 或失败原因，元数据刷新进度日志包含批次、对象/列计数与耗时，便于排障。
+
 ### 启动全量同步
 - 主窗口完成初始化后即触发异步元数据刷新，`meta_snapshot` 为空时执行全量同步；后续刷新仅更新变动的类别/对象。
 - 清空本地缓存（菜单“工具-重置元数据”）会删除 `objects/columns/meta_snapshot`，强制下一次重新全量拉取。

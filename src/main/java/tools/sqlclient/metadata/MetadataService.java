@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
@@ -49,7 +50,7 @@ public class MetadataService {
     private final ExecutorService networkPool = Executors.newFixedThreadPool(resolveNetworkConcurrency(), r -> new Thread(r, "network-pool"));
     private final MetadataRefreshService refreshService;
     private final Object dbWriteLock = new Object();
-    private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
+    private final Map<String, CompletableFuture<Void>> inflightColumns = new ConcurrentHashMap<>();
 
     record RemoteSignature(long count, String signature) {
     }
@@ -870,7 +871,7 @@ public class MetadataService {
     }
 
     private List<String> fetchNamesByExactType(String type, String objectName) throws Exception {
-        String safeName = sanitizeObjectName(objectName);
+        String safeName = sanitizeIdentifier(objectName);
         if (safeName == null) {
             return List.of();
         }
@@ -949,14 +950,54 @@ public class MetadataService {
     }
 
     /**
-     * 在用户选择表名或输入别名时，后台补齐字段元数据，避免列联想时出现空列表。
+     * 按需补齐字段缓存，具备缓存命中与 in-flight 去重能力。
      */
-    /**
-     * 异步补齐字段缓存，可在完成后回调刷新 UI。
-     * @param tableName 目标表/视图
-     * @param onFreshLoaded 当本次确实发起远程抓取且成功完成时的回调（UI 线程）
-     * @return 是否发起了新的抓取
-     */
+    public CompletableFuture<Void> ensureColumnsLoaded(String schema, String tableName) {
+        return ensureColumnsLoaded(schema, tableName, false);
+    }
+
+    public CompletableFuture<Void> ensureColumnsLoaded(String schema, String tableName, boolean forceRefresh) {
+        String normalizedSchema = normalizeSchema(schema);
+        String normalizedTableName = tableName;
+        if (tableName != null && tableName.contains(".")) {
+            String[] parts = tableName.split("\\.", 2);
+            if (parts.length == 2) {
+                normalizedSchema = normalizeSchema(parts[0]);
+                normalizedTableName = parts[1];
+            }
+        }
+        String normalizedTable = normalizeTable(normalizedTableName);
+        if (normalizedTable == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        if (!forceRefresh && hasColumns(normalizedSchema, normalizedTable)) {
+            OperationLog.log(String.format("[meta] columns cache hit %s.%s", normalizedSchema, normalizedTable));
+            return CompletableFuture.completedFuture(null);
+        }
+        String key = normalizedSchema + "." + normalizedTable + (forceRefresh ? "#force" : "");
+        CompletableFuture<Void> existing = inflightColumns.get(key);
+        if (existing != null) {
+            OperationLog.log(String.format("[meta] columns inflight reused %s", key));
+            return existing;
+        }
+        final String schemaForQuery = normalizedSchema;
+        final String tableForQuery = normalizedTable;
+        final boolean refreshFlag = forceRefresh;
+        final String inflightKey = key;
+        CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+            try {
+                int count = updateColumns(schemaForQuery, tableForQuery, refreshFlag);
+                OperationLog.log(String.format("[meta] columns fetched %s.%s count=%d", schemaForQuery, tableForQuery, count));
+            } catch (Exception e) {
+                OperationLog.log(String.format("[meta] columns fetch failed %s.%s %s", schemaForQuery, tableForQuery, e.getMessage()));
+                throw new RuntimeException(e);
+            }
+        }, networkPool).whenComplete((v, ex) -> inflightColumns.remove(inflightKey));
+        inflightColumns.put(inflightKey, future);
+        OperationLog.log(String.format("[meta] columns cache miss %s.%s, start fetch", normalizedSchema, normalizedTable));
+        return future;
+    }
+
     public boolean ensureColumnsCachedAsync(String tableName, Runnable onFreshLoaded) {
         return ensureColumnsCachedAsync(tableName, false, onFreshLoaded);
     }
@@ -966,39 +1007,45 @@ public class MetadataService {
     }
 
     public boolean ensureColumnsCachedAsync(String tableName, boolean forceRefresh, Runnable onFreshLoaded) {
-        if (!shouldFetchColumns(tableName, forceRefresh)) return false;
-        String key = tableName + (forceRefresh ? "#force" : "");
-        if (!inflightColumns.add(key)) return false;
-        CompletableFuture.runAsync(() -> updateColumns(tableName, forceRefresh), networkPool)
-                .whenComplete((v, ex) -> {
-                    inflightColumns.remove(key);
-                    if (onFreshLoaded != null) {
-                        SwingUtilities.invokeLater(onFreshLoaded);
-                    }
-                });
-        return true;
+        CompletableFuture<Void> future = ensureColumnsLoaded(DEFAULT_SCHEMA, tableName, forceRefresh);
+        if (future == null) {
+            return false;
+        }
+        boolean fetching = !future.isDone();
+        if (fetching && onFreshLoaded != null) {
+            future.thenRun(() -> SwingUtilities.invokeLater(onFreshLoaded));
+        }
+        return fetching;
     }
 
-    public boolean ensureColumnsCachedAsync(String tableName) {
-        return ensureColumnsCachedAsync(tableName, false, null);
+    private String normalizeSchema(String schema) {
+        String candidate = (schema == null || schema.isBlank()) ? DEFAULT_SCHEMA : schema.trim();
+        return candidate.isBlank() ? DEFAULT_SCHEMA : candidate;
     }
 
-    private boolean shouldFetchColumns(String tableName, boolean forceRefresh) {
-        if (tableName == null || tableName.isBlank()) return false;
-        if (!isLikelyTableName(tableName)) return false;
-        if (!forceRefresh && hasColumns(tableName)) return false;
-        return true;
+    private String normalizeTable(String tableName) {
+        if (tableName == null) return null;
+        String trimmed = tableName.trim();
+        if (trimmed.contains(".")) {
+            String[] parts = trimmed.split("\\.", 2);
+            if (parts.length == 2 && isLikelyTableName(parts[1])) {
+                trimmed = parts[1];
+            }
+        }
+        if (!isLikelyTableName(trimmed)) return null;
+        return trimmed;
     }
 
-    private boolean hasColumns(String tableName) {
+    private boolean hasColumns(String schema, String tableName) {
         try (Connection conn = sqliteManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM columns WHERE object_name=?")) {
-            ps.setString(1, tableName);
+             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM columns WHERE schema_name=? AND object_name=?")) {
+            ps.setString(1, schema);
+            ps.setString(2, tableName);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() && rs.getInt(1) > 0;
             }
         } catch (Exception e) {
-            log.warn("检查列缓存失败: {}", tableName, e);
+            log.warn("检查列缓存失败: {}.{}", schema, tableName, e);
             return false;
         }
     }
@@ -1011,26 +1058,38 @@ public class MetadataService {
         return trimmed.matches("[A-Za-z0-9_\\.]{2,128}");
     }
 
-    private List<RemoteColumn> fetchColumnsBySql(String objectName) throws Exception {
-        String safeName = sanitizeObjectName(objectName);
-        if (safeName == null) {
+    private List<RemoteColumn> fetchColumnsBySql(String schema, String objectName) throws Exception {
+        String safeSchema = sanitizeIdentifier(schema);
+        String safeName = sanitizeIdentifier(objectName);
+        if (safeSchema == null || safeName == null) {
             return List.of();
         }
-        String sql = String.format("""
-                SELECT table_schema AS schema_name, table_name AS object_name, column_name, data_type, ordinal_position, is_nullable, column_default
-                FROM information_schema.columns
-                WHERE table_schema='%s' AND table_name = '%s'
-                ORDER BY ordinal_position
-                """, DEFAULT_SCHEMA, safeName);
+        String sql = """
+                SELECT
+                  n.nspname AS schema_name,
+                  c.relname AS object_name,
+                  a.attname AS column_name,
+                  pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                  a.attnum AS ordinal_position
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('r','p')
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                  AND n.nspname = '%s'
+                  AND c.relname = '%s'
+                ORDER BY a.attnum;
+                """.formatted(safeSchema, safeName);
         SqlExecResult result = runMetadataSql(sql);
         return toColumns(result);
     }
 
-    private String sanitizeObjectName(String objectName) {
-        if (!isLikelyTableName(objectName)) {
+    private String sanitizeIdentifier(String name) {
+        if (!isLikelyTableName(name)) {
             return null;
         }
-        return objectName.replace("'", "''");
+        return name.replace("'", "''");
     }
 
     private List<RemoteColumn> toColumns(SqlExecResult result) {
@@ -1174,14 +1233,14 @@ public class MetadataService {
         }
     }
 
-    private void updateColumns(String objectName, boolean forceRefresh) {
+    private int updateColumns(String schema, String objectName, boolean forceRefresh) {
         boolean knownTableOrView = isTableOrView(objectName);
         int attempts = 0;
         while (attempts < 3) {
             try {
                 attempts++;
-                List<RemoteColumn> columns = fetchColumnsBySql(objectName);
-                if (columns == null || columns.isEmpty()) return;
+                List<RemoteColumn> columns = fetchColumnsBySql(schema, objectName);
+                if (columns == null || columns.isEmpty()) return 0;
                 synchronized (dbWriteLock) {
                     try (Connection conn = sqliteManager.getConnection()) {
                         boolean auto = conn.getAutoCommit();
@@ -1202,8 +1261,9 @@ public class MetadataService {
                                 }
                             }
                             Map<String, Integer> localCols = new HashMap<>();
-                            try (PreparedStatement ps = conn.prepareStatement("SELECT column_name, sort_no FROM columns WHERE object_name=?")) {
-                                ps.setString(1, objectName);
+                            try (PreparedStatement ps = conn.prepareStatement("SELECT column_name, sort_no FROM columns WHERE schema_name=? AND object_name=?")) {
+                                ps.setString(1, schema);
+                                ps.setString(2, objectName);
                                 try (ResultSet rs = ps.executeQuery()) {
                                     while (rs.next()) {
                                         localCols.put(rs.getString("column_name"), rs.getInt("sort_no"));
@@ -1222,8 +1282,9 @@ public class MetadataService {
                                 }
                             }
                             if (changed) {
-                                try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
-                                    del.setString(1, objectName);
+                                try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE schema_name=? AND object_name=?")) {
+                                    del.setString(1, schema);
+                                    del.setString(2, objectName);
                                     del.executeUpdate();
                                 }
                                 try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
@@ -1238,13 +1299,13 @@ public class MetadataService {
                                     ins.executeBatch();
                                 }
                                 String colsHash = computeColumnsHash(columns);
-                                snapshotPs.setString(1, objectName);
-                                snapshotPs.setString(2, colsHash);
-                                snapshotPs.setLong(3, System.currentTimeMillis());
-                                snapshotPs.executeUpdate();
-                            }
-                            conn.releaseSavepoint(sp);
-                            conn.commit();
+                            snapshotPs.setString(1, objectName);
+                            snapshotPs.setString(2, colsHash);
+                            snapshotPs.setLong(3, System.currentTimeMillis());
+                            snapshotPs.executeUpdate();
+                        }
+                        conn.releaseSavepoint(sp);
+                        conn.commit();
                         } catch (Exception ex) {
                             try { conn.rollback(sp); } catch (Exception ignore) {}
                             throw ex;
@@ -1253,7 +1314,7 @@ public class MetadataService {
                         }
                     }
                 }
-                return;
+                return columns.size();
             } catch (Exception e) {
                 if (attempts >= 3) {
                     log.error("更新字段失败: {}", objectName, e);
@@ -1263,6 +1324,7 @@ public class MetadataService {
                 }
             }
         }
+        return 0;
     }
 
     private boolean isTableOrView(String objectName) {
