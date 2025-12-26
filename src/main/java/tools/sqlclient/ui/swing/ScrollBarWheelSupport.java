@@ -38,12 +38,13 @@ public final class ScrollBarWheelSupport {
         vbar.putClientProperty(INSTALLED_KEY, Boolean.TRUE);
         MouseWheelListener listener = e -> {
             int units = e.getUnitsToScroll();
-            int inc = Math.max(1, vbar.getUnitIncrement(units));
+            int inc = Math.max(1, vbar.getUnitIncrement(units > 0 ? 1 : -1));
             if (inc <= 0) {
-                inc = Math.max(1, vbar.getBlockIncrement(units));
+                inc = Math.max(1, vbar.getBlockIncrement(units > 0 ? 1 : -1));
             }
             int delta = units * inc;
-            int newValue = clamp(vbar.getValue() + delta, vbar.getMinimum(), vbar.getMaximum());
+            int maxValue = Math.max(vbar.getMinimum(), vbar.getMaximum() - vbar.getVisibleAmount());
+            int newValue = clamp(vbar.getValue() + delta, vbar.getMinimum(), maxValue);
             vbar.setValue(newValue);
             e.consume();
         };

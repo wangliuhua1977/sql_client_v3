@@ -72,9 +72,9 @@
 - 线程规则：所有 `setBusy` 和状态标签更新均通过 EDT 执行，避免跨线程修改 Swing 组件。
 
 ## SQL 编辑器滚动条滚轮支持（子窗体/面板模式）
-- 适用范围：`EditorTabPanel` 作为独立子窗体（JInternalFrame/JDialog/JFrame）或主界面内嵌面板（tabbed 面板模式）时，SQL 编辑区右侧竖向滚动条均可在鼠标悬停其上滚轮滚动。
-- 实现方式：封装工具类 `tools.sqlclient.ui.swing.ScrollBarWheelSupport#enableWheelOnVerticalScrollBar(JScrollPane)`，在 SQL 编辑器的 `RTextScrollPane` 上安装 `MouseWheelListener`，仅监听垂直 `JScrollBar`，不改动编辑器本体。
-- 方向与步进：使用 `MouseWheelEvent#getUnitsToScroll()` 与滚动条 `getUnitIncrement`（回退 `getBlockIncrement`）计算步进，向下滚动（值大于 0）使滚动条 value 增大、内容下移，向上滚动相反；结果值在 `minimum` 与 `maximum` 之间夹紧。
+- 适用范围：`EditorTabPanel` 作为独立子窗体（JInternalFrame/JDialog/JFrame）或主界面内嵌面板（tabbed 面板模式）时，SQL 编辑区无论鼠标停在正文编辑区域还是右侧竖向滚动条上，滚轮都能驱动同一垂直滚动条滚动。
+- 实现方式：封装工具类 `tools.sqlclient.ui.swing.ScrollBarWheelSupport#enableWheelOnVerticalScrollBar(JScrollPane)`，在 SQL 编辑器的 `RTextScrollPane` 上安装 `MouseWheelListener`，仅监听垂直 `JScrollBar`，不改动编辑器本体的原生滚轮行为。
+- 方向与步进：使用 `MouseWheelEvent#getUnitsToScroll()` 与滚动条 `getUnitIncrement`（回退 `getBlockIncrement`）计算步进，向下滚动（值大于 0）使滚动条 value 增大、内容下移，向上滚动相反；结果值在 `minimum` 与 `maximum - visibleAmount` 之间夹紧。
 - 绑定与线程：通过滚动条 `clientProperty` 标记避免重复绑定，初始化时若不在 EDT 会使用 `SwingUtilities.invokeLater` 派发安装，确保监听注册与 UI 更新在事件派发线程完成。
 
 ## 问题根因与修复说明
