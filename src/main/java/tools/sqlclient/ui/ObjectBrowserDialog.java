@@ -101,6 +101,10 @@ public class ObjectBrowserDialog extends JDialog {
         refresh("");
     }
 
+    public void reload() {
+        refresh("");
+    }
+
     private void refresh(String keyword) {
         SwingUtilities.invokeLater(() -> {
             root.removeAllChildren();
