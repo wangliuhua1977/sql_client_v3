@@ -71,10 +71,11 @@
   - 异常/失败：展示错误提示后同样关闭动画，不会因异常提前返回而悬停。
 - 线程规则：所有 `setBusy` 和状态标签更新均通过 EDT 执行，避免跨线程修改 Swing 组件。
 
-## SQL 编辑区滚轮与滚动条交互（Swing）
-- 竖向滚动条滚轮：SQL 编辑器右侧竖向 `JScrollBar` 新增 `MouseWheelListener`，鼠标悬停在滚动条上滚动可直接推动滚动条数值，方向与系统一致（向下滚动内容下移）。
-- 缓存引用：滚动条引用在布局初始化时缓存，仅绑定一次监听，不在滚轮事件中动态查找组件。
-- 互不干扰：编辑区域本身的滚轮行为保持不变，仅额外支持在滚动条上的滚轮操作；取值会按最小/最大边界夹紧，防止越界。所有 UI 更新在 EDT 中完成。
+## SQL 编辑器滚动条滚轮支持（子窗体/面板模式）
+- 适用范围：`EditorTabPanel` 作为独立子窗体（JInternalFrame/JDialog/JFrame）或主界面内嵌面板（tabbed 面板模式）时，SQL 编辑区无论鼠标停在正文编辑区域还是右侧竖向滚动条上，滚轮都能驱动同一垂直滚动条滚动。
+- 实现方式：封装工具类 `tools.sqlclient.ui.swing.ScrollBarWheelSupport#enableWheelOnVerticalScrollBar(JScrollPane)`，在 SQL 编辑器的 `RTextScrollPane` 上安装 `MouseWheelListener`，仅监听垂直 `JScrollBar`，不改动编辑器本体的原生滚轮行为。
+- 方向与步进：使用 `MouseWheelEvent#getUnitsToScroll()` 与滚动条 `getUnitIncrement`（回退 `getBlockIncrement`）计算步进，向下滚动（值大于 0）使滚动条 value 增大、内容下移，向上滚动相反；结果值在 `minimum` 与 `maximum - visibleAmount` 之间夹紧。
+- 绑定与线程：通过滚动条 `clientProperty` 标记避免重复绑定，初始化时若不在 EDT 会使用 `SwingUtilities.invokeLater` 派发安装，确保监听注册与 UI 更新在事件派发线程完成。
 
 ## 问题根因与修复说明
 - **失败链路**：元数据刷新在拉取表/视图/字段时直接调用 `/waf/api/jobs/result`，SQL 只做 `LIMIT 1000` 的 keyset 分页，未在客户端裁剪 pageSize 或使用 SQL 级 OFFSET 分页；当 schema 超过 1000 行时，后端窗口被截断并返回 `RESULT_NOT_READY` / HTTP 410 `RESULT_EXPIRED`，旧逻辑在 60s 超时时抛出异常，刷新失败且 staging 未写回。代码可见 `MetadataRefreshService#waitUntilReady` 的轮询与超时逻辑。
