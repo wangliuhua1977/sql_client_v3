@@ -2,6 +2,7 @@ package tools.sqlclient.app;
 
 import com.formdev.flatlaf.FlatLightLaf;
 import tools.sqlclient.ui.MainFrame;
+import tools.sqlclient.ui.UiStyle;
 
 import javax.swing.SwingUtilities;
 
@@ -13,6 +14,7 @@ public class Main {
         // 设置 UTF-8
         System.setProperty("file.encoding", "UTF-8");
         FlatLightLaf.setup();
+        UiStyle.installGlobalDefaults();
         SwingUtilities.invokeLater(() -> {
             MainFrame frame = new MainFrame();
             frame.setVisible(true);

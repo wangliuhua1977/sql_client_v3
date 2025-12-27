@@ -711,6 +711,14 @@ public class EditorTabPanel extends JPanel {
         suggestionEngine.closePopup();
     }
 
+    public void focusEditorArea() {
+        textArea.requestFocusInWindow();
+    }
+
+    public void focusResultArea() {
+        resultArea.focusCurrent();
+    }
+
     public void revealMatch(int offset, String keyword) {
         String text = textArea.getText();
         if (text == null) {
@@ -936,6 +944,14 @@ public class EditorTabPanel extends JPanel {
         resultArea.clear();
         resultWrapper.setVisible(true);
         collapseResultArea();
+    }
+
+    public void focusEditor() {
+        textArea.requestFocusInWindow();
+    }
+
+    public void focusResultArea() {
+        resultArea.focusNavigator();
     }
 
     public void addLocalResultPanel(String title, JComponent panel, String hint) {

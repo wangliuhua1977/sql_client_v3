@@ -4,21 +4,21 @@ import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlTopLevelClassifier;
-
 import tools.sqlclient.ui.table.TableCopySupport;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.util.Arrays;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -73,6 +73,8 @@ public class QueryResultPanel extends JPanel {
         table.setShowGrid(false);
         table.setIntercellSpacing(new Dimension(0, 0));
         table.setRowHeight(24);
+        table.setSelectionBackground(new Color(0xDCE6F5));
+        table.setSelectionForeground(new Color(0x0F1F3A));
         table.setFillsViewportHeight(true);
         table.setSelectionBackground(new Color(224, 235, 255));
         table.setSelectionForeground(new Color(30, 35, 45));
@@ -99,6 +101,7 @@ public class QueryResultPanel extends JPanel {
         infoTable.setDefaultRenderer(Object.class, unifiedRenderer);
         JScrollPane infoScroll = new JScrollPane(infoTable);
         infoScroll.getViewport().setBackground(Color.WHITE);
+        infoScroll.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor));
 
         cards.add(scrollPane, CARD_TABLE);
         cards.add(infoScroll, CARD_INFO);
@@ -169,6 +172,13 @@ public class QueryResultPanel extends JPanel {
 
     public void fitColumns() {
         resizeColumns();
+    }
+
+    public void focusTable() {
+        table.requestFocusInWindow();
+        if (table.getRowCount() > 0 && table.getSelectedRowCount() == 0) {
+            table.setRowSelectionInterval(0, 0);
+        }
     }
 
     public void resetColumns() {
