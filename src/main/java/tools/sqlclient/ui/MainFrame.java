@@ -42,6 +42,7 @@ import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeCellRenderer;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.plaf.basic.BasicInternalFrameUI;
+import javax.swing.plaf.FontUIResource;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
@@ -101,6 +102,7 @@ public class MainFrame extends JFrame {
     private final PgRoutineService pgRoutineService = new PgRoutineService(sqlExecutionService);
     private final ColumnOrderDecider columnOrderDecider;
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
+    private final Font uiBaseFont = new Font(Font.SANS_SERIF, Font.PLAIN, 13);
     // 笔记图标持久化：noteId -> 图标规格
     private final java.util.Map<Long, NoteIconSpec> noteIconSpecs = new java.util.HashMap<>();
     private final java.util.Random iconRandom = new java.util.Random();
@@ -138,6 +140,7 @@ public class MainFrame extends JFrame {
     private ShortcutsDialog shortcutsDialog;
     private int focusCyclePointer = -1;
     private ObjectBrowserDialog objectBrowserDialog;
+    private JTree navigationTree;
     private boolean leftVisible = true;
     private boolean rightVisible = false;
     private boolean bottomVisible = true;
@@ -166,6 +169,7 @@ public class MainFrame extends JFrame {
     private QuickSqlSnippetDialog quickSqlSnippetDialog;
     private ExecutionHistoryDialog executionHistoryDialog;
     private TrashBinDialog trashBinDialog;
+    private int focusCycleIndex;
 
     public MainFrame() {
         // 需求 2：修改主窗体标题
@@ -790,7 +794,6 @@ public class MainFrame extends JFrame {
         JMenu run = new JMenu("运行");
         JMenu preferences = new JMenu("首选项");
         JMenu view = new JMenu("视图");
-        JMenu window = new JMenu("窗口");
         JMenu tools = new JMenu("工具");
         JMenu help = new JMenu("帮助");
 
@@ -953,6 +956,14 @@ public class MainFrame extends JFrame {
                 });
             }
         }));
+        JMenuItem shortcutHelp = new JMenuItem(new AbstractAction("快捷键列表") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showShortcutDialog();
+            }
+        });
+        shortcutHelp.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_SLASH, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+        help.add(shortcutHelp);
 
         tools.add(menuItem("开启 Debug 模式", this::enableDebugMode));
         tools.add(menuItem("备份本地数据库", this::backupLocalDatabase));
@@ -986,7 +997,6 @@ public class MainFrame extends JFrame {
         menuBar.add(run);
         menuBar.add(preferences);
         menuBar.add(view);
-        menuBar.add(window);
         menuBar.add(tools);
         menuBar.add(help);
         setJMenuBar(menuBar);
@@ -995,6 +1005,7 @@ public class MainFrame extends JFrame {
     private void buildToolbar() {
         JToolBar toolBar = new JToolBar();
         toolBar.setFloatable(false);
+        toolBar.setBorder(new EmptyBorder(4, 8, 4, 8));
         executeButton = new JButton(IconFactory.createRunIcon(true));
         executeButton.setDisabledIcon(IconFactory.createRunIcon(false));
         executeButton.setToolTipText("执行 (Ctrl+Enter)");
@@ -1025,7 +1036,9 @@ public class MainFrame extends JFrame {
         centerPanel.setMinimumSize(new Dimension(200, 240));
         centerPanel.add(desktopPane, "window");
         centerPanel.add(tabbedPane, "panel");
+        centerPanel.setBorder(new EmptyBorder(4, 8, 4, 8));
         sharedResultsScroll = new JScrollPane(sharedResultView.wrapper);
+        sharedResultsScroll.setBorder(BorderFactory.createEmptyBorder());
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
         sharedResultsWrapper.setMinimumSize(new Dimension(100, 180));
         desktopPane.addPropertyChangeListener("selectedFrame", evt -> {
@@ -1065,11 +1078,13 @@ public class MainFrame extends JFrame {
         centerRightSplit.setResizeWeight(0.72);
         centerRightSplit.setDividerSize(6);
         centerRightSplit.setContinuousLayout(true);
+        centerRightSplit.setBorder(BorderFactory.createEmptyBorder());
 
         leftSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, centerRightSplit);
         leftSplit.setResizeWeight(0.2);
         leftSplit.setDividerSize(6);
         leftSplit.setContinuousLayout(true);
+        leftSplit.setBorder(BorderFactory.createEmptyBorder());
 
         add(leftSplit, BorderLayout.CENTER);
         add(auxiliaryPanel, BorderLayout.EAST);
@@ -1141,6 +1156,7 @@ public class MainFrame extends JFrame {
         header.setBorder(UiStyle.sectionLine());
         header.add(objectFilterField, BorderLayout.CENTER);
         header.add(openDialog, BorderLayout.EAST);
+        header.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(230, 233, 238)));
         panel.add(header, BorderLayout.NORTH);
         JScrollPane treeScroll = new JScrollPane(objectTree);
         treeScroll.setBorder(UiStyle.thinLine());
@@ -1595,6 +1611,110 @@ public class MainFrame extends JFrame {
         }
     }
 
+    private void closeCurrentContainer() {
+        if (windowMode) {
+            JInternalFrame frame = desktopPane.getSelectedFrame();
+            if (frame != null) {
+                EditorTabPanel panel = extractPanelFromFrame(frame);
+                if (panel != null) {
+                    panelCache.remove(panel.getNote().getId());
+                }
+                frame.dispose();
+            }
+        } else {
+            int idx = tabbedPane.getSelectedIndex();
+            if (idx >= 0) {
+                Component comp = tabbedPane.getComponentAt(idx);
+                EditorTabPanel panel = extractPanel(comp);
+                if (panel != null) {
+                    panelCache.remove(panel.getNote().getId());
+                }
+                tabbedPane.removeTabAt(idx);
+            }
+        }
+        persistOpenFrames();
+        syncActivePanelWithSelection();
+        updateExecutionButtons();
+    }
+
+    private void navigateEditors(boolean forward) {
+        if (windowMode) {
+            JInternalFrame[] frames = desktopPane.getAllFrames();
+            if (frames.length == 0) {
+                return;
+            }
+            java.util.List<JInternalFrame> list = java.util.Arrays.asList(frames);
+            JInternalFrame current = desktopPane.getSelectedFrame();
+            int idx = list.indexOf(current);
+            int next = (idx < 0 ? 0 : idx + (forward ? 1 : -1));
+            if (next < 0) next = list.size() - 1;
+            if (next >= list.size()) next = 0;
+            JInternalFrame target = list.get(next);
+            try {
+                target.setIcon(false);
+                target.setSelected(true);
+                target.toFront();
+            } catch (Exception ignored) {
+            }
+        } else {
+            int count = tabbedPane.getTabCount();
+            if (count == 0) return;
+            int idx = tabbedPane.getSelectedIndex();
+            int next = (idx < 0 ? 0 : idx + (forward ? 1 : -1));
+            if (next < 0) next = count - 1;
+            if (next >= count) next = 0;
+            tabbedPane.setSelectedIndex(next);
+        }
+        syncActivePanelWithSelection();
+    }
+
+    private void focusEditorArea() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel != null) {
+            panel.focusEditorArea();
+        }
+    }
+
+    private void focusNextMajorArea() {
+        java.util.List<Runnable> targets = new java.util.ArrayList<>();
+        if (navigationTree != null && leftPanel != null && leftPanel.isShowing()) {
+            targets.add(() -> {
+                showLeftPanel();
+                navigationTree.requestFocusInWindow();
+                if (navigationTree.getRowCount() > 0 && navigationTree.getSelectionCount() == 0) {
+                    navigationTree.setSelectionRow(0);
+                }
+            });
+        }
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel != null) {
+            targets.add(panel::focusEditorArea);
+            targets.add(() -> {
+                showBottomPanel();
+                panel.focusResultArea();
+            });
+        } else {
+            targets.add(this::focusSharedResults);
+        }
+        if (targets.isEmpty()) {
+            return;
+        }
+        focusCycleIndex = (focusCycleIndex + 1) % targets.size();
+        targets.get(focusCycleIndex).run();
+    }
+
+    private void focusSharedResults() {
+        if (sharedResultView == null) {
+            return;
+        }
+        Component comp = sharedResultView.tabs.getSelectedComponent();
+        if (comp instanceof QueryResultPanel qp) {
+            qp.focusTable();
+        } else {
+            sharedResultView.tabs.requestFocusInWindow();
+        }
+    }
+
     private void onPanelFocused(EditorTabPanel panel) {
         if (panel == null) return;
         activePanel = panel;
@@ -1918,6 +2038,30 @@ public class MainFrame extends JFrame {
         OperationLog.log("停止执行: " + panel.getNote().getTitle());
     }
 
+    private void stopIfRunning() {
+        if (hasRunningExecution()) {
+            stopCurrentExecution();
+        }
+    }
+
+    private boolean hasRunningExecution() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel == null) {
+            return false;
+        }
+        long noteId = panel.getNote().getId();
+        java.util.List<RunningJobHandle> list = runningExecutions.get(noteId);
+        if (list == null) {
+            return false;
+        }
+        for (RunningJobHandle handle : list) {
+            if (handle.future != null && !handle.future.isDone()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private int sanitizePageSize(int desired) {
         int fallback = Config.getDefaultPageSize();
         int max = Config.getMaxPageSize();
@@ -2217,7 +2361,7 @@ public class MainFrame extends JFrame {
         String defaultId = options.get(0).getId();
         String saved = appStateRepository.loadCurrentThemeName(defaultId);
         currentTheme = themeManager.findById(saved).orElse(options.get(0));
-        themeManager.applyThemeAsync(currentTheme, null);
+        themeManager.applyThemeAsync(currentTheme, this::applyUiDefaults);
     }
 
     private void switchTheme(ThemeOption option) {
@@ -2229,7 +2373,32 @@ public class MainFrame extends JFrame {
         }
         currentTheme = option;
         appStateRepository.saveCurrentThemeName(option.getId());
-        themeManager.applyThemeAsync(option, () -> repaint());
+        themeManager.applyThemeAsync(option, () -> {
+            applyUiDefaults();
+            repaint();
+        });
+    }
+
+    private void applyUiDefaults() {
+        FontUIResource uiFont = new FontUIResource(uiBaseFont);
+        java.util.Enumeration<Object> keys = UIManager.getDefaults().keys();
+        while (keys.hasMoreElements()) {
+            Object key = keys.nextElement();
+            Object value = UIManager.get(key);
+            if (value instanceof Font) {
+                UIManager.put(key, uiFont);
+            }
+        }
+        UIManager.put("defaultFont", uiFont);
+        UIManager.put("Table.rowHeight", 24);
+        UIManager.put("Tree.rowHeight", 22);
+        UIManager.put("Table.selectionBackground", new Color(0xDCE6F5));
+        UIManager.put("Table.selectionForeground", new Color(0x0F1F3A));
+        UIManager.put("Tree.selectionBackground", new Color(0xDCE6F5));
+        UIManager.put("Tree.selectionForeground", new Color(0x0F1F3A));
+        UIManager.put("SplitPane.border", BorderFactory.createEmptyBorder());
+        UIManager.put("ScrollPane.border", BorderFactory.createEmptyBorder());
+        UIManager.put("TabbedPane.contentBorderInsets", new Insets(8, 8, 8, 8));
     }
 
     private EditorTabPanel extractPanel(Component comp) {
@@ -2346,11 +2515,19 @@ public class MainFrame extends JFrame {
                 this::cycleFocus);
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addKeyEventDispatcher(e -> {
-                    if (e.getID() == KeyEvent.KEY_PRESSED
-                            && e.isAltDown()
-                            && e.getKeyCode() == KeyEvent.VK_E) {
-                        toggleSuggestionMode();
-                        return true;
+                    if (e.getID() == KeyEvent.KEY_PRESSED) {
+                        if (e.isAltDown() && e.getKeyCode() == KeyEvent.VK_E) {
+                            toggleSuggestionMode();
+                            return true;
+                        }
+                        if (e.isControlDown() && e.getKeyCode() == KeyEvent.VK_TAB) {
+                            navigateEditors(!e.isShiftDown());
+                            return true;
+                        }
+                        if (e.isControlDown() && e.getKeyCode() == KeyEvent.VK_ENTER) {
+                            executeCurrentSql();
+                            return true;
+                        }
                     }
                     return false;
                 });
@@ -2428,6 +2605,30 @@ public class MainFrame extends JFrame {
         }
         objectBrowserDialog.setVisible(true);
         objectBrowserDialog.reload();
+    }
+
+    private void showShortcutDialog() {
+        String content = "快捷键列表\n" +
+                "Ctrl+Enter  执行当前 SQL\n" +
+                "Ctrl+W      关闭当前标签\n" +
+                "Ctrl+Tab    切换到下一个标签/窗口\n" +
+                "Ctrl+Shift+Tab 切换到上一个标签/窗口\n" +
+                "Ctrl+L      聚焦到编辑器\n" +
+                "Esc         停止/取消正在执行的任务\n" +
+                "F6          对象树/编辑器/结果区循环焦点\n" +
+                "Alt+W       SQL 片段库\n" +
+                "Alt+Q       执行历史\n" +
+                "Ctrl+,      SQL 编辑器选项";
+        JDialog dialog = new JDialog(this, "Shortcuts", true);
+        JTextArea area = new JTextArea(content);
+        area.setEditable(false);
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        area.setBorder(new EmptyBorder(12, 12, 12, 12));
+        dialog.setLayout(new BorderLayout());
+        dialog.add(new JScrollPane(area), BorderLayout.CENTER);
+        dialog.setSize(420, 340);
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
     }
 
     private void refreshObjectBrowserTree() {

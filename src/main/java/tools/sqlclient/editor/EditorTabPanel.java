@@ -711,6 +711,14 @@ public class EditorTabPanel extends JPanel {
         suggestionEngine.closePopup();
     }
 
+    public void focusEditorArea() {
+        textArea.requestFocusInWindow();
+    }
+
+    public void focusResultArea() {
+        resultArea.focusCurrent();
+    }
+
     public void revealMatch(int offset, String keyword) {
         String text = textArea.getText();
         if (text == null) {

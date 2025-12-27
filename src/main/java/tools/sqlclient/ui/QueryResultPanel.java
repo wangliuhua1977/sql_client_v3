@@ -44,6 +44,7 @@ public class QueryResultPanel extends JPanel {
     private final JPanel cards = new JPanel(new CardLayout());
     private static final String CARD_TABLE = "table";
     private static final String CARD_INFO = "info";
+    private final Color borderColor = new Color(228, 231, 236);
     private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
         private final Color even = new Color(249, 251, 253);
         private final Color odd = Color.WHITE;
@@ -89,6 +90,8 @@ public class QueryResultPanel extends JPanel {
         table.setShowGrid(false);
         table.setIntercellSpacing(new Dimension(0, 0));
         table.setRowHeight(24);
+        table.setSelectionBackground(new Color(0xDCE6F5));
+        table.setSelectionForeground(new Color(0x0F1F3A));
         table.setFillsViewportHeight(true);
         table.setBorder(UiStyle.thinLine());
         table.setSelectionBackground(UiStyle.SELECTION);
@@ -109,8 +112,14 @@ public class QueryResultPanel extends JPanel {
 
         infoTable.setFillsViewportHeight(true);
         infoTable.setRowHeight(24);
+        infoTable.setShowGrid(false);
+        infoTable.setIntercellSpacing(new Dimension(0, 0));
+        infoTable.setSelectionBackground(new Color(0xDCE6F5));
+        infoTable.setSelectionForeground(new Color(0x0F1F3A));
+        infoTable.setDefaultRenderer(Object.class, stripedRenderer);
         JScrollPane infoScroll = new JScrollPane(infoTable);
         infoScroll.getViewport().setBackground(Color.WHITE);
+        infoScroll.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor));
 
         cards.add(scrollPane, CARD_TABLE);
         cards.add(infoScroll, CARD_INFO);
@@ -183,6 +192,13 @@ public class QueryResultPanel extends JPanel {
         resizeColumns();
     }
 
+    public void focusTable() {
+        table.requestFocusInWindow();
+        if (table.getRowCount() > 0 && table.getSelectedRowCount() == 0) {
+            table.setRowSelectionInterval(0, 0);
+        }
+    }
+
     public void resetColumns() {
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         resizeColumns();
@@ -211,6 +227,7 @@ public class QueryResultPanel extends JPanel {
     }
 
     private void applyStripedRenderer() {
+        table.setDefaultRenderer(Object.class, stripedRenderer);
         for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setCellRenderer(stripedRenderer);
         }
