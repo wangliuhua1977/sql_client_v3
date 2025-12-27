@@ -32,11 +32,14 @@ import tools.sqlclient.ui.DockManager;
 import tools.sqlclient.ui.DockPosition;
 import tools.sqlclient.ui.LayoutState;
 import tools.sqlclient.ui.LogPanel;
+import tools.sqlclient.ui.UiStyle;
 
 import javax.swing.*;
 import javax.swing.BorderFactory;
 import javax.swing.border.EmptyBorder;
+import javax.swing.border.MatteBorder;
 import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.tree.DefaultTreeCellRenderer;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.plaf.basic.BasicInternalFrameUI;
 import javax.swing.plaf.FontUIResource;
@@ -127,11 +130,15 @@ public class MainFrame extends JFrame {
     private JPanel rightPanel;
     private JPanel statusBar;
     private JTabbedPane resultTabs;
+    private JTree objectTree;
+    private JTextField objectFilterField;
     private JTextArea messageArea;
     private JPanel auxiliaryPanel;
     private JTabbedPane auxiliaryTabs;
     private JComponent historyPanel;
     private JComponent inspectorPanel;
+    private ShortcutsDialog shortcutsDialog;
+    private int focusCyclePointer = -1;
     private ObjectBrowserDialog objectBrowserDialog;
     private JTree navigationTree;
     private boolean leftVisible = true;
@@ -785,6 +792,7 @@ public class MainFrame extends JFrame {
         JMenu file = new JMenu("文件");
         JMenu edit = new JMenu("编辑");
         JMenu run = new JMenu("运行");
+        JMenu preferences = new JMenu("首选项");
         JMenu view = new JMenu("视图");
         JMenu tools = new JMenu("工具");
         JMenu help = new JMenu("帮助");
@@ -797,7 +805,7 @@ public class MainFrame extends JFrame {
         resultsItem.addActionListener(e -> toggleBottomPanel());
         view.add(resultsItem);
 
-        JCheckBoxMenuItem logsItem = new JCheckBoxMenuItem("显示日志面板", rightVisible);
+        JCheckBoxMenuItem logsItem = new JCheckBoxMenuItem("显示日志面板", false);
         logsItem.addActionListener(e -> {
             if (logsItem.isSelected()) {
                 focusAuxiliaryPanel(logPanel);
@@ -826,266 +834,11 @@ public class MainFrame extends JFrame {
             }
         });
         view.add(inspectorItem);
+
         view.addSeparator();
-        JMenuItem focusEditor = new JMenuItem(new AbstractAction("聚焦编辑器") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                focusEditorArea();
-            }
-        });
-        focusEditor.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_L, InputEvent.CTRL_DOWN_MASK));
-        view.add(focusEditor);
-        JMenuItem cycleFocus = new JMenuItem(new AbstractAction("循环焦点") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                focusNextMajorArea();
-            }
-        });
-        cycleFocus.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0));
-        view.add(cycleFocus);
-        view.addSeparator();
-        view.add(new JMenuItem(new AbstractAction("重置布局") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                resetLayout();
-            }
-        }));
-
-        file.add(new JMenuItem(new AbstractAction("新建 PostgreSQL 笔记") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                createNote(DatabaseType.POSTGRESQL);
-            }
-        }));
-        file.add(new JMenuItem(new AbstractAction("新建 Hive 笔记") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                createNote(DatabaseType.HIVE);
-            }
-        }));
-        file.addSeparator();
-        file.add(new JMenuItem(new AbstractAction("导入笔记") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                importNoteFromFile();
-            }
-        }));
-        file.add(new JMenuItem(new AbstractAction("保存当前") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                EditorTabPanel panel = getCurrentPanel();
-                if (panel != null) panel.saveNow();
-            }
-        }));
-        file.add(new JMenuItem(new AbstractAction("保存全部") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                saveAll();
-            }
-        }));
-        file.add(new JMenuItem(new AbstractAction("管理笔记") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                openManageDialog();
-            }
-        }));
-        file.add(new JMenuItem(new AbstractAction("垃圾站") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                openTrashBin();
-            }
-        }));
-        JMenuItem closeCurrent = new JMenuItem(new AbstractAction("关闭当前标签") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                closeCurrentContainer();
-            }
-        });
-        closeCurrent.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.CTRL_DOWN_MASK));
-        file.add(closeCurrent);
-        file.addSeparator();
-        file.add(new JMenuItem(new AbstractAction("退出") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                dispose();
-                System.exit(0);
-            }
-        }));
-
-        JMenuItem runCurrent = new JMenuItem(new AbstractAction("执行当前") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                executeCurrentSql();
-            }
-        });
-        runCurrent.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK));
-        run.add(runCurrent);
-
-        JMenuItem stopCurrent = new JMenuItem(new AbstractAction("停止/取消执行") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                stopIfRunning();
-            }
-        });
-        stopCurrent.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0));
-        run.add(stopCurrent);
-
-        JMenuItem focusEditorRun = new JMenuItem(new AbstractAction("切换 Tab (下一个)") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                navigateEditors(true);
-            }
-        });
-        focusEditorRun.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK));
-        run.add(focusEditorRun);
-        JMenuItem focusEditorRunPrev = new JMenuItem(new AbstractAction("切换 Tab (上一个)") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                navigateEditors(false);
-            }
-        });
-        focusEditorRunPrev.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
-        run.add(focusEditorRunPrev);
-
-        JMenuItem editorSettings = new JMenuItem(new AbstractAction("SQL 编辑器选项…") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                openEditorSettings();
-            }
-        });
-        editorSettings.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_COMMA, InputEvent.CTRL_DOWN_MASK));
-        edit.add(editorSettings);
-
-        tools.add(new JMenuItem(new AbstractAction("刷新元数据") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                OperationLog.log("用户手动刷新元数据");
-                metadataService.refreshMetadataAsync(MainFrame.this::handleMetadataRefreshResult);
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("Refresh Metadata (Large)") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                OperationLog.log("开发者自测：大规模元数据刷新");
-                metadataService.refreshMetadataAsync(true, result -> {
-                    handleMetadataRefreshResult(result);
-                    SwingUtilities.invokeLater(() -> {
-                        String msg;
-                        int messageType;
-                        if (result != null && result.success()) {
-                            msg = String.format("刷新成功%n对象: %d%n列: %d%n批次: %d%n耗时: %d ms",
-                                    result.totalObjects(),
-                                    result.totalColumns(),
-                                    result.batches(),
-                                    result.durationMillis());
-                            messageType = JOptionPane.INFORMATION_MESSAGE;
-                        } else {
-                            msg = "刷新失败: " + (result == null ? "未知" : result.message());
-                            messageType = JOptionPane.ERROR_MESSAGE;
-                        }
-                        JOptionPane.showMessageDialog(MainFrame.this, msg, "Refresh Metadata (Large)", messageType);
-                    });
-                });
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("取消元数据刷新") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                OperationLog.log("用户请求取消元数据刷新");
-                metadataService.cancelRefresh();
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("重置元数据") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                int option = JOptionPane.showConfirmDialog(MainFrame.this,
-                        "重置将清空本地表/函数/存储过程/字段元数据，使用频次也会被清空。是否继续？",
-                        "重置元数据",
-                        JOptionPane.YES_NO_OPTION,
-                        JOptionPane.WARNING_MESSAGE);
-                if (option == JOptionPane.YES_OPTION) {
-                    OperationLog.log("确认重置元数据并重新拉取");
-                    metadataService.resetMetadataAsync(result -> {
-                        handleMetadataRefreshResult(result);
-                        JOptionPane.showMessageDialog(MainFrame.this,
-                                "已重置并重新获取元数据。",
-                                "完成",
-                                JOptionPane.INFORMATION_MESSAGE);
-                    });
-                }
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("开启 Debug 模式") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                enableDebugMode();
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("备份本地数据库") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                backupLocalDatabase();
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("恢复本地数据库") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                restoreLocalDatabase();
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("SQL片段库 (Alt+W)") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                getQuickSqlSnippetDialog().toggleVisible();
-            }
-        }));
-        tools.add(new JMenuItem(new AbstractAction("执行历史 (Alt+Q)") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                getExecutionHistoryDialog().toggleVisible();
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("定时备份设置") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                configureScheduledBackup();
-            }
-        }));
-
-        tools.add(new JMenuItem(new AbstractAction("文本解析") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                TextParseDialog dialog = new TextParseDialog(MainFrame.this);
-                dialog.setVisible(true);
-            }
-        }));
-
-        view.add(new JMenuItem(new AbstractAction("切换左侧面板") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                toggleLeftPanel();
-            }
-        }));
-        view.add(new JMenuItem(new AbstractAction("切换底部面板") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                toggleBottomPanel();
-            }
-        }));
-        view.add(new JMenuItem(new AbstractAction("切换右侧面板") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                toggleRightPanel();
-            }
-        }));
+        view.add(menuItem("切换左侧面板", this::toggleLeftPanel));
+        view.add(menuItem("切换底部面板", this::toggleBottomPanel));
+        view.add(menuItem("切换右侧面板", this::toggleRightPanel));
 
         JMenu logDockMenu = new JMenu("日志停靠位置");
         ButtonGroup logGroup = new ButtonGroup();
@@ -1094,28 +847,6 @@ public class MainFrame extends JFrame {
         addDockMenuItem(logDockMenu, logGroup, "右侧", DockPosition.RIGHT, currentDock == DockPosition.RIGHT);
         addDockMenuItem(logDockMenu, logGroup, "浮动窗口", DockPosition.FLOATING, currentDock == DockPosition.FLOATING);
         view.add(logDockMenu);
-
-        view.add(new JMenuItem(new AbstractAction("重置布局") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                resetLayout();
-            }
-        }));
-
-        view.add(new JMenuItem(new AbstractAction("对象浏览器") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                showObjectBrowser();
-            }
-        }));
-
-        view.add(new JMenuItem(new AbstractAction("异步任务列表") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                AsyncJobListDialog dialog = new AsyncJobListDialog(MainFrame.this, sqlExecutionService);
-                dialog.setVisible(true);
-            }
-        }));
 
         JMenu themeMenu = new JMenu("主题");
         ButtonGroup themeGroup = new ButtonGroup();
@@ -1138,18 +869,91 @@ public class MainFrame extends JFrame {
         panelModeItem.addActionListener(e -> switchToPanelMode());
         view.add(windowModeItem);
         view.add(panelModeItem);
+        view.add(menuItem("重置布局", this::resetLayout));
 
-        view.add(new JMenuItem(new AbstractAction("平铺窗口") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                tileFrames();
-            }
+        file.add(menuItem("新建 PostgreSQL 笔记", () -> createNote(DatabaseType.POSTGRESQL)));
+        file.add(menuItem("新建 Hive 笔记", () -> createNote(DatabaseType.HIVE)));
+        file.addSeparator();
+        file.add(menuItem("导入笔记", this::importNoteFromFile));
+        file.add(menuItem("保存当前", () -> {
+            EditorTabPanel panel = getCurrentPanel();
+            if (panel != null) panel.saveNow();
+        }));
+        file.add(menuItem("保存全部", this::saveAll));
+        file.add(menuItem("管理笔记", this::openManageDialog));
+        file.add(menuItem("垃圾站", this::openTrashBin));
+        file.addSeparator();
+        JMenuItem closeCurrent = menuItem("关闭当前标签", this::closeCurrentContainer);
+        closeCurrent.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.CTRL_DOWN_MASK));
+        file.add(closeCurrent);
+        file.addSeparator();
+        file.add(menuItem("退出", () -> {
+            dispose();
+            System.exit(0);
         }));
 
-        help.add(new JMenuItem(new AbstractAction("使用说明") {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                showUsageGuide();
+        JMenuItem editorSettings = menuItem("SQL 编辑器选项…", this::openEditorSettings);
+        editorSettings.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_COMMA, InputEvent.CTRL_DOWN_MASK));
+        preferences.add(editorSettings);
+
+        JMenuItem executeItem = menuItem("执行当前", () -> executeCurrentSql(true));
+        executeItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK));
+        run.add(executeItem);
+        JMenuItem stopItem = menuItem("停止执行", this::stopCurrentExecution);
+        stopItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0));
+        run.add(stopItem);
+        JMenuItem focusEditorItem = menuItem("聚焦编辑器", this::focusCurrentEditor);
+        focusEditorItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_L, InputEvent.CTRL_DOWN_MASK));
+        run.add(focusEditorItem);
+
+        tools.add(menuItem("刷新元数据", () -> {
+            OperationLog.log("用户手动刷新元数据");
+            metadataService.refreshMetadataAsync(MainFrame.this::handleMetadataRefreshResult);
+        }));
+
+        tools.add(menuItem("Refresh Metadata (Large)", () -> {
+            OperationLog.log("开发者自测：大规模元数据刷新");
+            metadataService.refreshMetadataAsync(true, result -> {
+                handleMetadataRefreshResult(result);
+                SwingUtilities.invokeLater(() -> {
+                    String msg;
+                    int messageType;
+                    if (result != null && result.success()) {
+                        msg = String.format("刷新成功%n对象: %d%n列: %d%n批次: %d%n耗时: %d ms",
+                                result.totalObjects(),
+                                result.totalColumns(),
+                                result.batches(),
+                                result.durationMillis());
+                        messageType = JOptionPane.INFORMATION_MESSAGE;
+                    } else {
+                        msg = "刷新失败: " + (result == null ? "未知" : result.message());
+                        messageType = JOptionPane.ERROR_MESSAGE;
+                    }
+                    JOptionPane.showMessageDialog(MainFrame.this, msg, "Refresh Metadata (Large)", messageType);
+                });
+            });
+        }));
+
+        tools.add(menuItem("取消元数据刷新", () -> {
+            OperationLog.log("用户请求取消元数据刷新");
+            metadataService.cancelRefresh();
+        }));
+
+        tools.add(menuItem("重置元数据", () -> {
+            int option = JOptionPane.showConfirmDialog(MainFrame.this,
+                    "重置将清空本地表/函数/存储过程/字段元数据，使用频次也会被清空。是否继续？",
+                    "重置元数据",
+                    JOptionPane.YES_NO_OPTION,
+                    JOptionPane.WARNING_MESSAGE);
+            if (option == JOptionPane.YES_OPTION) {
+                OperationLog.log("确认重置元数据并重新拉取");
+                metadataService.resetMetadataAsync(result -> {
+                    handleMetadataRefreshResult(result);
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "已重置并重新获取元数据。",
+                            "完成",
+                            JOptionPane.INFORMATION_MESSAGE);
+                });
             }
         }));
         JMenuItem shortcutHelp = new JMenuItem(new AbstractAction("快捷键列表") {
@@ -1161,9 +965,37 @@ public class MainFrame extends JFrame {
         shortcutHelp.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_SLASH, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
         help.add(shortcutHelp);
 
+        tools.add(menuItem("开启 Debug 模式", this::enableDebugMode));
+        tools.add(menuItem("备份本地数据库", this::backupLocalDatabase));
+        tools.add(menuItem("恢复本地数据库", this::restoreLocalDatabase));
+        tools.add(menuItem("SQL片段库 (Alt+W)", () -> getQuickSqlSnippetDialog().toggleVisible()));
+        tools.add(menuItem("执行历史 (Alt+Q)", () -> getExecutionHistoryDialog().toggleVisible()));
+        tools.add(menuItem("定时备份设置", this::configureScheduledBackup));
+        tools.add(menuItem("文本解析", () -> new TextParseDialog(MainFrame.this).setVisible(true)));
+
+        JMenuItem toggleLeft = menuItem("对象浏览器", this::showObjectBrowser);
+        toggleLeft.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_B, InputEvent.CTRL_DOWN_MASK));
+        view.add(toggleLeft);
+        JMenuItem jobsItem = menuItem("异步任务列表", () -> new AsyncJobListDialog(MainFrame.this, sqlExecutionService).setVisible(true));
+        view.add(jobsItem);
+
+        JMenuItem nextTab = menuItem("下一个标签", () -> switchTab(true));
+        nextTab.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK));
+        window.add(nextTab);
+        JMenuItem prevTab = menuItem("上一个标签", () -> switchTab(false));
+        prevTab.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+        window.add(prevTab);
+        window.add(menuItem("平铺窗口", this::tileFrames));
+
+        JMenuItem shortcuts = menuItem("快捷键一览", this::showShortcutsDialog);
+        shortcuts.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_SLASH, InputEvent.CTRL_DOWN_MASK));
+        help.add(shortcuts);
+        help.add(menuItem("使用说明", this::showUsageGuide));
+
         menuBar.add(file);
         menuBar.add(edit);
         menuBar.add(run);
+        menuBar.add(preferences);
         menuBar.add(view);
         menuBar.add(tools);
         menuBar.add(help);
@@ -1244,13 +1076,13 @@ public class MainFrame extends JFrame {
         leftPanel = buildObjectBrowserPanel();
         centerRightSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, bottomTabbedPane);
         centerRightSplit.setResizeWeight(0.72);
-        centerRightSplit.setDividerSize(8);
+        centerRightSplit.setDividerSize(6);
         centerRightSplit.setContinuousLayout(true);
         centerRightSplit.setBorder(BorderFactory.createEmptyBorder());
 
         leftSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, centerRightSplit);
         leftSplit.setResizeWeight(0.2);
-        leftSplit.setDividerSize(8);
+        leftSplit.setDividerSize(6);
         leftSplit.setContinuousLayout(true);
         leftSplit.setBorder(BorderFactory.createEmptyBorder());
 
@@ -1288,19 +1120,20 @@ public class MainFrame extends JFrame {
 
     private JPanel buildObjectBrowserPanel() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
-        panel.setBorder(new EmptyBorder(8, 8, 8, 8));
+        panel.setBorder(UiStyle.panelPadding());
+        panel.setBackground(Color.WHITE);
         DefaultMutableTreeNode root = new DefaultMutableTreeNode("对象");
         DefaultTreeModel model = new DefaultTreeModel(root);
-        navigationTree = new JTree(model);
-        navigationTree.setRowHeight(22);
-        navigationTree.setRootVisible(true);
-        navigationTree.setShowsRootHandles(true);
-        navigationTree.setBorder(new EmptyBorder(4, 6, 4, 6));
-        navigationTree.setCellRenderer(new MinimalTreeCellRenderer(uiBaseFont));
+        objectTree = new JTree(model);
+        objectTree.setRootVisible(true);
+        objectTree.setShowsRootHandles(true);
+        objectTree.setRowHeight(22);
+        objectTree.setBorder(new EmptyBorder(4, 0, 0, 0));
+        objectTree.setCellRenderer(new MinimalTreeCellRenderer());
 
-        JTextField filter = new JTextField();
-        filter.setToolTipText("输入关键字刷新对象树");
-        filter.addActionListener(e -> refreshObjectTree(model, root, filter.getText()));
+        objectFilterField = new JTextField();
+        objectFilterField.setToolTipText("输入关键字刷新对象树");
+        objectFilterField.addActionListener(e -> refreshObjectTree(model, root, objectFilterField.getText()));
 
         JButton openDialog = new JButton("弹出");
         openDialog.addActionListener(e -> {
@@ -1318,13 +1151,15 @@ public class MainFrame extends JFrame {
                     });
             objectBrowserDialog.setVisible(true);
         });
-        JPanel header = new JPanel(new BorderLayout(4, 4));
-        header.add(filter, BorderLayout.CENTER);
+        JPanel header = new JPanel(new BorderLayout(8, 8));
+        header.setOpaque(false);
+        header.setBorder(UiStyle.sectionLine());
+        header.add(objectFilterField, BorderLayout.CENTER);
         header.add(openDialog, BorderLayout.EAST);
         header.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(230, 233, 238)));
         panel.add(header, BorderLayout.NORTH);
-        JScrollPane treeScroll = new JScrollPane(navigationTree);
-        treeScroll.setBorder(BorderFactory.createEmptyBorder());
+        JScrollPane treeScroll = new JScrollPane(objectTree);
+        treeScroll.setBorder(UiStyle.thinLine());
         panel.add(treeScroll, BorderLayout.CENTER);
 
         refreshObjectTree(model, root, "");
@@ -1575,8 +1410,11 @@ public class MainFrame extends JFrame {
 
     private void buildStatusBar() {
         JPanel status = new JPanel(new BorderLayout());
-        status.setBorder(new EmptyBorder(4, 8, 4, 8));
+        status.setBorder(new MatteBorder(1, 0, 0, 0, UiStyle.BORDER));
+        status.setBackground(UiStyle.SECTION_BG);
+        status.setOpaque(true);
         JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        left.setOpaque(false);
         left.add(statusLabel);
         left.add(autosaveLabel);
         left.add(taskLabel);
@@ -2132,10 +1970,8 @@ public class MainFrame extends JFrame {
         SharedResultView() {
             tabs.setBorder(BorderFactory.createEmptyBorder());
             scroll = new JScrollPane(tabs);
-            scroll.setBorder(BorderFactory.createEmptyBorder());
-            wrapper.setBorder(BorderFactory.createCompoundBorder(
-                    BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(228, 231, 236)),
-                    new EmptyBorder(8, 0, 0, 0)));
+            scroll.setBorder(new EmptyBorder(0, 0, 0, 0));
+            wrapper.setBorder(UiStyle.thinLine());
             wrapper.add(scroll, BorderLayout.CENTER);
         }
 
@@ -2152,6 +1988,35 @@ public class MainFrame extends JFrame {
         void clear() {
             tabs.removeAll();
             tabs.setVisible(false);
+        }
+    }
+
+    private static class MinimalTreeCellRenderer extends DefaultTreeCellRenderer {
+        private final Color selectionBg = UiStyle.SELECTION;
+        private final Font sectionFont = getFont().deriveFont(Font.BOLD);
+
+        @Override
+        public Component getTreeCellRendererComponent(JTree tree, Object value, boolean sel, boolean expanded, boolean leaf, int row, boolean hasFocus) {
+            JLabel label = (JLabel) super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus);
+            label.setBorder(new EmptyBorder(2, 4, 2, 4));
+            if (row == 0) {
+                label.setFont(sectionFont);
+            } else if (!leaf) {
+                label.setFont(label.getFont().deriveFont(Font.BOLD));
+                label.setForeground(new Color(70, 78, 92));
+            } else {
+                label.setFont(label.getFont().deriveFont(Font.PLAIN));
+                label.setForeground(new Color(50, 56, 66));
+            }
+            if (sel) {
+                label.setOpaque(true);
+                label.setBackground(selectionBg);
+            } else {
+                label.setOpaque(false);
+            }
+            setBackgroundSelectionColor(selectionBg);
+            setTextSelectionColor(new Color(30, 34, 41));
+            return label;
         }
     }
 
@@ -2228,21 +2093,126 @@ public class MainFrame extends JFrame {
 
     private void styleToolbarButton(JButton button) {
         button.setFocusPainted(false);
-        button.setContentAreaFilled(false);
-        button.setBorder(new javax.swing.border.LineBorder(new Color(46, 170, 220), 2, true));
-        button.setMargin(new Insets(6, 10, 6, 10));
+        button.setContentAreaFilled(true);
+        button.setBackground(Color.WHITE);
+        button.setBorder(UiStyle.thinLine());
+        button.setMargin(new Insets(6, 12, 6, 12));
     }
 
     private void refreshToolbarButtonStyles() {
-        Color active = new Color(46, 170, 220);
         if (executeButton != null) {
-            executeButton.setBorder(new javax.swing.border.LineBorder(
-                    executeButton.isEnabled() ? active : Color.DARK_GRAY, 2, true));
+            executeButton.setForeground(executeButton.isEnabled() ? Color.BLACK : Color.GRAY);
         }
         if (stopButton != null) {
-            stopButton.setBorder(new javax.swing.border.LineBorder(
-                    stopButton.isEnabled() ? active : Color.DARK_GRAY, 2, true));
+            stopButton.setForeground(stopButton.isEnabled() ? Color.BLACK : Color.GRAY);
         }
+    }
+
+    private JMenuItem menuItem(String text, Runnable action) {
+        JMenuItem item = new JMenuItem(text);
+        item.addActionListener(e -> action.run());
+        return item;
+    }
+
+    private void focusCurrentEditor() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel != null) {
+            panel.focusEditor();
+        }
+    }
+
+    private void focusResultArea() {
+        if (windowMode) {
+            EditorTabPanel panel = getCurrentPanel();
+            if (panel != null) {
+                panel.focusResultArea();
+            }
+        } else {
+            sharedResultView.tabs.requestFocusInWindow();
+        }
+    }
+
+    private void closeCurrentContainer() {
+        if (windowMode) {
+            JInternalFrame frame = desktopPane.getSelectedFrame();
+            if (frame != null) {
+                EditorTabPanel panel = extractPanelFromFrame(frame);
+                if (panel != null) {
+                    panelCache.remove(panel.getNote().getId());
+                }
+                frame.dispose();
+            }
+        } else {
+            int idx = tabbedPane.getSelectedIndex();
+            if (idx >= 0) {
+                Component comp = tabbedPane.getComponentAt(idx);
+                EditorTabPanel panel = extractPanel(comp);
+                if (panel != null) {
+                    panelCache.remove(panel.getNote().getId());
+                }
+                tabbedPane.removeTabAt(idx);
+            }
+        }
+        persistOpenFrames();
+        updateExecutionButtons();
+    }
+
+    private void switchTab(boolean next) {
+        if (windowMode) {
+            JInternalFrame[] frames = desktopPane.getAllFrames();
+            if (frames.length == 0) return;
+            java.util.List<JInternalFrame> list = java.util.Arrays.asList(frames);
+            JInternalFrame selected = desktopPane.getSelectedFrame();
+            int idx = list.indexOf(selected);
+            int target = (idx + (next ? 1 : -1) + list.size()) % list.size();
+            try {
+                list.get(target).setSelected(true);
+                list.get(target).toFront();
+            } catch (Exception ignored) {
+            }
+        } else {
+            int count = tabbedPane.getTabCount();
+            if (count == 0) return;
+            int idx = tabbedPane.getSelectedIndex();
+            int target = (idx + (next ? 1 : -1) + count) % count;
+            tabbedPane.setSelectedIndex(target);
+        }
+    }
+
+    private void cycleFocus() {
+        java.util.List<Runnable> targets = new java.util.ArrayList<>();
+        if (objectTree != null && objectTree.isShowing()) {
+            targets.add(() -> objectTree.requestFocusInWindow());
+        }
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel != null) {
+            targets.add(panel::focusEditor);
+        }
+        targets.add(this::focusResultArea);
+        if (targets.isEmpty()) {
+            return;
+        }
+        focusCyclePointer = (focusCyclePointer + 1) % targets.size();
+        targets.get(focusCyclePointer).run();
+    }
+
+    private void showShortcutsDialog() {
+        if (shortcutsDialog == null) {
+            java.util.List<String> lines = java.util.List.of(
+                    "Ctrl+Enter  执行当前 SQL",
+                    "Esc        停止/取消执行",
+                    "Ctrl+W     关闭当前标签",
+                    "Ctrl+Tab   切换下一标签",
+                    "Ctrl+Shift+Tab 切换上一标签",
+                    "Ctrl+L     聚焦编辑器",
+                    "F6         在对象树/编辑器/结果之间切换",
+                    "Alt+E      切换智能联想",
+                    "Alt+W      打开 SQL 片段库",
+                    "Alt+Q      打开执行历史"
+            );
+            shortcutsDialog = new ShortcutsDialog(this, lines);
+        }
+        shortcutsDialog.setVisible(true);
     }
 
     private void openManageDialog() {
@@ -2516,48 +2486,33 @@ public class MainFrame extends JFrame {
     private void installGlobalShortcuts() {
         InputMap inputMap = getRootPane().getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW);
         ActionMap actionMap = getRootPane().getActionMap();
-        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.ALT_DOWN_MASK), "toggle_quick_snippet_dialog");
-        actionMap.put("toggle_quick_snippet_dialog", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                getQuickSqlSnippetDialog().toggleVisible();
-            }
-        });
-        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_Q, InputEvent.ALT_DOWN_MASK), "toggle_exec_history_dialog");
-        actionMap.put("toggle_exec_history_dialog", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                getExecutionHistoryDialog().toggleVisible();
-            }
-        });
-        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.CTRL_DOWN_MASK), "close_current_container");
-        actionMap.put("close_current_container", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                closeCurrentContainer();
-            }
-        });
-        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_L, InputEvent.CTRL_DOWN_MASK), "focus_editor_area");
-        actionMap.put("focus_editor_area", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                focusEditorArea();
-            }
-        });
-        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "stop_execution_if_running");
-        actionMap.put("stop_execution_if_running", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                stopIfRunning();
-            }
-        });
-        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0), "cycle_focus");
-        actionMap.put("cycle_focus", new AbstractAction() {
-            @Override
-            public void actionPerformed(ActionEvent e) {
-                focusNextMajorArea();
-            }
-        });
+        bindShortcut(inputMap, actionMap, "toggle_quick_snippet_dialog",
+                KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.ALT_DOWN_MASK),
+                () -> getQuickSqlSnippetDialog().toggleVisible());
+        bindShortcut(inputMap, actionMap, "toggle_exec_history_dialog",
+                KeyStroke.getKeyStroke(KeyEvent.VK_Q, InputEvent.ALT_DOWN_MASK),
+                () -> getExecutionHistoryDialog().toggleVisible());
+        bindShortcut(inputMap, actionMap, "execute_sql",
+                KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK),
+                () -> executeCurrentSql(true));
+        bindShortcut(inputMap, actionMap, "stop_sql",
+                KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0),
+                this::stopCurrentExecution);
+        bindShortcut(inputMap, actionMap, "close_tab",
+                KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.CTRL_DOWN_MASK),
+                this::closeCurrentContainer);
+        bindShortcut(inputMap, actionMap, "focus_editor",
+                KeyStroke.getKeyStroke(KeyEvent.VK_L, InputEvent.CTRL_DOWN_MASK),
+                this::focusCurrentEditor);
+        bindShortcut(inputMap, actionMap, "next_tab",
+                KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK),
+                () -> switchTab(true));
+        bindShortcut(inputMap, actionMap, "prev_tab",
+                KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK),
+                () -> switchTab(false));
+        bindShortcut(inputMap, actionMap, "cycle_focus",
+                KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0),
+                this::cycleFocus);
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addKeyEventDispatcher(e -> {
                     if (e.getID() == KeyEvent.KEY_PRESSED) {
@@ -2576,6 +2531,16 @@ public class MainFrame extends JFrame {
                     }
                     return false;
                 });
+    }
+
+    private void bindShortcut(InputMap inputMap, ActionMap actionMap, String key, KeyStroke stroke, Runnable action) {
+        inputMap.put(stroke, key);
+        actionMap.put(key, new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                action.run();
+            }
+        });
     }
 
     private QuickSqlSnippetDialog getQuickSqlSnippetDialog() {

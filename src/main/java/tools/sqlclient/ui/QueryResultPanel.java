@@ -4,11 +4,9 @@ import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlTopLevelClassifier;
-
 import tools.sqlclient.ui.table.TableCopySupport;
 
 import javax.swing.*;
-import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.JTableHeader;
@@ -17,9 +15,9 @@ import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.util.Arrays;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -48,37 +46,32 @@ public class QueryResultPanel extends JPanel {
     private static final String CARD_INFO = "info";
     private final Color borderColor = new Color(228, 231, 236);
     private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
-        private final Color even = new Color(248, 251, 255);
-        private final Color odd = new Color(244, 247, 252);
-        private final Color selection = new Color(0xDCE6F5);
-        private final Color selectionText = new Color(0x0F1F3A);
+        private final Color even = new Color(249, 251, 253);
+        private final Color odd = Color.WHITE;
 
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-            JLabel label = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            label.setText(value == null ? "" : value.toString());
-            label.setHorizontalAlignment(SwingConstants.LEFT);
-            label.setBorder(new EmptyBorder(0, 8, 0, 8));
+            Object display = value == null ? "" : value;
+            Component c = super.getTableCellRendererComponent(table, display, isSelected, hasFocus, row, column);
             if (isSelected) {
-                label.setBackground(selection);
-                label.setForeground(selectionText);
+                c.setBackground(UiStyle.SELECTION);
+                c.setForeground(Color.DARK_GRAY);
             } else {
-                label.setBackground(row % 2 == 0 ? even : odd);
-                label.setForeground(new Color(0x1F2933));
+                c.setBackground(row % 2 == 0 ? even : odd);
+                c.setForeground(new Color(45, 52, 63));
             }
-            return label;
+            setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
+            return c;
         }
     };
 
     public QueryResultPanel(SqlExecResult result, String titleHint) {
         super(new BorderLayout());
-        setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor),
-                new EmptyBorder(8, 8, 8, 8)));
+        setBorder(UiStyle.thinLine());
         setToolTipText(titleHint);
 
         JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
-        header.setBorder(new EmptyBorder(0, 0, 4, 0));
+        header.setBorder(UiStyle.sectionLine());
         header.add(countLabel);
         header.add(statusLabel);
         header.add(elapsedLabel);
@@ -89,7 +82,7 @@ public class QueryResultPanel extends JPanel {
         add(header, BorderLayout.NORTH);
 
         JPanel messagePanel = new JPanel(new BorderLayout());
-        messagePanel.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, borderColor));
+        messagePanel.setBorder(new EmptyBorder(4, 8, 6, 8));
         messagePanel.add(messageLabel, BorderLayout.CENTER);
         add(messagePanel, BorderLayout.SOUTH);
 
@@ -100,20 +93,22 @@ public class QueryResultPanel extends JPanel {
         table.setSelectionBackground(new Color(0xDCE6F5));
         table.setSelectionForeground(new Color(0x0F1F3A));
         table.setFillsViewportHeight(true);
-        table.setBorder(BorderFactory.createLineBorder(borderColor));
+        table.setBorder(UiStyle.thinLine());
+        table.setSelectionBackground(UiStyle.SELECTION);
+        table.setSelectionForeground(Color.DARK_GRAY);
         installCopySupport();
 
         JTableHeader tableHeader = table.getTableHeader();
-        Color headerBg = new Color(245, 247, 250);
+        Color headerBg = new Color(244, 246, 250);
         tableHeader.setBackground(headerBg);
-        tableHeader.setFont(tableHeader.getFont().deriveFont(Font.BOLD));
         tableHeader.setOpaque(true);
-        tableHeader.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, borderColor));
+        tableHeader.setFont(tableHeader.getFont().deriveFont(Font.BOLD));
+        tableHeader.setBorder(UiStyle.sectionLine());
 
         JScrollPane scrollPane = new JScrollPane(table);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
         scrollPane.getViewport().setBackground(Color.WHITE);
-        scrollPane.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor));
+        scrollPane.setBorder(new EmptyBorder(0, 0, 0, 0));
 
         infoTable.setFillsViewportHeight(true);
         infoTable.setRowHeight(24);
