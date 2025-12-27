@@ -944,6 +944,22 @@ public class EditorTabPanel extends JPanel {
         expandResultArea();
     }
 
+    public void focusEditorArea() {
+        SwingUtilities.invokeLater(() -> textArea.requestFocusInWindow());
+    }
+
+    public boolean focusResultArea() {
+        JComponent comp = resultArea.currentComponent();
+        if (comp instanceof QueryResultPanel qp) {
+            qp.focusTable();
+            return true;
+        }
+        if (comp != null) {
+            return comp.requestFocusInWindow();
+        }
+        return resultWrapper.requestFocusInWindow();
+    }
+
     private class ResultArea extends JPanel {
         private final java.util.List<ResultEntry> entries = new ArrayList<>();
         private final CardLayout cards = new CardLayout();
@@ -1001,21 +1017,21 @@ public class EditorTabPanel extends JPanel {
             int clamped = Math.max(0, Math.min(index, entries.size() - 1));
             selector.setSelectedIndex(clamped);
             ResultEntry entry = entries.get(clamped);
-            cards.show(cardPanel, entry.title);
+            cards.show(cardPanel, entry.title());
             updateSummary(entry);
         }
 
         private void updateSummary(ResultEntry entry) {
-            StringBuilder sb = new StringBuilder(entry.title);
-            if (entry.component instanceof QueryResultPanel qp) {
+            StringBuilder sb = new StringBuilder(entry.title());
+            if (entry.component() instanceof QueryResultPanel qp) {
                 sb.append(" | 行 ").append(qp.getVisibleRowCount())
                         .append(" 列 ").append(qp.getVisibleColumnCount());
             }
-            if (entry.hint != null) {
-                sb.append(" | ").append(OperationLog.abbreviate(entry.hint, 60));
+            if (entry.hint() != null) {
+                sb.append(" | ").append(OperationLog.abbreviate(entry.hint(), 60));
             }
             summaryLabel.setText(sb.toString());
-            datasetLabel.setText("结果集: " + entry.title);
+            datasetLabel.setText("结果集: " + entry.title());
         }
 
         private int currentIndex() {
@@ -1025,9 +1041,18 @@ public class EditorTabPanel extends JPanel {
         private void applyToCurrent(java.util.function.Consumer<QueryResultPanel> action) {
             if (entries.isEmpty()) return;
             ResultEntry entry = entries.get(currentIndex());
-            if (entry.component instanceof QueryResultPanel qp) {
+            if (entry.component() instanceof QueryResultPanel qp) {
                 action.accept(qp);
             }
+        }
+
+        private JComponent currentComponent() {
+            if (entries.isEmpty()) {
+                return null;
+            }
+            int idx = currentIndex();
+            idx = Math.max(0, Math.min(idx, entries.size() - 1));
+            return entries.get(idx).component();
         }
     }
 

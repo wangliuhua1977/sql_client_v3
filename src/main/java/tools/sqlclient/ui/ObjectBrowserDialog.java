@@ -8,10 +8,10 @@ import tools.sqlclient.pg.RoutineInfo;
 import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
+import javax.swing.border.EmptyBorder;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
-import javax.swing.tree.DefaultTreeCellRenderer;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -50,6 +50,7 @@ public class ObjectBrowserDialog extends JDialog {
         setSize(420, 600);
         setLocationRelativeTo(owner);
         setLayout(new BorderLayout());
+        ((JComponent) getContentPane()).setBorder(new EmptyBorder(12, 12, 12, 12));
 
         JTextField keyword = new JTextField();
         keyword.setToolTipText("输入表名关键字，支持%分隔模糊");
@@ -66,19 +67,8 @@ public class ObjectBrowserDialog extends JDialog {
 
         tree.setRootVisible(true);
         tree.setShowsRootHandles(true);
-        tree.setCellRenderer(new DefaultTreeCellRenderer() {
-            @Override
-            public Component getTreeCellRendererComponent(JTree tree, Object value, boolean sel, boolean expanded, boolean leaf, int row, boolean hasFocus) {
-                JLabel label = (JLabel) super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus);
-                if (value instanceof DefaultMutableTreeNode node) {
-                    Object user = node.getUserObject();
-                    if (user instanceof TableEntry entry) {
-                        label.setText(entry.name() + " (" + entry.type() + ")");
-                    }
-                }
-                return label;
-            }
-        });
+        tree.setRowHeight(22);
+        tree.setCellRenderer(new MinimalTreeCellRenderer(tree.getFont()));
         tree.addTreeSelectionListener(e -> {
             DefaultMutableTreeNode node = (DefaultMutableTreeNode) tree.getLastSelectedPathComponent();
             if (node == null) return;
@@ -125,8 +115,14 @@ public class ObjectBrowserDialog extends JDialog {
             }
         });
 
-        add(keyword, BorderLayout.NORTH);
-        add(new JScrollPane(tree), BorderLayout.CENTER);
+        JPanel keywordPanel = new JPanel(new BorderLayout());
+        keywordPanel.setBorder(new EmptyBorder(0, 0, 8, 0));
+        keywordPanel.add(keyword, BorderLayout.CENTER);
+        add(keywordPanel, BorderLayout.NORTH);
+
+        JScrollPane scroll = new JScrollPane(tree);
+        scroll.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(230, 234, 240)));
+        add(scroll, BorderLayout.CENTER);
 
         refresh("");
     }

@@ -8,7 +8,7 @@ import tools.sqlclient.exec.SqlTopLevelClassifier;
 import tools.sqlclient.ui.table.TableCopySupport;
 
 import javax.swing.*;
-import javax.swing.border.TitledBorder;
+import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
@@ -45,26 +45,16 @@ public class QueryResultPanel extends JPanel {
     private final JPanel cards = new JPanel(new CardLayout());
     private static final String CARD_TABLE = "table";
     private static final String CARD_INFO = "info";
-    private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
-        private final Color even = new Color(250, 252, 255);
-        private final Color odd = Color.WHITE;
-
-        @Override
-        public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            if (!isSelected) {
-                c.setBackground(row % 2 == 0 ? even : odd);
-            }
-            return c;
-        }
-    };
+    private final DefaultTableCellRenderer unifiedRenderer = new MinimalTableCellRenderer();
 
     public QueryResultPanel(SqlExecResult result, String titleHint) {
         super(new BorderLayout());
-        setBorder(new TitledBorder("结果集"));
+        setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(225, 229, 236)),
+                new EmptyBorder(12, 12, 12, 12)));
         setToolTipText(titleHint);
 
-        JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 4));
         header.add(countLabel);
         header.add(statusLabel);
         header.add(elapsedLabel);
@@ -75,32 +65,38 @@ public class QueryResultPanel extends JPanel {
         add(header, BorderLayout.NORTH);
 
         JPanel messagePanel = new JPanel(new BorderLayout());
-        messagePanel.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+        messagePanel.setBorder(BorderFactory.createEmptyBorder(8, 0, 0, 0));
         messagePanel.add(messageLabel, BorderLayout.CENTER);
         add(messagePanel, BorderLayout.SOUTH);
 
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        table.setShowGrid(true);
-        table.setShowHorizontalLines(true);
-        table.setShowVerticalLines(true);
-        table.setGridColor(new Color(180, 186, 198));
-        table.setIntercellSpacing(new Dimension(1, 1));
+        table.setShowGrid(false);
+        table.setIntercellSpacing(new Dimension(0, 0));
         table.setRowHeight(24);
         table.setFillsViewportHeight(true);
-        table.setBorder(BorderFactory.createLineBorder(new Color(180, 186, 198)));
+        table.setSelectionBackground(new Color(224, 235, 255));
+        table.setSelectionForeground(new Color(30, 35, 45));
+        table.setDefaultRenderer(Object.class, unifiedRenderer);
+        table.setDefaultRenderer(String.class, unifiedRenderer);
+        table.setDefaultRenderer(Number.class, unifiedRenderer);
         installCopySupport();
 
-        Color headerBg = new Color(240, 244, 250);
+        Color headerBg = new Color(245, 248, 252);
         table.getTableHeader().setBackground(headerBg);
         table.getTableHeader().setOpaque(true);
-        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(180, 186, 198)));
+        table.getTableHeader().setFont(table.getFont().deriveFont(Font.BOLD));
+        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(210, 216, 225)));
 
         JScrollPane scrollPane = new JScrollPane(table);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
         scrollPane.getViewport().setBackground(Color.WHITE);
+        scrollPane.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(230, 234, 240)));
 
         infoTable.setFillsViewportHeight(true);
         infoTable.setRowHeight(24);
+        infoTable.setShowGrid(false);
+        infoTable.setIntercellSpacing(new Dimension(0, 0));
+        infoTable.setDefaultRenderer(Object.class, unifiedRenderer);
         JScrollPane infoScroll = new JScrollPane(infoTable);
         infoScroll.getViewport().setBackground(Color.WHITE);
 
@@ -159,7 +155,7 @@ public class QueryResultPanel extends JPanel {
             List<List<String>> rows = result.getRows() != null ? result.getRows() : List.of();
             model.setData(defs, rows);
             applyColumnIdentifiers(defs);
-            applyStripedRenderer();
+            applyUnifiedRenderer();
             table.revalidate();
             table.repaint();
             resizeColumns();
@@ -195,16 +191,16 @@ public class QueryResultPanel extends JPanel {
         applyColumnIdentifiers(defs);
         messageLabel.setText(message);
         setJobStatus(null, "FAILED", 100, null);
-        applyStripedRenderer();
+        applyUnifiedRenderer();
         table.revalidate();
         table.repaint();
         resizeColumns();
         setBusy(false);
     }
 
-    private void applyStripedRenderer() {
+    private void applyUnifiedRenderer() {
         for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
-            table.getColumnModel().getColumn(i).setCellRenderer(stripedRenderer);
+            table.getColumnModel().getColumn(i).setCellRenderer(unifiedRenderer);
         }
     }
 
@@ -444,5 +440,31 @@ public class QueryResultPanel extends JPanel {
             return java.util.List.of(lead);
         }
         return java.util.List.of();
+    }
+
+    public void focusTable() {
+        SwingUtilities.invokeLater(() -> table.requestFocusInWindow());
+    }
+
+    private static class MinimalTableCellRenderer extends DefaultTableCellRenderer {
+        private final Color even = new Color(248, 250, 252);
+        private final Color odd = Color.WHITE;
+        private final Color focusBorder = new Color(210, 220, 230);
+
+        @Override
+        public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+            Object display = value == null ? "" : value;
+            Component c = super.getTableCellRendererComponent(table, display, isSelected, hasFocus, row, column);
+            if (!isSelected) {
+                c.setBackground(row % 2 == 0 ? even : odd);
+            }
+            if (c instanceof JComponent jc) {
+                jc.setBorder(hasFocus
+                        ? BorderFactory.createMatteBorder(0, 0, 1, 0, focusBorder)
+                        : BorderFactory.createEmptyBorder(1, 4, 1, 4));
+                jc.setOpaque(true);
+            }
+            return c;
+        }
     }
 }
