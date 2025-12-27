@@ -36,6 +36,8 @@ import tools.sqlclient.ui.LogPanel;
 import javax.swing.*;
 import javax.swing.BorderFactory;
 import javax.swing.border.EmptyBorder;
+import javax.swing.tree.DefaultMutableTreeNode;
+import javax.swing.tree.DefaultTreeModel;
 import javax.swing.plaf.basic.BasicInternalFrameUI;
 import java.awt.*;
 import java.awt.event.ActionEvent;
@@ -110,10 +112,8 @@ public class MainFrame extends JFrame {
     private EditorTabPanel activePanel;
     private JButton executeButton;
     private JButton stopButton;
-    private JSpinner defaultPageSizeSpinner;
     private JSplitPane leftSplit;
     private JSplitPane centerRightSplit;
-    private JSplitPane verticalSplit;
     private int sharedDividerLocation = -1;
     private JScrollPane sharedResultsScroll;
     private LogPanel logPanel;
@@ -123,6 +123,13 @@ public class MainFrame extends JFrame {
     private JTabbedPane rightTabbedPane;
     private JPanel leftPanel;
     private JPanel rightPanel;
+    private JPanel statusBar;
+    private JTabbedPane resultTabs;
+    private JTextArea messageArea;
+    private JPanel auxiliaryPanel;
+    private JTabbedPane auxiliaryTabs;
+    private JComponent historyPanel;
+    private JComponent inspectorPanel;
     private ObjectBrowserDialog objectBrowserDialog;
     private boolean leftVisible = true;
     private boolean rightVisible = false;
@@ -779,6 +786,51 @@ public class MainFrame extends JFrame {
         JMenu tools = new JMenu("工具");
         JMenu help = new JMenu("帮助");
 
+        JCheckBoxMenuItem objectBrowserItem = new JCheckBoxMenuItem("显示对象浏览器", leftVisible);
+        objectBrowserItem.addActionListener(e -> toggleLeftPanel());
+        view.add(objectBrowserItem);
+
+        JCheckBoxMenuItem resultsItem = new JCheckBoxMenuItem("显示结果区", bottomVisible);
+        resultsItem.addActionListener(e -> toggleBottomPanel());
+        view.add(resultsItem);
+
+        JCheckBoxMenuItem logsItem = new JCheckBoxMenuItem("显示日志面板", rightVisible);
+        logsItem.addActionListener(e -> {
+            if (logsItem.isSelected()) {
+                focusAuxiliaryPanel(logPanel);
+            } else {
+                hideRightPanel();
+            }
+        });
+        view.add(logsItem);
+
+        JCheckBoxMenuItem historyItem = new JCheckBoxMenuItem("显示历史面板", false);
+        historyItem.addActionListener(e -> {
+            if (historyItem.isSelected()) {
+                focusAuxiliaryPanel(historyPanel);
+            } else {
+                hideRightPanel();
+            }
+        });
+        view.add(historyItem);
+
+        JCheckBoxMenuItem inspectorItem = new JCheckBoxMenuItem("显示设置面板", false);
+        inspectorItem.addActionListener(e -> {
+            if (inspectorItem.isSelected()) {
+                focusAuxiliaryPanel(inspectorPanel);
+            } else {
+                hideRightPanel();
+            }
+        });
+        view.add(inspectorItem);
+        view.addSeparator();
+        view.add(new JMenuItem(new AbstractAction("重置布局") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                resetLayout();
+            }
+        }));
+
         file.add(new JMenuItem(new AbstractAction("新建 PostgreSQL 笔记") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -1064,25 +1116,16 @@ public class MainFrame extends JFrame {
         styleToolbarButton(stopButton);
         toolBar.add(executeButton);
         toolBar.add(stopButton);
-        JButton logButton = new JButton("日志");
-        logButton.setToolTipText("打开日志面板");
-        logButton.addActionListener(e -> focusLogPanel());
-        styleToolbarButton(logButton);
-        JButton layoutButton = new JButton("专注");
-        layoutButton.setToolTipText("编辑器区域最大化/恢复");
-        layoutButton.addActionListener(e -> toggleEditorMaximize());
-        styleToolbarButton(layoutButton);
-        toolBar.addSeparator();
-        toolBar.add(logButton);
-        toolBar.add(layoutButton);
-        toolBar.addSeparator();
-        toolBar.add(new JLabel("默认返回条数:"));
-        defaultPageSizeSpinner = new JSpinner(new SpinnerNumberModel(defaultPageSize, 1, Config.getMaxPageSize(), 10));
-        toolBar.add(defaultPageSizeSpinner);
-        JButton applyPageSizeButton = new JButton("应用");
-        applyPageSizeButton.addActionListener(e -> applyDefaultPageSizeFromUi());
-        styleToolbarButton(applyPageSizeButton);
-        toolBar.add(applyPageSizeButton);
+        JButton newTabButton = new JButton("新建标签");
+        newTabButton.setToolTipText("新建笔记标签");
+        newTabButton.addActionListener(e -> createNote(DatabaseType.POSTGRESQL));
+        styleToolbarButton(newTabButton);
+        toolBar.add(newTabButton);
+        JButton toggleLeftButton = new JButton("切换导航");
+        toggleLeftButton.setToolTipText("显示/隐藏对象浏览器");
+        toggleLeftButton.addActionListener(e -> toggleLeftPanel());
+        styleToolbarButton(toggleLeftButton);
+        toolBar.add(toggleLeftButton);
         add(toolBar, BorderLayout.NORTH);
     }
 
@@ -1102,47 +1145,42 @@ public class MainFrame extends JFrame {
             updateExecutionButtons();
         });
 
-        bottomTabbedPane = new JTabbedPane();
-        bottomTabbedPane.addTab("结果", sharedResultsWrapper);
-        logPanel = new LogPanel();
-        bottomTabbedPane.addTab("日志", logPanel);
-        bottomTabbedPane.addTab("任务", createJobsShortcutPanel());
-        bottomTabbedPane.addTab("历史", createHistoryShortcutPanel());
+        resultTabs = new JTabbedPane();
+        resultTabs.addTab("结果", sharedResultsWrapper);
+        messageArea = new JTextArea();
+        messageArea.setEditable(false);
+        messageArea.setLineWrap(true);
+        messageArea.setWrapStyleWord(true);
+        JScrollPane messageScroll = new JScrollPane(messageArea);
+        resultTabs.addTab("消息", messageScroll);
+        bottomTabbedPane = resultTabs;
         bottomTabbedPane.setMinimumSize(new Dimension(200, 160));
 
-        rightTabbedPane = new JTabbedPane();
-        rightPanel = new JPanel(new BorderLayout());
-        rightPanel.add(rightTabbedPane, BorderLayout.CENTER);
-        rightTabbedPane.addTab("Inspector", createInspectorPlaceholder());
-        rightTabbedPane.setMinimumSize(new Dimension(220, 240));
+        auxiliaryTabs = new JTabbedPane();
+        logPanel = new LogPanel();
+        historyPanel = createHistoryShortcutPanel();
+        inspectorPanel = createInspectorPlaceholder();
+        auxiliaryTabs.addTab("日志", logPanel);
+        auxiliaryTabs.addTab("历史", historyPanel);
+        auxiliaryTabs.addTab("设置", inspectorPanel);
+        auxiliaryPanel = new JPanel(new BorderLayout());
+        auxiliaryPanel.add(auxiliaryTabs, BorderLayout.CENTER);
+        auxiliaryPanel.setPreferredSize(new Dimension(320, 400));
+        auxiliaryPanel.setVisible(false);
 
-        leftPanel = buildNavigatorPanel();
-        centerRightSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, centerPanel, rightPanel);
-        centerRightSplit.setResizeWeight(1.0);
-        centerRightSplit.setDividerSize(8);
+        leftPanel = buildObjectBrowserPanel();
+        centerRightSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, bottomTabbedPane);
+        centerRightSplit.setResizeWeight(0.72);
+        centerRightSplit.setDividerSize(10);
         centerRightSplit.setContinuousLayout(true);
 
         leftSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, centerRightSplit);
-        leftSplit.setResizeWeight(0.18);
+        leftSplit.setResizeWeight(0.2);
         leftSplit.setDividerSize(8);
         leftSplit.setContinuousLayout(true);
 
-        verticalSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, leftSplit, bottomTabbedPane);
-        verticalSplit.setResizeWeight(0.78);
-        verticalSplit.setDividerSize(10);
-        verticalSplit.setContinuousLayout(true);
-        verticalSplit.setBorder(BorderFactory.createEmptyBorder());
-        verticalSplit.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
-            if (verticalSplit.getHeight() <= 0) return;
-            int minTop = leftSplit.getMinimumSize() != null ? leftSplit.getMinimumSize().height : 200;
-            int minBottom = bottomTabbedPane.getMinimumSize().height;
-            int location = Math.max(minTop, Math.min(verticalSplit.getDividerLocation(),
-                    verticalSplit.getHeight() - minBottom));
-            sharedDividerLocation = location;
-        });
-
-        dockManager = new DockManager(this, bottomTabbedPane, rightTabbedPane);
-        add(verticalSplit, BorderLayout.CENTER);
+        add(leftSplit, BorderLayout.CENTER);
+        add(auxiliaryPanel, BorderLayout.EAST);
 
         SwingUtilities.invokeLater(this::applyInitialLayoutState);
         centerLayout.show(centerPanel, "window");
@@ -1162,38 +1200,33 @@ public class MainFrame extends JFrame {
         } else {
             showBottomPanel();
         }
-        if (rightVisible || dock == DockPosition.RIGHT) {
-            showRightPanel();
-        } else {
-            hideRightPanel();
-        }
         applyEditorMaximizedState();
         SwingUtilities.invokeLater(() -> {
             int left = layoutState.getLeftDivider(leftSplit.getDividerLocation());
             int right = layoutState.getRightDivider(centerRightSplit.getDividerLocation());
-            int bottom = layoutState.getBottomDivider(verticalSplit.getDividerLocation());
+            int bottom = layoutState.getBottomDivider(centerRightSplit.getDividerLocation());
             if (left > 0) leftSplit.setDividerLocation(left);
             if (right > 0) centerRightSplit.setDividerLocation(right);
-            if (bottom > 0) verticalSplit.setDividerLocation(bottom);
+            if (bottom > 0) centerRightSplit.setDividerLocation(bottom);
         });
     }
 
-    private JPanel buildNavigatorPanel() {
+    private JPanel buildObjectBrowserPanel() {
         JPanel panel = new JPanel(new BorderLayout(4, 4));
-        panel.setBorder(BorderFactory.createTitledBorder("对象/笔记"));
+        panel.setBorder(BorderFactory.createTitledBorder("对象浏览器"));
+        DefaultMutableTreeNode root = new DefaultMutableTreeNode("对象");
+        DefaultTreeModel model = new DefaultTreeModel(root);
+        JTree tree = new JTree(model);
+        tree.setRootVisible(true);
+        tree.setShowsRootHandles(true);
+
         JTextField filter = new JTextField();
-        filter.setToolTipText("输入关键字并回车可按标题打开笔记");
-        filter.addActionListener(e -> {
-            String keyword = filter.getText();
-            if (keyword != null && !keyword.isBlank()) {
-                openNoteByTitle(keyword.trim());
-            }
-        });
-        JButton manage = new JButton("管理");
-        manage.addActionListener(e -> openManageDialog());
-        JButton browse = new JButton("浏览器");
-        browse.addActionListener(e -> {
-            ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
+        filter.setToolTipText("输入关键字刷新对象树");
+        filter.addActionListener(e -> refreshObjectTree(model, root, filter.getText()));
+
+        JButton openDialog = new JButton("弹出");
+        openDialog.addActionListener(e -> {
+            objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
                     new ObjectBrowserDialog.RoutineActionHandler() {
                         @Override
                         public void openRoutine(RoutineInfo info, boolean editable) {
@@ -1205,24 +1238,23 @@ public class MainFrame extends JFrame {
                             runRoutineWithDialog(info);
                         }
                     });
-            dialog.setVisible(true);
+            objectBrowserDialog.setVisible(true);
         });
-        JPanel headerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
-        headerActions.add(manage);
-        headerActions.add(browse);
         JPanel header = new JPanel(new BorderLayout(4, 4));
         header.add(filter, BorderLayout.CENTER);
-        header.add(headerActions, BorderLayout.EAST);
+        header.add(openDialog, BorderLayout.EAST);
         panel.add(header, BorderLayout.NORTH);
+        panel.add(new JScrollPane(tree), BorderLayout.CENTER);
 
-        JTextArea hint = new JTextArea("使用左上角搜索快速定位笔记或打开对象浏览器。");
-        hint.setEditable(false);
-        hint.setLineWrap(true);
-        hint.setWrapStyleWord(true);
-        hint.setOpaque(false);
-        hint.setFont(hint.getFont().deriveFont(Font.PLAIN, 12f));
-        panel.add(new JScrollPane(hint), BorderLayout.CENTER);
+        refreshObjectTree(model, root, "");
         return panel;
+    }
+
+    private void refreshObjectTree(DefaultTreeModel model, DefaultMutableTreeNode root, String keyword) {
+        root.removeAllChildren();
+        metadataService.listTables(keyword == null ? "" : keyword)
+                .forEach(t -> root.add(new DefaultMutableTreeNode(t)));
+        model.reload();
     }
 
     private JComponent createInspectorPlaceholder() {
@@ -1298,19 +1330,35 @@ public class MainFrame extends JFrame {
     private void showRightPanel() {
         rightVisible = true;
         layoutState.setRightVisible(true);
-        rightPanel.setVisible(true);
-        int divider = layoutState.getRightDivider(lastRightDividerLocation > 0 ? lastRightDividerLocation : (int) (getWidth() * 0.78));
-        SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(divider));
+        if (auxiliaryPanel != null) {
+            auxiliaryPanel.setVisible(true);
+            auxiliaryPanel.revalidate();
+            auxiliaryPanel.repaint();
+        }
     }
 
     private void hideRightPanel() {
-        if (centerRightSplit != null) {
-            lastRightDividerLocation = centerRightSplit.getDividerLocation();
-            SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(centerRightSplit.getWidth()));
-        }
         rightVisible = false;
         layoutState.setRightVisible(false);
-        rightPanel.setVisible(false);
+        if (auxiliaryPanel != null) {
+            auxiliaryPanel.setVisible(false);
+            auxiliaryPanel.revalidate();
+            auxiliaryPanel.repaint();
+        }
+    }
+
+    private void focusAuxiliaryPanel(Component component) {
+        if (auxiliaryPanel == null || auxiliaryTabs == null || component == null) {
+            return;
+        }
+        if (auxiliaryTabs.indexOfComponent(component) >= 0) {
+            auxiliaryPanel.setVisible(true);
+            rightVisible = true;
+            layoutState.setRightVisible(true);
+            auxiliaryTabs.setSelectedComponent(component);
+            auxiliaryPanel.revalidate();
+            auxiliaryPanel.repaint();
+        }
     }
 
     private void toggleBottomPanel() {
@@ -1326,13 +1374,13 @@ public class MainFrame extends JFrame {
         layoutState.setBottomVisible(true);
         bottomTabbedPane.setVisible(true);
         int divider = layoutState.getBottomDivider(lastBottomDividerLocation > 0 ? lastBottomDividerLocation : (int) (getHeight() * 0.72));
-        SwingUtilities.invokeLater(() -> verticalSplit.setDividerLocation(divider));
+        SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(divider));
     }
 
     private void hideBottomPanel() {
-        if (verticalSplit != null) {
-            lastBottomDividerLocation = verticalSplit.getDividerLocation();
-            SwingUtilities.invokeLater(() -> verticalSplit.setDividerLocation(1.0));
+        if (centerRightSplit != null) {
+            lastBottomDividerLocation = centerRightSplit.getDividerLocation();
+            SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(centerRightSplit.getHeight()));
         }
         bottomVisible = false;
         layoutState.setBottomVisible(false);
@@ -1400,8 +1448,8 @@ public class MainFrame extends JFrame {
         if (centerRightSplit != null) {
             layoutState.setRightDivider(centerRightSplit.getDividerLocation());
         }
-        if (verticalSplit != null) {
-            layoutState.setBottomDivider(verticalSplit.getDividerLocation());
+        if (centerRightSplit != null) {
+            layoutState.setBottomDivider(centerRightSplit.getDividerLocation());
         }
         layoutState.saveWindowBounds(getBounds());
         layoutState.setLeftVisible(leftVisible);
@@ -1454,6 +1502,7 @@ public class MainFrame extends JFrame {
         left.add(suggestionStateLabel);
         left.add(metadataLabel);
         status.add(left, BorderLayout.WEST);
+        statusBar = status;
         add(status, BorderLayout.SOUTH);
     }
 
@@ -1934,21 +1983,6 @@ public class MainFrame extends JFrame {
         statusLabel.setText("已发送取消请求");
         updateExecutionButtons();
         OperationLog.log("停止执行: " + panel.getNote().getTitle());
-    }
-
-    private void applyDefaultPageSizeFromUi() {
-        Object val = defaultPageSizeSpinner.getValue();
-        int parsed = val instanceof Number ? ((Number) val).intValue() : defaultPageSize;
-        int sanitized = sanitizePageSize(parsed);
-        if (sanitized != parsed) {
-            OperationLog.log("pageSize=" + parsed + " 超出范围，已调整为 " + sanitized);
-        }
-        defaultPageSizeSpinner.setValue(sanitized);
-        defaultPageSize = sanitized;
-        Config.overrideDefaultPageSize(sanitized);
-        appStateRepository.saveDefaultPageSize(sanitized);
-        panelCache.values().forEach(p -> p.updateDefaultPageSize(sanitized));
-        OperationLog.log("默认 pageSize 已更新为 " + sanitized);
     }
 
     private int sanitizePageSize(int desired) {
