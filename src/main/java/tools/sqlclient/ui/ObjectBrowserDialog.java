@@ -11,7 +11,6 @@ import javax.swing.event.DocumentListener;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
 import javax.swing.tree.TreePath;
-import javax.swing.tree.DefaultTreeCellRenderer;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -66,19 +65,9 @@ public class ObjectBrowserDialog extends JDialog {
 
         tree.setRootVisible(true);
         tree.setShowsRootHandles(true);
-        tree.setCellRenderer(new DefaultTreeCellRenderer() {
-            @Override
-            public Component getTreeCellRendererComponent(JTree tree, Object value, boolean sel, boolean expanded, boolean leaf, int row, boolean hasFocus) {
-                JLabel label = (JLabel) super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus);
-                if (value instanceof DefaultMutableTreeNode node) {
-                    Object user = node.getUserObject();
-                    if (user instanceof TableEntry entry) {
-                        label.setText(entry.name() + " (" + entry.type() + ")");
-                    }
-                }
-                return label;
-            }
-        });
+        tree.setRowHeight(22);
+        tree.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        tree.setCellRenderer(new MinimalTreeCellRenderer(tree.getFont()));
         tree.addTreeSelectionListener(e -> {
             DefaultMutableTreeNode node = (DefaultMutableTreeNode) tree.getLastSelectedPathComponent();
             if (node == null) return;

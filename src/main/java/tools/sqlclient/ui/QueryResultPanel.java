@@ -8,9 +8,10 @@ import tools.sqlclient.exec.SqlTopLevelClassifier;
 import tools.sqlclient.ui.table.TableCopySupport;
 
 import javax.swing.*;
-import javax.swing.border.TitledBorder;
+import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
@@ -45,26 +46,39 @@ public class QueryResultPanel extends JPanel {
     private final JPanel cards = new JPanel(new CardLayout());
     private static final String CARD_TABLE = "table";
     private static final String CARD_INFO = "info";
+    private final Color borderColor = new Color(228, 231, 236);
     private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
-        private final Color even = new Color(250, 252, 255);
-        private final Color odd = Color.WHITE;
+        private final Color even = new Color(248, 251, 255);
+        private final Color odd = new Color(244, 247, 252);
+        private final Color selection = new Color(0xDCE6F5);
+        private final Color selectionText = new Color(0x0F1F3A);
 
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            if (!isSelected) {
-                c.setBackground(row % 2 == 0 ? even : odd);
+            JLabel label = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+            label.setText(value == null ? "" : value.toString());
+            label.setHorizontalAlignment(SwingConstants.LEFT);
+            label.setBorder(new EmptyBorder(0, 8, 0, 8));
+            if (isSelected) {
+                label.setBackground(selection);
+                label.setForeground(selectionText);
+            } else {
+                label.setBackground(row % 2 == 0 ? even : odd);
+                label.setForeground(new Color(0x1F2933));
             }
-            return c;
+            return label;
         }
     };
 
     public QueryResultPanel(SqlExecResult result, String titleHint) {
         super(new BorderLayout());
-        setBorder(new TitledBorder("结果集"));
+        setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor),
+                new EmptyBorder(8, 8, 8, 8)));
         setToolTipText(titleHint);
 
         JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        header.setBorder(new EmptyBorder(0, 0, 4, 0));
         header.add(countLabel);
         header.add(statusLabel);
         header.add(elapsedLabel);
@@ -75,34 +89,42 @@ public class QueryResultPanel extends JPanel {
         add(header, BorderLayout.NORTH);
 
         JPanel messagePanel = new JPanel(new BorderLayout());
-        messagePanel.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+        messagePanel.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, borderColor));
         messagePanel.add(messageLabel, BorderLayout.CENTER);
         add(messagePanel, BorderLayout.SOUTH);
 
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        table.setShowGrid(true);
-        table.setShowHorizontalLines(true);
-        table.setShowVerticalLines(true);
-        table.setGridColor(new Color(180, 186, 198));
-        table.setIntercellSpacing(new Dimension(1, 1));
+        table.setShowGrid(false);
+        table.setIntercellSpacing(new Dimension(0, 0));
         table.setRowHeight(24);
+        table.setSelectionBackground(new Color(0xDCE6F5));
+        table.setSelectionForeground(new Color(0x0F1F3A));
         table.setFillsViewportHeight(true);
-        table.setBorder(BorderFactory.createLineBorder(new Color(180, 186, 198)));
+        table.setBorder(BorderFactory.createLineBorder(borderColor));
         installCopySupport();
 
-        Color headerBg = new Color(240, 244, 250);
-        table.getTableHeader().setBackground(headerBg);
-        table.getTableHeader().setOpaque(true);
-        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(180, 186, 198)));
+        JTableHeader tableHeader = table.getTableHeader();
+        Color headerBg = new Color(245, 247, 250);
+        tableHeader.setBackground(headerBg);
+        tableHeader.setFont(tableHeader.getFont().deriveFont(Font.BOLD));
+        tableHeader.setOpaque(true);
+        tableHeader.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, borderColor));
 
         JScrollPane scrollPane = new JScrollPane(table);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
         scrollPane.getViewport().setBackground(Color.WHITE);
+        scrollPane.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor));
 
         infoTable.setFillsViewportHeight(true);
         infoTable.setRowHeight(24);
+        infoTable.setShowGrid(false);
+        infoTable.setIntercellSpacing(new Dimension(0, 0));
+        infoTable.setSelectionBackground(new Color(0xDCE6F5));
+        infoTable.setSelectionForeground(new Color(0x0F1F3A));
+        infoTable.setDefaultRenderer(Object.class, stripedRenderer);
         JScrollPane infoScroll = new JScrollPane(infoTable);
         infoScroll.getViewport().setBackground(Color.WHITE);
+        infoScroll.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor));
 
         cards.add(scrollPane, CARD_TABLE);
         cards.add(infoScroll, CARD_INFO);
@@ -175,6 +197,13 @@ public class QueryResultPanel extends JPanel {
         resizeColumns();
     }
 
+    public void focusTable() {
+        table.requestFocusInWindow();
+        if (table.getRowCount() > 0 && table.getSelectedRowCount() == 0) {
+            table.setRowSelectionInterval(0, 0);
+        }
+    }
+
     public void resetColumns() {
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         resizeColumns();
@@ -203,6 +232,7 @@ public class QueryResultPanel extends JPanel {
     }
 
     private void applyStripedRenderer() {
+        table.setDefaultRenderer(Object.class, stripedRenderer);
         for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setCellRenderer(stripedRenderer);
         }
