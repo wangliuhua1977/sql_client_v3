@@ -938,6 +938,14 @@ public class EditorTabPanel extends JPanel {
         collapseResultArea();
     }
 
+    public void focusEditor() {
+        textArea.requestFocusInWindow();
+    }
+
+    public void focusResultArea() {
+        resultArea.focusNavigator();
+    }
+
     public void addLocalResultPanel(String title, JComponent panel, String hint) {
         resultArea.addResult(title, panel, hint);
         resultWrapper.setVisible(true);
@@ -1028,6 +1036,10 @@ public class EditorTabPanel extends JPanel {
             if (entry.component instanceof QueryResultPanel qp) {
                 action.accept(qp);
             }
+        }
+
+        void focusNavigator() {
+            selector.requestFocusInWindow();
         }
     }
 

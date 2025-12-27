@@ -4,21 +4,20 @@ import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlTopLevelClassifier;
-
 import tools.sqlclient.ui.table.TableCopySupport;
 
 import javax.swing.*;
-import javax.swing.border.TitledBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.util.Arrays;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -46,25 +45,32 @@ public class QueryResultPanel extends JPanel {
     private static final String CARD_TABLE = "table";
     private static final String CARD_INFO = "info";
     private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
-        private final Color even = new Color(250, 252, 255);
+        private final Color even = new Color(249, 251, 253);
         private final Color odd = Color.WHITE;
 
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            if (!isSelected) {
+            Object display = value == null ? "" : value;
+            Component c = super.getTableCellRendererComponent(table, display, isSelected, hasFocus, row, column);
+            if (isSelected) {
+                c.setBackground(UiStyle.SELECTION);
+                c.setForeground(Color.DARK_GRAY);
+            } else {
                 c.setBackground(row % 2 == 0 ? even : odd);
+                c.setForeground(new Color(45, 52, 63));
             }
+            setBorder(BorderFactory.createEmptyBorder(0, 6, 0, 6));
             return c;
         }
     };
 
     public QueryResultPanel(SqlExecResult result, String titleHint) {
         super(new BorderLayout());
-        setBorder(new TitledBorder("结果集"));
+        setBorder(UiStyle.thinLine());
         setToolTipText(titleHint);
 
         JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        header.setBorder(UiStyle.sectionLine());
         header.add(countLabel);
         header.add(statusLabel);
         header.add(elapsedLabel);
@@ -75,29 +81,31 @@ public class QueryResultPanel extends JPanel {
         add(header, BorderLayout.NORTH);
 
         JPanel messagePanel = new JPanel(new BorderLayout());
-        messagePanel.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+        messagePanel.setBorder(new EmptyBorder(4, 8, 6, 8));
         messagePanel.add(messageLabel, BorderLayout.CENTER);
         add(messagePanel, BorderLayout.SOUTH);
 
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        table.setShowGrid(true);
-        table.setShowHorizontalLines(true);
-        table.setShowVerticalLines(true);
-        table.setGridColor(new Color(180, 186, 198));
-        table.setIntercellSpacing(new Dimension(1, 1));
+        table.setShowGrid(false);
+        table.setIntercellSpacing(new Dimension(0, 0));
         table.setRowHeight(24);
         table.setFillsViewportHeight(true);
-        table.setBorder(BorderFactory.createLineBorder(new Color(180, 186, 198)));
+        table.setBorder(UiStyle.thinLine());
+        table.setSelectionBackground(UiStyle.SELECTION);
+        table.setSelectionForeground(Color.DARK_GRAY);
         installCopySupport();
 
-        Color headerBg = new Color(240, 244, 250);
-        table.getTableHeader().setBackground(headerBg);
-        table.getTableHeader().setOpaque(true);
-        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(180, 186, 198)));
+        JTableHeader tableHeader = table.getTableHeader();
+        Color headerBg = new Color(244, 246, 250);
+        tableHeader.setBackground(headerBg);
+        tableHeader.setOpaque(true);
+        tableHeader.setFont(tableHeader.getFont().deriveFont(Font.BOLD));
+        tableHeader.setBorder(UiStyle.sectionLine());
 
         JScrollPane scrollPane = new JScrollPane(table);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
         scrollPane.getViewport().setBackground(Color.WHITE);
+        scrollPane.setBorder(new EmptyBorder(0, 0, 0, 0));
 
         infoTable.setFillsViewportHeight(true);
         infoTable.setRowHeight(24);
