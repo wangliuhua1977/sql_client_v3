@@ -36,8 +36,8 @@ import tools.sqlclient.ui.LogPanel;
 import javax.swing.*;
 import javax.swing.BorderFactory;
 import javax.swing.border.EmptyBorder;
-import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.DefaultTreeModel;
+import javax.swing.event.InternalFrameAdapter;
+import javax.swing.event.InternalFrameEvent;
 import javax.swing.plaf.basic.BasicInternalFrameUI;
 import javax.swing.plaf.FontUIResource;
 import java.awt.*;
@@ -46,7 +46,9 @@ import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -99,6 +101,7 @@ public class MainFrame extends JFrame {
     private final PgRoutineService pgRoutineService = new PgRoutineService(sqlExecutionService);
     private final ColumnOrderDecider columnOrderDecider;
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
+    private final Map<Long, EditorTabPanel> routineTabIndex = new java.util.HashMap<>();
     private final Font uiBaseFont = new Font(Font.SANS_SERIF, Font.PLAIN, 13);
     // 笔记图标持久化：noteId -> 图标规格
     private final java.util.Map<Long, NoteIconSpec> noteIconSpecs = new java.util.HashMap<>();
@@ -133,6 +136,7 @@ public class MainFrame extends JFrame {
     private JComponent historyPanel;
     private JComponent inspectorPanel;
     private ObjectBrowserDialog objectBrowserDialog;
+    private ObjectBrowserPanel navigationBrowserPanel;
     private JTree navigationTree;
     private boolean leftVisible = true;
     private boolean rightVisible = false;
@@ -261,25 +265,26 @@ public class MainFrame extends JFrame {
 
     /**
      * 从 resources 目录加载主窗体图标：
-     * 约定路径：/icons/sql_client.png
-     * 如果资源不存在，则回退为系统默认图标。
+     * 约定路径：/AI.png
+     * 如果资源不存在或读取失败，则回退为系统默认图标并记录 warn。
      */
     private void loadMainWindowIcon() {
         try {
-            // Maven 工程中，resources 下的图标文件会被打成类路径资源
-            java.net.URL url = getClass().getResource("/icons/sql_client.png");
+            URL url = getClass().getResource("/AI.png");
             if (url != null) {
-                Image img = new ImageIcon(url).getImage();
-                setIconImage(img);
-            } else {
-                // 回退：尝试使用系统默认图标
-                Icon uiIcon = UIManager.getIcon("FileView.computerIcon");
-                if (uiIcon instanceof ImageIcon icon) {
-                    setIconImage(icon.getImage());
+                BufferedImage img = javax.imageio.ImageIO.read(url);
+                if (img != null) {
+                    setIconImage(img);
+                    return;
                 }
             }
-        } catch (Exception ignore) {
-            // 图标加载失败不影响主程序运行
+            Icon uiIcon = UIManager.getIcon("FileView.computerIcon");
+            if (uiIcon instanceof ImageIcon icon) {
+                setIconImage(icon.getImage());
+            }
+            log.warn("主窗体图标加载失败或资源缺失: /AI.png");
+        } catch (Exception e) {
+            log.warn("主窗体图标加载异常", e);
         }
     }
 
@@ -1289,18 +1294,19 @@ public class MainFrame extends JFrame {
     private JPanel buildObjectBrowserPanel() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
         panel.setBorder(new EmptyBorder(8, 8, 8, 8));
-        DefaultMutableTreeNode root = new DefaultMutableTreeNode("对象");
-        DefaultTreeModel model = new DefaultTreeModel(root);
-        navigationTree = new JTree(model);
-        navigationTree.setRowHeight(22);
-        navigationTree.setRootVisible(true);
-        navigationTree.setShowsRootHandles(true);
-        navigationTree.setBorder(new EmptyBorder(4, 6, 4, 6));
-        navigationTree.setCellRenderer(new MinimalTreeCellRenderer(uiBaseFont));
+        navigationBrowserPanel = new ObjectBrowserPanel(metadataService, pgRoutineService,
+                new ObjectBrowserPanel.RoutineActionHandler() {
+                    @Override
+                    public void openRoutine(RoutineInfo info, boolean editable) {
+                        openRoutineEditor(info, editable);
+                    }
 
-        JTextField filter = new JTextField();
-        filter.setToolTipText("输入关键字刷新对象树");
-        filter.addActionListener(e -> refreshObjectTree(model, root, filter.getText()));
+                    @Override
+                    public void runRoutine(RoutineInfo info) {
+                        runRoutineWithDialog(info);
+                    }
+                });
+        navigationTree = navigationBrowserPanel.getTree();
 
         JButton openDialog = new JButton("弹出");
         openDialog.addActionListener(e -> {
@@ -1318,24 +1324,10 @@ public class MainFrame extends JFrame {
                     });
             objectBrowserDialog.setVisible(true);
         });
-        JPanel header = new JPanel(new BorderLayout(4, 4));
-        header.add(filter, BorderLayout.CENTER);
-        header.add(openDialog, BorderLayout.EAST);
-        header.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(230, 233, 238)));
-        panel.add(header, BorderLayout.NORTH);
-        JScrollPane treeScroll = new JScrollPane(navigationTree);
-        treeScroll.setBorder(BorderFactory.createEmptyBorder());
-        panel.add(treeScroll, BorderLayout.CENTER);
+        navigationBrowserPanel.setHeaderTrailing(openDialog);
+        panel.add(navigationBrowserPanel, BorderLayout.CENTER);
 
-        refreshObjectTree(model, root, "");
         return panel;
-    }
-
-    private void refreshObjectTree(DefaultTreeModel model, DefaultMutableTreeNode root, String keyword) {
-        root.removeAllChildren();
-        metadataService.listTables(keyword == null ? "" : keyword)
-                .forEach(t -> root.add(new DefaultMutableTreeNode(t)));
-        model.reload();
     }
 
     private JComponent createInspectorPlaceholder() {
@@ -1685,7 +1677,7 @@ public class MainFrame extends JFrame {
 
     private void addFrame(EditorTabPanel panel) {
         detachFromParent(panel);
-        JInternalFrame frame = new JInternalFrame(panel.getNote().getTitle(), true, true, true, true);
+        JInternalFrame frame = new JInternalFrame(getPanelDisplayTitle(panel), true, true, true, true);
         // 为子窗体设置持久化的随机绘制图标
         frame.setFrameIcon(getOrCreateNoteIcon(panel.getNote()));
         frame.setSize(600, 400);
@@ -1693,7 +1685,16 @@ public class MainFrame extends JFrame {
                 20 * desktopPane.getAllFrames().length);
         frame.setVisible(true);
         frame.add(panel, BorderLayout.CENTER);
+        frame.setToolTipText(getPanelTooltip(panel));
         installRenameHandler(frame, panel);
+        frame.addInternalFrameListener(new InternalFrameAdapter() {
+            @Override
+            public void internalFrameClosing(InternalFrameEvent e) {
+                unregisterRoutinePanel(panel);
+                panelCache.remove(panel.getNote().getId());
+                persistOpenFrames();
+            }
+        });
         desktopPane.add(frame);
         try {
             frame.setSelected(true);
@@ -1706,10 +1707,11 @@ public class MainFrame extends JFrame {
 
     private void addTab(EditorTabPanel panel) {
         detachFromParent(panel);
-        tabbedPane.addTab(panel.getNote().getTitle(), panel);
+        tabbedPane.addTab(getPanelDisplayTitle(panel), panel);
         int idx = tabbedPane.indexOfComponent(panel);
         // 面板模式下标签使用与子窗体相同的图标
         tabbedPane.setIconAt(idx, getOrCreateNoteIcon(panel.getNote()));
+        tabbedPane.setToolTipTextAt(idx, getPanelTooltip(panel));
         tabbedPane.setSelectedIndex(idx);
         persistOpenFrames();
         onPanelFocused(panel);
@@ -1779,6 +1781,7 @@ public class MainFrame extends JFrame {
             if (frame != null) {
                 EditorTabPanel panel = extractPanelFromFrame(frame);
                 if (panel != null) {
+                    unregisterRoutinePanel(panel);
                     panelCache.remove(panel.getNote().getId());
                 }
                 frame.dispose();
@@ -1789,6 +1792,7 @@ public class MainFrame extends JFrame {
                 Component comp = tabbedPane.getComponentAt(idx);
                 EditorTabPanel panel = extractPanel(comp);
                 if (panel != null) {
+                    unregisterRoutinePanel(panel);
                     panelCache.remove(panel.getNote().getId());
                 }
                 tabbedPane.removeTabAt(idx);
@@ -2444,7 +2448,53 @@ public class MainFrame extends JFrame {
         return extractPanel(frame.getContentPane().getComponent(0));
     }
 
+    private String getPanelDisplayTitle(EditorTabPanel panel) {
+        if (panel == null) {
+            return "";
+        }
+        Object custom = panel.getClientProperty("customTitle");
+        if (custom instanceof String title && !title.isBlank()) {
+            return title;
+        }
+        return panel.getNote().getTitle();
+    }
+
+    private String getPanelTooltip(EditorTabPanel panel) {
+        if (panel == null) {
+            return null;
+        }
+        Object tooltip = panel.getClientProperty("customTooltip");
+        if (tooltip instanceof String tip && !tip.isBlank()) {
+            return tip;
+        }
+        return null;
+    }
+
+    private void refreshPanelTitle(EditorTabPanel panel) {
+        if (panel == null) {
+            return;
+        }
+        String displayTitle = getPanelDisplayTitle(panel);
+        String tooltip = getPanelTooltip(panel);
+        for (JInternalFrame frame : desktopPane.getAllFrames()) {
+            EditorTabPanel framePanel = extractPanelFromFrame(frame);
+            if (framePanel == panel) {
+                frame.setTitle(displayTitle);
+                frame.setToolTipText(tooltip);
+                break;
+            }
+        }
+        int idx = tabbedPane.indexOfComponent(panel);
+        if (idx >= 0) {
+            tabbedPane.setTitleAt(idx, displayTitle);
+            tabbedPane.setToolTipTextAt(idx, tooltip);
+        }
+    }
+
     private void updateTabTitle(EditorTabPanel panel, String title) {
+        if (panel != null && panel.getClientProperty("customTitle") != null) {
+            return;
+        }
         int idx = tabbedPane.indexOfComponent(panel);
         if (idx >= 0) {
             tabbedPane.setTitleAt(idx, title);
@@ -2455,11 +2505,15 @@ public class MainFrame extends JFrame {
         long targetId = noteId != null ? noteId : -1L;
         panelCache.values().forEach(p -> {
             if (p.getNote().getId() == targetId) {
-                updateTabTitle(p, title);
+                if (p.getClientProperty("customTitle") == null) {
+                    updateTabTitle(p, title);
+                }
                 for (JInternalFrame frame : desktopPane.getAllFrames()) {
                     EditorTabPanel framePanel = extractPanelFromFrame(frame);
                     if (framePanel == p) {
-                        frame.setTitle(title);
+                        if (p.getClientProperty("customTitle") == null) {
+                            frame.setTitle(title);
+                        }
                         break;
                     }
                 }
@@ -2670,9 +2724,38 @@ public class MainFrame extends JFrame {
         if (objectBrowserDialog != null && objectBrowserDialog.isVisible()) {
             SwingUtilities.invokeLater(() -> objectBrowserDialog.reload());
         }
+        if (navigationBrowserPanel != null) {
+            SwingUtilities.invokeLater(() -> navigationBrowserPanel.reload());
+        }
+    }
+
+    private void unregisterRoutinePanel(EditorTabPanel panel) {
+        if (panel == null) {
+            return;
+        }
+        Object oidObj = panel.getClientProperty("routineOid");
+        if (oidObj instanceof Long oid) {
+            routineTabIndex.remove(oid);
+        }
     }
 
     private void openRoutineEditor(RoutineInfo info, boolean editable) {
+        if (info == null) {
+            return;
+        }
+        EditorTabPanel existing = routineTabIndex.get(info.oid());
+        if (existing != null) {
+            if (!existing.isShowing()) {
+                routineTabIndex.remove(info.oid());
+            } else {
+                SwingUtilities.invokeLater(() -> {
+                    selectContainerForPanel(existing);
+                    existing.focusEditorArea();
+                    existing.setReadOnly(!editable);
+                });
+                return;
+            }
+        }
         showRoutineDdlAndOpen(info, editable, null);
     }
 
@@ -2701,8 +2784,8 @@ public class MainFrame extends JFrame {
                 JOptionPane.showMessageDialog(this, "获取源码失败: " + ex.getMessage());
                 return;
             }
-            String title = buildRoutineTitle(info);
-            Note note = noteRepository.findOrCreateByTitle(title);
+            String noteTitle = buildRoutineNoteTitle(info);
+            Note note = noteRepository.findOrCreateByTitle(noteTitle);
             try {
                 noteRepository.updateContent(note, ddl);
             } catch (Exception ignored) {
@@ -2711,6 +2794,7 @@ public class MainFrame extends JFrame {
             panel.setTextContent(ddl);
             panel.configureRoutineContext("例程: " + info.displayName(), editable, () -> publishRoutine(panel, info));
             panel.setReadOnly(!editable);
+            markRoutinePanel(panel, info, editable);
             openNoteInCurrentMode(note);
             if (afterOpen != null) {
                 afterOpen.accept(panel);
@@ -2719,9 +2803,27 @@ public class MainFrame extends JFrame {
         }));
     }
 
-    private String buildRoutineTitle(RoutineInfo info) {
-        String args = info.identityArgs() == null ? "" : info.identityArgs();
-        return info.schemaName() + "." + info.objectName() + "(" + args + ")";
+    private String buildRoutineNoteTitle(RoutineInfo info) {
+        String base = info.objectName() == null ? ("routine_" + info.oid()) : info.objectName();
+        if (!noteRepository.titleExists(base, null)) {
+            return base;
+        }
+        return base + " #" + info.oid();
+    }
+
+    private void markRoutinePanel(EditorTabPanel panel, RoutineInfo info, boolean editable) {
+        if (panel == null || info == null) {
+            return;
+        }
+        panel.putClientProperty("routineOid", info.oid());
+        panel.putClientProperty("customTitle", info.objectName());
+        String tooltip = info.displayName();
+        if (tooltip != null && !tooltip.isBlank()) {
+            panel.putClientProperty("customTooltip", tooltip);
+        }
+        routineTabIndex.put(info.oid(), panel);
+        refreshPanelTitle(panel);
+        panel.setReadOnly(!editable);
     }
 
     private JDialog showProgressDialog(String message) {
