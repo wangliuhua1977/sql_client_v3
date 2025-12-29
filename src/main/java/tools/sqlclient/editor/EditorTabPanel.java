@@ -749,6 +749,18 @@ public class EditorTabPanel extends JPanel {
 
     public java.util.List<String> getExecutableStatements(boolean blockMode) {
         String selected = textArea.getSelectedText();
+        if (blockMode) {
+            String segment = (selected != null && !selected.isBlank()) ? selected : extractBlockAroundCaret();
+            if (segment == null) {
+                return java.util.List.of();
+            }
+            String trimmed = segment.strip();
+            if (trimmed.isEmpty()) {
+                return java.util.List.of();
+            }
+            return java.util.List.of(trimmed);
+        }
+
         String target;
         if (selected != null && !selected.isBlank()) {
             SqlBlockDetector.DdlBlockDetectionResult detectionResult = SqlBlockDetector.detectSingleDdlBlock(selected);
@@ -758,8 +770,6 @@ public class EditorTabPanel extends JPanel {
                 return list;
             }
             target = selected;
-        } else if (blockMode) {
-            target = extractBlockAroundCaret();
         } else {
             target = extractStatementAtCaret();
         }
@@ -909,7 +919,7 @@ public class EditorTabPanel extends JPanel {
                 int lineStart = textArea.getLineStartOffset(line);
                 int lineEnd = textArea.getLineEndOffset(line);
                 String lineText = full.substring(lineStart, Math.min(lineEnd, full.length()));
-                if (lineText.trim().isEmpty()) {
+                if (isIsolationLine(lineText)) {
                     break;
                 }
                 startLine = line;
@@ -921,7 +931,7 @@ public class EditorTabPanel extends JPanel {
                 int lineStart = textArea.getLineStartOffset(line);
                 int lineEnd = textArea.getLineEndOffset(line);
                 String lineText = full.substring(lineStart, Math.min(lineEnd, full.length()));
-                if (lineText.trim().isEmpty()) {
+                if (isIsolationLine(lineText)) {
                     break;
                 }
                 endLine = line;
@@ -938,6 +948,22 @@ public class EditorTabPanel extends JPanel {
             // 出现异常时退化为整篇文本，保证不会崩
             return full;
         }
+    }
+
+    /**
+     * 仅包含空格或制表符的行视为隔离行，用于 Ctrl+Enter 分段。
+     */
+    private boolean isIsolationLine(String lineText) {
+        if (lineText == null || lineText.isEmpty()) {
+            return true;
+        }
+        for (int i = 0; i < lineText.length(); i++) {
+            char ch = lineText.charAt(i);
+            if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+                return false;
+            }
+        }
+        return true;
     }
 
     public void clearLocalResults() {
