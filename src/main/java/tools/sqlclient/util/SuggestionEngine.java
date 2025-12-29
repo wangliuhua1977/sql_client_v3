@@ -7,9 +7,13 @@ import tools.sqlclient.metadata.MetadataService.SuggestionItem;
 import tools.sqlclient.metadata.MetadataService.SuggestionType;
 
 import javax.swing.*;
+import javax.swing.border.LineBorder;
 import java.awt.*;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.geom.Rectangle2D;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -22,7 +26,8 @@ import java.util.Objects;
 public class SuggestionEngine {
     private final MetadataService metadataService;
     private final RSyntaxTextArea textArea;
-    private final JPopupMenu popup = new JPopupMenu();
+    private final ResizableSuggestionDialog popup;
+    private final JScrollPane scrollPane;
     private final JList<SuggestionItem> list = new JList<>();
     private static final List<String> TABLE_KEYWORDS = List.of("update", "delete", "truncate", "drop table", "exists", "from", "join", "where");
     private static final List<String> COLUMN_KEYWORDS = List.of("on");
@@ -38,8 +43,9 @@ public class SuggestionEngine {
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
         this.textArea = textArea;
-        popup.setFocusable(false);
-        popup.add(new JScrollPane(list));
+        this.scrollPane = new JScrollPane(list);
+        this.popup = new ResizableSuggestionDialog(SwingUtilities.getWindowAncestor(textArea));
+        popup.getContentPane().add(scrollPane, BorderLayout.CENTER);
         list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         list.setCellRenderer(new DefaultListCellRenderer() {
             @Override
@@ -279,8 +285,10 @@ public class SuggestionEngine {
 
     private void showPopup() {
         try {
-            Rectangle view = textArea.modelToView(textArea.getCaretPosition());
-            popup.show(textArea, view.x, view.y + view.height);
+            Rectangle2D view = textArea.modelToView2D(textArea.getCaretPosition());
+            if (view != null) {
+                popup.showAt(textArea, view.getBounds());
+            }
         } catch (Exception ignored) {
             popup.setVisible(false);
         }
@@ -555,4 +563,147 @@ public class SuggestionEngine {
 
     private record TableBinding(String table, String alias) {}
     private record KeywordMatch(SuggestionType type, int start, int end, String keyword) {}
+
+    /**
+     * 可调整大小的联想弹窗，使用无边框 JDialog + 自定义边缘拖拽手柄。
+     */
+    private static class ResizableSuggestionDialog extends JDialog {
+        private static final int RESIZE_MARGIN = 8;
+        private static final int MIN_WIDTH = 240;
+        private static final int MIN_HEIGHT = 120;
+        private Dimension lastSize = new Dimension(320, 200);
+        private Point dragStart;
+        private Dimension dragInitialSize;
+        private ResizeDirection dragDirection = ResizeDirection.NONE;
+
+        ResizableSuggestionDialog(Window owner) {
+            super(owner);
+            setUndecorated(true);
+            setResizable(true);
+            setFocusableWindowState(false);
+            setAlwaysOnTop(true);
+            getRootPane().setBorder(new LineBorder(new Color(0xC0C0C0)));
+            installResizeHandlers();
+        }
+
+        void showAt(Component invoker, Rectangle bounds) {
+            if (!isVisible()) {
+                setSize(lastSize);
+            }
+            Point screen = new Point(bounds.x, bounds.y + bounds.height);
+            SwingUtilities.convertPointToScreen(screen, invoker);
+            clampSizeToScreen();
+            Rectangle usable = getScreenBounds();
+            int x = Math.max(usable.x, Math.min(screen.x, usable.x + usable.width - getWidth()));
+            int y = Math.max(usable.y, Math.min(screen.y, usable.y + usable.height - getHeight()));
+            setLocation(x, y);
+            setVisible(true);
+        }
+
+        @Override
+        public void setSize(int width, int height) {
+            int clampedWidth = Math.max(MIN_WIDTH, width);
+            int clampedHeight = Math.max(MIN_HEIGHT, height);
+            super.setSize(clampedWidth, clampedHeight);
+            lastSize = getSize();
+        }
+
+        private void clampSizeToScreen() {
+            Rectangle bounds = getScreenBounds();
+            int width = Math.min(getWidth(), bounds.width);
+            int height = Math.min(getHeight(), bounds.height);
+            super.setSize(Math.max(MIN_WIDTH, width), Math.max(MIN_HEIGHT, height));
+            lastSize = getSize();
+        }
+
+        private Rectangle getScreenBounds() {
+            GraphicsConfiguration gc = getGraphicsConfiguration();
+            if (gc != null) {
+                return gc.getBounds();
+            }
+            Dimension screen = Toolkit.getDefaultToolkit().getScreenSize();
+            return new Rectangle(0, 0, screen.width, screen.height);
+        }
+
+        private void installResizeHandlers() {
+            MouseAdapter adapter = new MouseAdapter() {
+                @Override
+                public void mouseMoved(MouseEvent e) {
+                    updateCursor(e.getPoint());
+                }
+
+                @Override
+                public void mousePressed(MouseEvent e) {
+                    dragDirection = hitTest(e.getPoint());
+                    if (dragDirection != ResizeDirection.NONE) {
+                        dragStart = e.getLocationOnScreen();
+                        dragInitialSize = getSize();
+                    }
+                }
+
+                @Override
+                public void mouseDragged(MouseEvent e) {
+                    if (dragDirection == ResizeDirection.NONE || dragStart == null || dragInitialSize == null) {
+                        return;
+                    }
+                    Point current = e.getLocationOnScreen();
+                    int dx = current.x - dragStart.x;
+                    int dy = current.y - dragStart.y;
+
+                    int targetWidth = dragInitialSize.width;
+                    int targetHeight = dragInitialSize.height;
+                    if (dragDirection.includesEast()) {
+                        targetWidth += dx;
+                    }
+                    if (dragDirection.includesSouth()) {
+                        targetHeight += dy;
+                    }
+                    setSize(targetWidth, targetHeight);
+                    clampSizeToScreen();
+                }
+
+                @Override
+                public void mouseReleased(MouseEvent e) {
+                    dragDirection = ResizeDirection.NONE;
+                    dragStart = null;
+                    dragInitialSize = null;
+                }
+            };
+
+            getRootPane().addMouseListener(adapter);
+            getRootPane().addMouseMotionListener(adapter);
+        }
+
+        private void updateCursor(Point p) {
+            ResizeDirection direction = hitTest(p);
+            int cursor = switch (direction) {
+                case EAST -> Cursor.E_RESIZE_CURSOR;
+                case SOUTH -> Cursor.S_RESIZE_CURSOR;
+                case SOUTH_EAST -> Cursor.SE_RESIZE_CURSOR;
+                default -> Cursor.DEFAULT_CURSOR;
+            };
+            setCursor(Cursor.getPredefinedCursor(cursor));
+        }
+
+        private ResizeDirection hitTest(Point p) {
+            boolean east = p.x >= getWidth() - RESIZE_MARGIN;
+            boolean south = p.y >= getHeight() - RESIZE_MARGIN;
+            if (east && south) return ResizeDirection.SOUTH_EAST;
+            if (east) return ResizeDirection.EAST;
+            if (south) return ResizeDirection.SOUTH;
+            return ResizeDirection.NONE;
+        }
+
+        private enum ResizeDirection {
+            NONE, EAST, SOUTH, SOUTH_EAST;
+
+            boolean includesEast() {
+                return this == EAST || this == SOUTH_EAST;
+            }
+
+            boolean includesSouth() {
+                return this == SOUTH || this == SOUTH_EAST;
+            }
+        }
+    }
 }

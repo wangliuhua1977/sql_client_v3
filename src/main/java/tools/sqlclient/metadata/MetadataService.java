@@ -1358,11 +1358,14 @@ public class MetadataService {
     public List<SuggestionItem> suggest(String token, SuggestionContext context, int limit) {
         String likePattern = toLikePattern(token);
         if (likePattern == null) return List.of();
+        int columnLimit = (context.type() == SuggestionType.COLUMN && context.tableHint() != null)
+                ? Integer.MAX_VALUE
+                : limit;
         return switch (context.type()) {
             case TABLE_OR_VIEW -> queryObjects(likePattern, Set.of("table", "view"), limit);
             case FUNCTION -> queryObjects(likePattern, Set.of("function"), limit);
             case PROCEDURE -> queryObjects(likePattern, Set.of("procedure"), limit);
-            case COLUMN -> queryColumns(likePattern, context.tableHint(), context.scopedTables(), limit);
+            case COLUMN -> queryColumns(likePattern, context.tableHint(), context.scopedTables(), columnLimit);
         };
     }
 
