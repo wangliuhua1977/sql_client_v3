@@ -133,6 +133,9 @@ public class QueryResultPanel extends JPanel {
         render(result);
     }
 
+
+
+
     public static QueryResultPanel pending(String sqlText) {
         List<String> cols = List.of("消息");
         List<List<String>> rows = List.of(List.of("任务已提交，等待执行..."));
@@ -440,6 +443,7 @@ public class QueryResultPanel extends JPanel {
             TableCopySupport.copyToClipboard(text);
         }
     }
+
 
     private void copySelectedColumns() {
         java.util.List<Integer> cols = resolveTargetColumns();
