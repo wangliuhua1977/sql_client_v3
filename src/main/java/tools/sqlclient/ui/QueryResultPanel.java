@@ -178,8 +178,6 @@ public class QueryResultPanel extends JPanel {
         } else if (result.getNote() != null && !result.getNote().isBlank()) {
             messageLabel.setText(result.getNote());
         }
-        int count = result.getTotalRows() != null ? result.getTotalRows() : result.getRowsCount();
-        countLabel.setText("记录数 " + count + " 条");
         boolean renderTable = shouldRenderResultSet(result);
         if (renderTable) {
             List<ColumnDef> defs = resolveColumns(result);
@@ -194,6 +192,12 @@ public class QueryResultPanel extends JPanel {
         } else {
             renderInfo(result);
             switchCard(CARD_INFO);
+        }
+        int count = result.getTotalRows() != null ? result.getTotalRows() : result.getRowsCount();
+        if (count <= 0) {
+            countLabel.setText("返回 0 条记录");
+        } else {
+            countLabel.setText("记录数 " + count + " 条");
         }
         setBusy(!isTerminalStatus(result.getStatus()));
     }
