@@ -327,17 +327,6 @@ public class RemoteSqlClient {
                 return columns;
             }
         }
-        JsonArray rows = extractRows(obj);
-        if (rows != null && rows.size() > 0 && rows.get(0).isJsonObject()) {
-            for (Map.Entry<String, JsonElement> entry : rows.get(0).getAsJsonObject().entrySet()) {
-                columns.add(entry.getKey());
-            }
-        } else if (rows != null && rows.size() > 0 && rows.get(0).isJsonArray()) {
-            int size = rows.get(0).getAsJsonArray().size();
-            for (int i = 0; i < size; i++) {
-                columns.add("col_" + (i + 1));
-            }
-        }
         return columns;
     }
 
