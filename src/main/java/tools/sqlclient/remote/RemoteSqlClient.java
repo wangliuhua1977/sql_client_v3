@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import tools.sqlclient.exec.AsyncJobStatus;
+import tools.sqlclient.exec.ColumnNameNormalizer;
 import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
 import tools.sqlclient.exec.ResultNotReadyException;
@@ -237,7 +238,8 @@ public class RemoteSqlClient {
         rr.setStatus(readString(obj, "status"));
         rr.setCode(readString(obj, "code"));
         rr.setSubmittedAt(readLong(obj, "submittedAt"));
-        rr.setResultAvailable(readBoolean(obj, "resultAvailable"));
+        Boolean resultAvailable = readBoolean(obj, "resultAvailable");
+        rr.setResultAvailable(resultAvailable);
         rr.setArchived(readBoolean(obj, "archived"));
         rr.setArchiveStatus(readString(obj, "archiveStatus"));
         rr.setArchiveError(readString(obj, "archiveError"));
@@ -261,7 +263,11 @@ public class RemoteSqlClient {
         rr.setActualRowCount(readInt(obj, "actualRowCount"));
         rr.setMaxVisibleRows(readInt(obj, "maxVisibleRows"));
         rr.setMaxTotalRows(readInt(obj, "maxTotalRows"));
-        rr.setHasResultSet(readBoolean(obj, "hasResultSet"));
+        Boolean hasResultSet = readBoolean(obj, "hasResultSet");
+        if (hasResultSet == null) {
+            hasResultSet = resultAvailable;
+        }
+        rr.setHasResultSet(hasResultSet);
         rr.setIsSelect(readBoolean(obj, "isSelect"));
         rr.setResultType(readString(obj, "resultType"));
         rr.setUpdateCount(readInt(obj, "updateCount"));
@@ -276,10 +282,15 @@ public class RemoteSqlClient {
         rr.setNotices(readStringList(obj, "notices"));
         rr.setWarnings(readStringList(obj, "warnings"));
         rr.setThreadPool(parseThreadPool(obj));
-        rr.setColumns(extractColumns(obj));
+        List<String> rawColumns = extractColumns(obj);
+        List<String> expressions = extractColumnExpressions(obj);
+        List<String> normalizedColumns = ColumnNameNormalizer.normalize(rawColumns, expressions);
+        rr.setColumns(normalizedColumns);
+        rr.setColumnExpressions(expressions);
         JsonArray rows = extractRows(obj);
         rr.setRawRows(rows);
-        rr.setRowMaps(extractRowMaps(rows, rr.getColumns()));
+        rr.setRowMaps(extractRowMaps(rows, normalizedColumns, rawColumns));
+        rr.setTotalRows(resolveTotalRows(obj));
         return rr;
     }
 
@@ -298,6 +309,24 @@ public class RemoteSqlClient {
                 }
             }
         }
+        if (obj.has("columnDefs") && obj.get("columnDefs").isJsonArray()) {
+            for (JsonElement el : obj.getAsJsonArray("columnDefs")) {
+                if (el != null && el.isJsonObject()) {
+                    JsonObject def = el.getAsJsonObject();
+                    String name = readString(def, "name");
+                    if (name == null) {
+                        name = readString(def, "displayName");
+                    }
+                    if (name == null) {
+                        name = readString(def, "column");
+                    }
+                    columns.add(name);
+                }
+            }
+            if (!columns.isEmpty()) {
+                return columns;
+            }
+        }
         JsonArray rows = extractRows(obj);
         if (rows != null && rows.size() > 0 && rows.get(0).isJsonObject()) {
             for (Map.Entry<String, JsonElement> entry : rows.get(0).getAsJsonObject().entrySet()) {
@@ -312,6 +341,38 @@ public class RemoteSqlClient {
         return columns;
     }
 
+    private List<String> extractColumnExpressions(JsonObject obj) {
+        List<String> expressions = new ArrayList<>();
+        if (obj == null) {
+            return expressions;
+        }
+        for (String key : List.of("columnExprs", "selectList")) {
+            if (obj.has(key) && obj.get(key).isJsonArray()) {
+                for (JsonElement el : obj.getAsJsonArray(key)) {
+                    if (el != null && el.isJsonPrimitive()) {
+                        expressions.add(el.getAsString());
+                    }
+                }
+                if (!expressions.isEmpty()) {
+                    return expressions;
+                }
+            }
+        }
+        if (obj.has("columnDefs") && obj.get("columnDefs").isJsonArray()) {
+            for (JsonElement el : obj.getAsJsonArray("columnDefs")) {
+                if (el != null && el.isJsonObject()) {
+                    JsonObject def = el.getAsJsonObject();
+                    if (def.has("expr") && def.get("expr").isJsonPrimitive()) {
+                        expressions.add(def.get("expr").getAsString());
+                    } else {
+                        expressions.add(null);
+                    }
+                }
+            }
+        }
+        return expressions;
+    }
+
     private JsonArray extractRows(JsonObject obj) {
         if (obj == null) {
             return new JsonArray();
@@ -324,12 +385,13 @@ public class RemoteSqlClient {
         return new JsonArray();
     }
 
-    private List<java.util.Map<String, String>> extractRowMaps(JsonArray rowsJson, List<String> columns) {
+    private List<java.util.Map<String, String>> extractRowMaps(JsonArray rowsJson, List<String> columns, List<String> rawColumns) {
         List<java.util.Map<String, String>> rows = new ArrayList<>();
         if (rowsJson == null) {
             return rows;
         }
         int colCount = columns == null ? 0 : columns.size();
+        List<String> fallbackRaw = rawColumns == null ? List.of() : rawColumns;
         for (JsonElement el : rowsJson) {
             if (el == null || el.isJsonNull()) {
                 continue;
@@ -337,8 +399,23 @@ public class RemoteSqlClient {
             if (el.isJsonObject()) {
                 JsonObject obj = el.getAsJsonObject();
                 java.util.Map<String, String> row = new java.util.LinkedHashMap<>();
-                for (Map.Entry<String, JsonElement> entry : obj.entrySet()) {
-                    row.put(entry.getKey(), stringify(entry.getValue()));
+                if (obj.entrySet().size() == columns.size()) {
+                    int idx = 0;
+                    for (String col : columns) {
+                        String rawKey = idx < fallbackRaw.size() ? fallbackRaw.get(idx) : col;
+                        String value = null;
+                        if (rawKey != null && obj.has(rawKey)) {
+                            value = stringify(obj.get(rawKey));
+                        } else if (obj.has(col)) {
+                            value = stringify(obj.get(col));
+                        }
+                        row.put(col, value);
+                        idx++;
+                    }
+                } else {
+                    for (Map.Entry<String, JsonElement> entry : obj.entrySet()) {
+                        row.put(entry.getKey(), stringify(entry.getValue()));
+                    }
                 }
                 rows.add(row);
             } else if (el.isJsonArray()) {
@@ -352,6 +429,19 @@ public class RemoteSqlClient {
             }
         }
         return rows;
+    }
+
+    private Integer resolveTotalRows(JsonObject obj) {
+        if (obj == null) {
+            return null;
+        }
+        for (String key : List.of("totalRows", "total", "totalCount", "returnedRowCount", "actualRowCount")) {
+            Integer val = readInt(obj, key);
+            if (val != null) {
+                return val;
+            }
+        }
+        return null;
     }
 
     private ThreadPoolSnapshot parseThreadPool(JsonObject obj) {

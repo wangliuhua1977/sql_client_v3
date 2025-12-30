@@ -303,15 +303,17 @@ public class SqlExecutionService {
         while (attempt < attempts) {
             attempt++;
             int page = context.computePageNumber(pageIndex, useAlternateBase);
+            int offset = Math.max(0, pageIndex * finalPageSize);
             try {
-                ResultResponse resp = remoteClient.fetchResult(jobId, context.shouldUseRemoveAfterFetch(pageIndex), page, finalPageSize, null, null);
+                OperationLog.log("JOB_RESULT_FETCH: jobId=" + jobId + ", offset=" + offset + ", limit=" + finalPageSize);
+                ResultResponse resp = remoteClient.fetchResult(jobId, context.shouldUseRemoveAfterFetch(pageIndex), page, finalPageSize, offset, finalPageSize);
                 boolean success = Boolean.TRUE.equals(resp.getSuccess());
                 String respStatus = resp.getStatus();
                 Integer returnedRowCount = resp.getReturnedRowCount();
                 Integer actualRowCount = resp.getActualRowCount();
                 Boolean hasResultSet = resp.getHasResultSet();
                 String message = pickMessage(resp);
-                logAttempt(jobId, attempt, pageIndex, page, finalPageSize, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
+                logAttempt(jobId, attempt, pageIndex, page, finalPageSize, offset, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
 
                 boolean expectResult = shouldExpectResult(finalStatus, hasResultSet, actualRowCount, returnedRowCount, respStatus);
                 boolean transientUnavailable = isTransientUnavailable(message) || (!success && expectResult);
@@ -418,7 +420,8 @@ public class SqlExecutionService {
             List<String> columns = resp.getColumns() != null ? resp.getColumns() : List.of();
             List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
             List<List<String>> rows = extractRows(rowMaps, columns);
-            int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
+            Integer totalRows = resp.getTotalRows();
+            int rowCount = firstPositive(totalRows, returnedRowCount, rows.size());
 
             logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
                     hasNext, truncated, note, columns, resp.getRawRows(), rows, queuedAt, queueDelayMillis, overloaded, threadPool);
@@ -439,6 +442,7 @@ public class SqlExecutionService {
                     .actualRowCount(actualRowCount)
                     .maxVisibleRows(maxVisibleRows)
                     .maxTotalRows(maxTotalRows)
+                    .totalRows(totalRows)
                     .page(respPage)
                     .pageSize(respPageSize)
                     .hasNext(hasNext)
@@ -578,13 +582,14 @@ public class SqlExecutionService {
         }
     }
 
-    private void logAttempt(String jobId, int attempt, int pageIndex, int page, int pageSize, ResultFetchContext context,
+    private void logAttempt(String jobId, int attempt, int pageIndex, int page, int pageSize, int offset, ResultFetchContext context,
                             boolean success, Integer returnedRowCount, Integer actualRowCount, Boolean hasResultSet,
                             String message, boolean alternateBase) {
         OperationLog.log("[" + jobId + "] /jobs/result attempt=" + attempt
                 + " page=" + page
                 + " (base=" + context.describeBase(page, alternateBase) + ")"
                 + " pageSize=" + pageSize
+                + " offset=" + offset
                 + " removeAfterFetch=" + context.shouldUseRemoveAfterFetch(pageIndex)
                 + " success=" + success
                 + (hasResultSet != null ? (" hasResultSet=" + hasResultSet) : "")

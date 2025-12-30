@@ -50,8 +50,10 @@ public class ResultResponse {
     private List<String> notices;
     private List<String> warnings;
     private List<String> columns;
+    private List<String> columnExpressions;
     private List<java.util.Map<String, String>> rowMaps;
     private JsonArray rawRows;
+    private Integer totalRows;
 
     public String getJobId() {
         return jobId;
@@ -233,12 +235,20 @@ public class ResultResponse {
         return columns;
     }
 
+    public List<String> getColumnExpressions() {
+        return columnExpressions;
+    }
+
     public List<java.util.Map<String, String>> getRowMaps() {
         return rowMaps;
     }
 
     public JsonArray getRawRows() {
         return rawRows;
+    }
+
+    public Integer getTotalRows() {
+        return totalRows;
     }
 
     public void setJobId(String jobId) {
@@ -421,11 +431,19 @@ public class ResultResponse {
         this.columns = columns;
     }
 
+    public void setColumnExpressions(List<String> columnExpressions) {
+        this.columnExpressions = columnExpressions;
+    }
+
     public void setRowMaps(List<java.util.Map<String, String>> rowMaps) {
         this.rowMaps = rowMaps;
     }
 
     public void setRawRows(JsonArray rawRows) {
         this.rawRows = rawRows;
+    }
+
+    public void setTotalRows(Integer totalRows) {
+        this.totalRows = totalRows;
     }
 }

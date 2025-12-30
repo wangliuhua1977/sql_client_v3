@@ -169,6 +169,10 @@ public class QueryResultPanel extends JPanel {
         if (result == null) {
             return;
         }
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> render(result));
+            return;
+        }
         setJobStatus(result.getJobId(), result.getStatus(), result.getProgressPercent(),
                 result.getElapsedMillis() != null ? result.getElapsedMillis() : result.getDurationMillis());
         String msg = result.getMessage();
@@ -177,7 +181,8 @@ public class QueryResultPanel extends JPanel {
         } else if (result.getNote() != null && !result.getNote().isBlank()) {
             messageLabel.setText(result.getNote());
         }
-        countLabel.setText("记录数 " + result.getRowsCount() + " 条");
+        int count = result.getTotalRows() != null ? result.getTotalRows() : result.getRowsCount();
+        countLabel.setText("记录数 " + count + " 条");
         boolean renderTable = shouldRenderResultSet(result);
         if (renderTable) {
             List<ColumnDef> defs = resolveColumns(result);
