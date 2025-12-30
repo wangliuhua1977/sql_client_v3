@@ -155,6 +155,7 @@ public class ColumnOrderDecider {
                 .actualRowCount(original.getActualRowCount())
                 .maxVisibleRows(original.getMaxVisibleRows())
                 .maxTotalRows(original.getMaxTotalRows())
+                .totalRows(original.getTotalRows())
                 .hasResultSet(original.getHasResultSet())
                 .page(original.getPage())
                 .pageSize(original.getPageSize())

@@ -406,3 +406,33 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 - **ResultSet 渲染**：仅当后端标记 `hasResultSet/isSelect/resultType` 为 true，或分类器判定为 ResultSet 时才进入列适配/投影解析；列定义数量与每行数据列数必须一致，否则跳过重排以避免“多列表头 + 空白行”。
 - **非查询渲染**：顶层非查询或 `hasResultSet=false` 时走消息视图，显示状态、commandTag、affectedRows、elapsed/jobId 等，不做任何列解析/星号展开。CommandTag 与 affectedRows 会直接展示，无法判定时标记为 N/A。
 - **影响行数获取策略**：优先使用后端 `updateCount/affectedRows(rowsAffected)` 且值≥0；否则从 commandTag 匹配 `^(INSERT|UPDATE|DELETE|SELECT)\s+\d+` 补齐；仍不可得时显示 N/A，但 commandTag 依然保留。
+
+## 前端执行链路与规则补充
+
+### 结果集字段兼容表
+- `/jobs/result` 响应的列名接受 `columns/resultColumns/columnNames/columnDefs`，行数据接受 `resultRows/rows/data/records`。
+- 计数与分页字段兼容 `totalRows/total/totalCount/returnedRowCount/actualRowCount`，`hasResultSet` 缺失时复用 `resultAvailable`。
+- `offset/limit/page/pageSize` 均会被日志输出，首批强制 `offset=0`。
+
+### 列名自动修复规则
+- 简单聚合：`sum(col)`→`sum_col`，`avg(col)`→`avg_col`，`min/max(col)` 同理；`count(*)`→`count_all`，`count(1)`→`count_1`，`count(col)`→`count_col`。
+- 复杂 `sum(...)`（含空格/CASE/DISTINCT/运算符/嵌套等）统一归一为 `sum_`、`sum_2`、`sum_3...`，优先尊重显式别名。
+- 其他表达式按“全小写、非字母数字转 `_`、压缩连续 `_`、首字符非字母前置 `expr_`、全局去重 _2/_3”生成；完全无信息时兜底 `col_1/col_2...`。
+
+### SQL splitter 规则（分号唯一分隔符）
+- 仅分号作为语句边界，字符串、`--` 行注释、`/* */` 块注释、`$$...$$` 内的分号被忽略。
+- 末尾无分号的非空片段也视为待执行语句，`CREATE TABLE ... AS SELECT ...` 不会被拆分。
+
+### SQL 语句块（block）规则
+- 隔离行：去掉空格/Tab 后为空的整行，用于划分 block；连续空行算一个隔离区域。
+- 语句按顺序组成 block，隔离行只影响 block 归属，不改变语句切分；检测到两个非空语句之间存在隔离行会记录 `SQL_SPLIT_WARNING: blank line between statements ignored by rule`。
+- block 范围覆盖首语句所在行的前导空白到末语句结束，隔离区的光标优先归属上一 block（否则下一 block）。
+
+### Ctrl+Enter 执行规则
+- 有选区：仅对选中区域按分号切分后的语句序列执行，同样记录隔离行 warning。
+- 无选区：定位光标归属的 block（见上节）并顺序执行该 block 内所有语句，光标在隔离区时优先上一 block，否则下一 block，开头空白归属首 block。
+- 菜单/按钮与快捷键共用同一 splitter 与隔离行识别器，语句/块归属一致。
+
+### 日志定位方法
+- 结果集请求会输出 `JOB_RESULT_FETCH: jobId=... offset=... limit=...`，便于排查分页是否正确。
+- 结果解析会记录列数/行数/totalRows 统计、是否截断、线程池快照等；隔离行分组触发 `SQL_SPLIT_WARNING`，不包含 SQL 文本。

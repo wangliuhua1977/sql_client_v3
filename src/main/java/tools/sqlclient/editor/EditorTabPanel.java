@@ -16,7 +16,7 @@ import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.SuggestionEngine;
 import tools.sqlclient.util.ThreadPools;
-import tools.sqlclient.util.SqlBlockDetector;
+import tools.sqlclient.util.SqlSplitter;
 import tools.sqlclient.ui.QueryResultPanel;
 
 import javax.swing.*;
@@ -749,37 +749,26 @@ public class EditorTabPanel extends JPanel {
 
     public java.util.List<String> getExecutableStatements(boolean blockMode) {
         String selected = textArea.getSelectedText();
-        if (blockMode) {
-            String segment = (selected != null && !selected.isBlank()) ? selected : extractBlockAroundCaret();
-            if (segment == null) {
-                return java.util.List.of();
-            }
-            String trimmed = segment.strip();
-            if (trimmed.isEmpty()) {
-                return java.util.List.of();
-            }
-            return java.util.List.of(trimmed);
-        }
-
-        String target;
         if (selected != null && !selected.isBlank()) {
-            SqlBlockDetector.DdlBlockDetectionResult detectionResult = SqlBlockDetector.detectSingleDdlBlock(selected);
-            if (detectionResult.isSingleDdlBlock()) {
-                java.util.List<String> list = new java.util.ArrayList<>();
-                list.add(selected);
-                return list;
-            }
-            target = selected;
-        } else {
-            target = extractStatementAtCaret();
+            var statements = SqlSplitter.split(selected);
+            SqlSplitter.groupIntoBlocks(selected, statements);
+            return statements.stream().map(SqlSplitter.SqlStatement::text).filter(s -> !s.isBlank()).toList();
         }
-        java.util.List<String> list = new java.util.ArrayList<>();
-        for (String part : target.split(";")) {
-            if (!part.trim().isEmpty()) {
-                list.add(part.trim());
+        String full = textArea.getText();
+        var statements = SqlSplitter.split(full);
+        var blocks = SqlSplitter.groupIntoBlocks(full, statements);
+        if (blockMode) {
+            var targetBlock = SqlSplitter.findBlockAtCaret(textArea.getCaretPosition(), full, blocks);
+            if (targetBlock == null || targetBlock.statements().isEmpty()) {
+                return java.util.List.of();
             }
+            return targetBlock.statements().stream().map(SqlSplitter.SqlStatement::text).filter(s -> !s.isBlank()).toList();
         }
-        return list;
+        var stmt = SqlSplitter.findStatementAtCaret(textArea.getCaretPosition(), statements);
+        if (stmt == null || stmt.text().isBlank()) {
+            return java.util.List.of();
+        }
+        return java.util.List.of(stmt.text().trim());
     }
 
     public java.util.List<String> getExecutableStatements() {
