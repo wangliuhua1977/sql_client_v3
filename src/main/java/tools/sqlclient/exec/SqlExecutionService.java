@@ -7,6 +7,8 @@ import tools.sqlclient.util.Config;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.ThreadPools;
 
+import static tools.sqlclient.exec.ColumnNameNormalizer.normalize;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -418,6 +420,16 @@ public class SqlExecutionService {
             }
 
             List<String> columns = resp.getColumns() != null ? resp.getColumns() : List.of();
+            if (columns.isEmpty()) {
+                List<String> exprs = resp.getColumnExpressions();
+                if (exprs != null && !exprs.isEmpty()) {
+                    columns = normalize(List.of(), exprs);
+                }
+            }
+            if (Boolean.TRUE.equals(finalHasResultSet) && columns.isEmpty()) {
+                OperationLog.log("[" + jobId + "] 无法获取列信息，columns 为空");
+                throw new RuntimeException("无法获取列信息");
+            }
             List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
             List<List<String>> rows = extractRows(rowMaps, columns);
             Integer totalRows = resp.getTotalRows();
@@ -426,8 +438,14 @@ public class SqlExecutionService {
             logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
                     hasNext, truncated, note, columns, resp.getRawRows(), rows, queuedAt, queueDelayMillis, overloaded, threadPool);
 
+            OperationLog.log("JOB_RESULT_STATS: jobId=" + jobId
+                    + ", columns=" + columns.size()
+                    + ", rows=" + rows.size()
+                    + ", totalRows=" + (totalRows != null ? totalRows : rowCount));
+
             SqlExecResult.Builder builder = SqlExecResult.builder(sql)
                     .columns(columns)
+                    .columnDefs(buildColumnDefs(columns))
                     .rows(rows)
                     .rowMaps(rowMaps)
                     .rowCount(rowCount)
@@ -472,6 +490,18 @@ public class SqlExecutionService {
             OperationLog.log("[" + jobId + "] 解析 /jobs/result 失败: " + e.getMessage());
             throw new RuntimeException("解析结果失败: " + e.getMessage(), e);
         }
+    }
+
+    private List<ColumnDef> buildColumnDefs(List<String> columns) {
+        List<ColumnDef> defs = new ArrayList<>();
+        List<String> safe = columns == null ? List.of() : columns;
+        int seq = 1;
+        for (String col : safe) {
+            String display = col == null ? "" : col;
+            defs.add(new ColumnDef(display + "#" + seq, display, display));
+            seq++;
+        }
+        return defs;
     }
 
     private Integer resolveAffectedRows(Integer rowsAffected, Integer updateCount, String commandTag) {
