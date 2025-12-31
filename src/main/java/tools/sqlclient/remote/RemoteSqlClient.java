@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import tools.sqlclient.exec.AsyncJobStatus;
+import tools.sqlclient.exec.ColumnMeta;
 import tools.sqlclient.exec.ColumnNameNormalizer;
 import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
@@ -146,9 +147,12 @@ public class RemoteSqlClient {
     }
 
     private int sanitizePageSize(Integer candidate) {
-        int size = candidate != null && candidate > 0 ? candidate : RemoteSqlConfig.SERVER_MAX_PAGE_SIZE;
+        int size = candidate != null && candidate > 0 ? candidate : 200;
         if (size > RemoteSqlConfig.SERVER_MAX_PAGE_SIZE) {
             size = RemoteSqlConfig.SERVER_MAX_PAGE_SIZE;
+        }
+        if (size < 1) {
+            size = 1;
         }
         return size;
     }
@@ -282,16 +286,60 @@ public class RemoteSqlClient {
         rr.setNotices(readStringList(obj, "notices"));
         rr.setWarnings(readStringList(obj, "warnings"));
         rr.setThreadPool(parseThreadPool(obj));
+        List<ColumnMeta> columnMetas = extractColumnMetas(obj);
         List<String> rawColumns = extractColumns(obj);
+        if (columnMetas != null && !columnMetas.isEmpty()) {
+            rawColumns = columnMetas.stream()
+                    .map(ColumnMeta::getName)
+                    .toList();
+        }
         List<String> expressions = extractColumnExpressions(obj);
         List<String> normalizedColumns = ColumnNameNormalizer.normalize(rawColumns, expressions);
+        if (normalizedColumns.isEmpty() && rawColumns != null) {
+            normalizedColumns = new ArrayList<>(rawColumns);
+        }
+        rr.setColumnMetas(columnMetas);
         rr.setColumns(normalizedColumns);
         rr.setColumnExpressions(expressions);
         JsonArray rows = extractRows(obj);
         rr.setRawRows(rows);
         rr.setRowMaps(extractRowMaps(rows, normalizedColumns, rawColumns));
+        rr.setResultRows(extractResultRows(rows));
         rr.setTotalRows(resolveTotalRows(obj));
         return rr;
+    }
+
+    private List<ColumnMeta> extractColumnMetas(JsonObject obj) {
+        List<ColumnMeta> metas = new ArrayList<>();
+        if (obj == null || !obj.has("columns") || !obj.get("columns").isJsonArray()) {
+            return metas;
+        }
+        int idx = 0;
+        for (JsonElement el : obj.getAsJsonArray("columns")) {
+            idx++;
+            if (el == null || !el.isJsonObject()) {
+                continue;
+            }
+            JsonObject col = el.getAsJsonObject();
+            ColumnMeta meta = new ColumnMeta();
+            meta.setName(readString(col, "name"));
+            meta.setType(readString(col, "type"));
+            meta.setPosition(readInt(col, "position") != null ? readInt(col, "position") : idx);
+            meta.setJdbcType(readInt(col, "jdbcType"));
+            meta.setPrecision(readInt(col, "precision"));
+            meta.setScale(readInt(col, "scale"));
+            meta.setNullable(readInt(col, "nullable"));
+            metas.add(meta);
+        }
+        metas.sort((a, b) -> {
+            Integer pa = a.getPosition();
+            Integer pb = b.getPosition();
+            if (pa == null && pb == null) return 0;
+            if (pa == null) return 1;
+            if (pb == null) return -1;
+            return Integer.compare(pa, pb);
+        });
+        return metas;
     }
 
     private List<String> extractColumns(JsonObject obj) {
@@ -374,6 +422,23 @@ public class RemoteSqlClient {
         return new JsonArray();
     }
 
+    private List<Map<String, Object>> extractResultRows(JsonArray rowsJson) {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        if (rowsJson == null) {
+            return rows;
+        }
+        for (JsonElement el : rowsJson) {
+            if (el != null && el.isJsonObject()) {
+                Map<String, Object> row = new java.util.LinkedHashMap<>();
+                for (Map.Entry<String, JsonElement> entry : el.getAsJsonObject().entrySet()) {
+                    row.put(entry.getKey(), toJavaObject(entry.getValue()));
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
+    }
+
     private List<java.util.Map<String, String>> extractRowMaps(JsonArray rowsJson, List<String> columns, List<String> rawColumns) {
         List<java.util.Map<String, String>> rows = new ArrayList<>();
         if (rowsJson == null) {
@@ -388,7 +453,7 @@ public class RemoteSqlClient {
             if (el.isJsonObject()) {
                 JsonObject obj = el.getAsJsonObject();
                 java.util.Map<String, String> row = new java.util.LinkedHashMap<>();
-                if (obj.entrySet().size() == columns.size()) {
+                if (columns != null && obj.entrySet().size() == colCount) {
                     int idx = 0;
                     for (String col : columns) {
                         String rawKey = idx < fallbackRaw.size() ? fallbackRaw.get(idx) : col;
@@ -418,6 +483,36 @@ public class RemoteSqlClient {
             }
         }
         return rows;
+    }
+
+    private Object toJavaObject(JsonElement el) {
+        if (el == null || el.isJsonNull()) {
+            return null;
+        }
+        if (el.isJsonPrimitive()) {
+            if (el.getAsJsonPrimitive().isBoolean()) {
+                return el.getAsBoolean();
+            }
+            if (el.getAsJsonPrimitive().isNumber()) {
+                return el.getAsNumber();
+            }
+            return el.getAsString();
+        }
+        if (el.isJsonArray()) {
+            List<Object> list = new ArrayList<>();
+            for (JsonElement child : el.getAsJsonArray()) {
+                list.add(toJavaObject(child));
+            }
+            return list;
+        }
+        if (el.isJsonObject()) {
+            Map<String, Object> map = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, JsonElement> entry : el.getAsJsonObject().entrySet()) {
+                map.put(entry.getKey(), toJavaObject(entry.getValue()));
+            }
+            return map;
+        }
+        return gson.toJson(el);
     }
 
     private Integer resolveTotalRows(JsonObject obj) {

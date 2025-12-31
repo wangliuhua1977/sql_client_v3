@@ -178,6 +178,14 @@ public class QueryResultPanel extends JPanel {
         } else if (result.getNote() != null && !result.getNote().isBlank()) {
             messageLabel.setText(result.getNote());
         }
+        if (Boolean.TRUE.equals(result.getTruncated())) {
+            String suffix = "结果已截断(" + (result.getMaxVisibleRows() != null ? result.getMaxVisibleRows() : "1000") + ")";
+            if (messageLabel.getText() != null && !messageLabel.getText().isBlank()) {
+                messageLabel.setText(messageLabel.getText() + " | " + suffix);
+            } else {
+                messageLabel.setText(suffix);
+            }
+        }
         boolean renderTable = shouldRenderResultSet(result);
         if (renderTable) {
             List<ColumnDef> defs = resolveColumns(result);

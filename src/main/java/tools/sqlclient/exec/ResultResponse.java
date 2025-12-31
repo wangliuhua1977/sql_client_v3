@@ -3,6 +3,7 @@ package tools.sqlclient.exec;
 import com.google.gson.JsonArray;
 
 import java.util.List;
+import java.util.Map;
 
 public class ResultResponse {
     private String jobId;
@@ -51,7 +52,9 @@ public class ResultResponse {
     private List<String> warnings;
     private List<String> columns;
     private List<String> columnExpressions;
+    private List<ColumnMeta> columnMetas;
     private List<java.util.Map<String, String>> rowMaps;
+    private List<Map<String, Object>> resultRows;
     private JsonArray rawRows;
     private Integer totalRows;
 
@@ -239,8 +242,16 @@ public class ResultResponse {
         return columnExpressions;
     }
 
+    public List<ColumnMeta> getColumnMetas() {
+        return columnMetas;
+    }
+
     public List<java.util.Map<String, String>> getRowMaps() {
         return rowMaps;
+    }
+
+    public List<Map<String, Object>> getResultRows() {
+        return resultRows;
     }
 
     public JsonArray getRawRows() {
@@ -435,8 +446,16 @@ public class ResultResponse {
         this.columnExpressions = columnExpressions;
     }
 
+    public void setColumnMetas(List<ColumnMeta> columnMetas) {
+        this.columnMetas = columnMetas;
+    }
+
     public void setRowMaps(List<java.util.Map<String, String>> rowMaps) {
         this.rowMaps = rowMaps;
+    }
+
+    public void setResultRows(List<Map<String, Object>> resultRows) {
+        this.resultRows = resultRows;
     }
 
     public void setRawRows(JsonArray rawRows) {
