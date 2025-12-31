@@ -417,17 +417,19 @@ public class SqlExecutionService {
                 throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
             }
 
-            List<String> columns = resp.getColumns() != null ? resp.getColumns() : List.of();
+            List<ColumnMeta> columnMetas = resp.getColumnMetas() != null ? resp.getColumnMetas() : List.of();
+            List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
+            List<String> columns = resolveColumns(columnMetas, resp.getColumns(), rowMaps);
+            List<ColumnDef> columnDefs = buildColumnDefs(columns, columnMetas);
             if (Boolean.TRUE.equals(finalHasResultSet) && columns.isEmpty()) {
                 OperationLog.log("[" + jobId + "] 无法获取列信息，columns 为空");
                 throw new RuntimeException("无法获取列信息");
             }
-            List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
             List<List<String>> rows = extractRows(rowMaps, columns);
             Integer totalRows = resp.getTotalRows();
             int rowCount = firstPositive(totalRows, returnedRowCount, rows.size());
 
-            logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
+            logResultDetails(jobId, status, finalHasResultSet, resp.getResultAvailable(), resp.getArchived(), respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
                     hasNext, truncated, note, columns, resp.getRawRows(), rows, queuedAt, queueDelayMillis, overloaded, threadPool);
 
             OperationLog.log("JOB_RESULT_STATS: jobId=" + jobId
@@ -437,7 +439,7 @@ public class SqlExecutionService {
 
             SqlExecResult.Builder builder = SqlExecResult.builder(sql)
                     .columns(columns)
-                    .columnDefs(buildColumnDefs(columns))
+                    .columnDefs(columnDefs)
                     .rows(rows)
                     .rowMaps(rowMaps)
                     .rowCount(rowCount)
@@ -484,7 +486,7 @@ public class SqlExecutionService {
         }
     }
 
-    private List<ColumnDef> buildColumnDefs(List<String> columns) {
+    private List<ColumnDef> buildColumnDefs(List<String> columns, List<ColumnMeta> metas) {
         List<ColumnDef> defs = new ArrayList<>();
         List<String> safe = columns == null ? List.of() : columns;
         int seq = 1;
@@ -494,6 +496,35 @@ public class SqlExecutionService {
             seq++;
         }
         return defs;
+    }
+
+    private List<String> resolveColumns(List<ColumnMeta> metas, List<String> provided, List<java.util.Map<String, String>> rowMaps) {
+        if (metas != null && !metas.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (ColumnMeta meta : metas) {
+                if (meta != null && meta.getName() != null) {
+                    names.add(meta.getName());
+                }
+            }
+            if (!names.isEmpty()) {
+                return names;
+            }
+        }
+        if (provided != null && !provided.isEmpty()) {
+            return provided;
+        }
+        if (rowMaps != null && !rowMaps.isEmpty()) {
+            java.util.Set<String> keys = new java.util.LinkedHashSet<>();
+            for (java.util.Map<String, String> map : rowMaps) {
+                if (map != null) {
+                    keys.addAll(map.keySet());
+                }
+            }
+            if (!keys.isEmpty()) {
+                return new ArrayList<>(keys);
+            }
+        }
+        return List.of();
     }
 
     private Integer resolveAffectedRows(Integer rowsAffected, Integer updateCount, String commandTag) {
@@ -572,11 +603,16 @@ public class SqlExecutionService {
         return rows;
     }
 
-    private void logResultDetails(String jobId, Integer respPage, Integer respPageSize, Integer returnedRowCount,
+    private void logResultDetails(String jobId, String status, Boolean hasResultSet, Boolean resultAvailable, Boolean archived,
+                                  Integer respPage, Integer respPageSize, Integer returnedRowCount,
                                   Integer actualRowCount, Integer maxVisibleRows, Integer maxTotalRows, Boolean hasNext,
                                   Boolean truncated, String note, List<String> columns, JsonArray rowsJson, List<List<String>> rows,
                                   Long queuedAt, Long queueDelayMillis, Boolean overloaded, ThreadPoolSnapshot threadPool) {
-        OperationLog.log("[" + jobId + "] 任务完成，page=" + respPage + " pageSize=" + respPageSize
+        OperationLog.log("[" + jobId + "] 任务完成，status=" + status
+                + (hasResultSet != null ? ("，hasResultSet=" + hasResultSet) : "")
+                + (resultAvailable != null ? ("，resultAvailable=" + resultAvailable) : "")
+                + (archived != null ? ("，archived=" + archived) : "")
+                + "，page=" + respPage + " pageSize=" + respPageSize
                 + "，returnedRowCount=" + (returnedRowCount != null ? returnedRowCount : rows.size())
                 + (actualRowCount != null ? ("，actualRowCount=" + actualRowCount) : "")
                 + (maxVisibleRows != null ? ("，maxVisibleRows=" + maxVisibleRows) : "")

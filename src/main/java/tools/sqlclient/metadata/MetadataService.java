@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.exec.CommandTagParser;
+import tools.sqlclient.exec.ColumnMeta;
 import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
 import tools.sqlclient.exec.ResultNotReadyException;
@@ -580,7 +581,7 @@ public class MetadataService {
 
     private SqlExecResult toSqlExecResult(String sql, ResultResponse resp) {
         List<Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
-        List<String> columns = resp.getColumns() != null ? resp.getColumns() : List.of();
+        List<String> columns = resolveColumns(resp, rowMaps);
 
         List<List<String>> rows = new ArrayList<>();
         for (Map<String, String> map : rowMaps) {
@@ -632,6 +633,35 @@ public class MetadataService {
                 .notices(resp.getNotices())
                 .warnings(resp.getWarnings())
                 .build();
+    }
+
+    private List<String> resolveColumns(ResultResponse resp, List<Map<String, String>> rowMaps) {
+        if (resp.getColumnMetas() != null && !resp.getColumnMetas().isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (var meta : resp.getColumnMetas()) {
+                if (meta != null && meta.getName() != null) {
+                    names.add(meta.getName());
+                }
+            }
+            if (!names.isEmpty()) {
+                return names;
+            }
+        }
+        if (resp.getColumns() != null && !resp.getColumns().isEmpty()) {
+            return resp.getColumns();
+        }
+        if (rowMaps != null && !rowMaps.isEmpty()) {
+            LinkedHashSet<String> keys = new LinkedHashSet<>();
+            for (Map<String, String> map : rowMaps) {
+                if (map != null) {
+                    keys.addAll(map.keySet());
+                }
+            }
+            if (!keys.isEmpty()) {
+                return new ArrayList<>(keys);
+            }
+        }
+        return List.of();
     }
 
     private void recordTrace(String tag, String sql, SqlExecResult result) {
