@@ -409,6 +409,48 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 
 ## 前端执行链路与规则补充
 
+### 前端开发者详细技术文档 - /jobs/result 取结果与分页
+- **请求体（POST /jobs/result）**：统一使用 `jobId + offset + limit (+ removeAfterFetch?)`，其中 limit 默认 200，前端需将 limit/pageSize 限制在 1~1000，offset 最小 0。未显式提供 offset/limit 时，可按 `offset=(page-1)*pageSize`、`limit=pageSize` 的换算规则生成；`removeAfterFetch` 默认 false，仅移除内存缓存，不影响归档。
+- **持久化优先/可重入分页**：归档命中时 status=SUCCEEDED 且 `resultAvailable=true`，同一 jobId 可重复传入不同 offset/limit 翻页；超过 1000 的窗口自动被后端截断，前端应在 hasNext=false 或 offset+limit>maxVisibleRows 时禁用继续翻页。
+- **响应字段映射**：`success/status/code/message/errorMessage` 负责提示；`hasResultSet/resultAvailable` 决定是否渲染网格；`columns`（数组，包含 name/type/position/jdbcType/precision/scale/nullable）仅出现 1 次，必须按顺序生成列头，即便 `returnedRowCount=0` 或 `resultRows=[]` 也要显示列名；`resultRows` 为对象数组，key 与 columns.name 对齐；`returnedRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/page/pageSize/offset/limit` 用于记录数与分页/截断提示；`rowsAffected/updateCount/commandTag` 用于非 SELECT 的影响行数；`submittedAt/finishedAt/durationMillis/archivedAt/expiresAt/lastAccessAt/sqlSummary/dbUser/label/archived/archiveStatus/archiveError` 直接透传到 UI 状态栏/日志。
+- **错误码与 HTTP 状态**：HTTP 410 或 `code=RESULT_EXPIRED` 需提示“结果已过期”（可携带 expiresAt）；HTTP 404 显示 jobId 不存在；HTTP 401 提示 Token 失败；HTTP 400 直接显示 errorMessage/message/code；`code=RESULT_NOT_READY` 视为未完成继续轮询；FAILED/CANCELLED 使用 `errorMessage > message > code > Unknown error` 的优先级。
+- **示例（含空结果集也包含 columns）**：
+```json
+{
+  "success": true,
+  "jobId": "uuid-1",
+  "status": "SUCCEEDED",
+  "hasResultSet": true,
+  "archived": true,
+  "archiveStatus": "ARCHIVED",
+  "resultAvailable": true,
+  "returnedRowCount": 2,
+  "truncated": false,
+  "hasNext": false,
+  "page": 1,
+  "pageSize": 200,
+  "offset": 0,
+  "limit": 200,
+  "maxVisibleRows": 1000,
+  "columns": [
+    { "name": "col", "type": "varchar", "position": 1, "jdbcType": 12, "precision": 255, "scale": 0, "nullable": 1 },
+    { "name": "amount", "type": "numeric", "position": 2, "jdbcType": 2, "precision": 18, "scale": 2, "nullable": 0 }
+  ],
+  "resultRows": [
+    { "col": "v1", "amount": 10.50 },
+    { "col": "v2", "amount": 11.30 }
+  ],
+  "submittedAt": 1717142400000,
+  "finishedAt": 1717142410000,
+  "durationMillis": 10000,
+  "archivedAt": 1717142410500,
+  "expiresAt": 1717149010500,
+  "lastAccessAt": 1717142410500,
+  "sqlSummary": "select ...",
+  "dbUser": "leshan"
+}
+```
+
 ### 结果集字段兼容表
 - `/jobs/result` 响应的列名接受 `columns/resultColumns/columnNames/columnDefs`，行数据接受 `resultRows/rows/data/records`。
 - 计数与分页字段兼容 `totalRows/total/totalCount/returnedRowCount/actualRowCount`，`hasResultSet` 缺失时复用 `resultAvailable`。
