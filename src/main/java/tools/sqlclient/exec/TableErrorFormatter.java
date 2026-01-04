@@ -24,6 +24,7 @@ public final class TableErrorFormatter {
         String status = normalize(resp.getStatus());
         boolean failed = "FAILED".equalsIgnoreCase(status)
                 || normalize(resp.getErrorMessage()) != null
+                || normalize(extractErrorMessage(resp)) != null
                 || resp.getPosition() != null
                 || (resp.getError() != null && resp.getError().getPosition() != null);
         if (!failed) {
@@ -31,8 +32,8 @@ public final class TableErrorFormatter {
         }
 
         String errorMessage = normalize(resp.getErrorMessage());
-        if (errorMessage == null && resp.getError() != null) {
-            errorMessage = normalize(resp.getError().getMessage());
+        if (errorMessage == null) {
+            errorMessage = extractErrorMessage(resp);
         }
 
         Integer position = resolvePosition(resp);
@@ -56,6 +57,17 @@ public final class TableErrorFormatter {
             return status;
         }
         return null;
+    }
+
+    private static String extractErrorMessage(ResultResponse resp) {
+        if (resp == null || resp.getError() == null) {
+            return null;
+        }
+        String message = normalize(resp.getError().getMessage());
+        if (message != null) {
+            return message;
+        }
+        return normalize(resp.getError().getRaw());
     }
 
     private static Integer resolvePosition(ResultResponse resp) {
