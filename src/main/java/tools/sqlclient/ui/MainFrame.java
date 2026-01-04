@@ -34,6 +34,7 @@ import tools.sqlclient.util.Config;
 import tools.sqlclient.util.IconFactory;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
+import tools.sqlclient.importer.ExcelPasteImportWizardDialog;
 import tools.sqlclient.ui.DockManager;
 import tools.sqlclient.ui.DockPosition;
 import tools.sqlclient.ui.LayoutState;
@@ -173,6 +174,7 @@ public class MainFrame extends JFrame {
     private ExecutionHistoryDialog executionHistoryDialog;
     private TrashBinDialog trashBinDialog;
     private int focusCycleIndex;
+    private ExcelPasteImportWizardDialog pasteImportDialog;
 
     public MainFrame() {
         // 需求 2：修改主窗体标题
@@ -1008,6 +1010,16 @@ public class MainFrame extends JFrame {
                 metadataService.cancelRefresh();
             }
         }));
+
+        JMenuItem excelImport = new JMenuItem(new AbstractAction("Excel 粘贴导入到PG...") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openPasteImportDialog();
+            }
+        });
+        int mask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx() | InputEvent.SHIFT_DOWN_MASK;
+        excelImport.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_I, mask));
+        tools.add(excelImport);
 
         tools.add(new JMenuItem(new AbstractAction("重置元数据") {
             @Override
@@ -3375,5 +3387,15 @@ public class MainFrame extends JFrame {
         sharedResultsWrapper.setVisible(false);
         persistOpenFrames();
         updateExecutionButtons();
+    }
+
+    private void openPasteImportDialog() {
+        if (pasteImportDialog == null) {
+            pasteImportDialog = new ExcelPasteImportWizardDialog(this, sqlExecutionService);
+        }
+        if (!pasteImportDialog.isVisible()) {
+            pasteImportDialog.setVisible(true);
+        }
+        pasteImportDialog.toFront();
     }
 }
