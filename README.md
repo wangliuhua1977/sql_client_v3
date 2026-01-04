@@ -563,3 +563,10 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 ### 日志定位方法
 - 结果集请求会输出 `JOB_RESULT_FETCH: jobId=... offset=... limit=...`，便于排查分页是否正确。
 - 结果解析会记录列数/行数/totalRows 统计、是否截断、线程池快照等。
+
+## 表格导入到 PostgreSQL
+- 入口：菜单“工具” -> “表格导入到PG(粘贴/CSV/XLSX)...”，快捷键 Ctrl+Shift+I（macOS 使用 ⌘+Shift+I）。
+- 向导步骤：选择数据源 -> 配置粘贴/CSV/XLSX -> 预览字段 -> 执行导入并查看报告。
+- 数据源：粘贴区域、CSV 文件、XLSX 文件（SAX 读取）。
+- 写入模式：新建表、截断后插入、追加插入（去重）。
+- 采用流式读取与分批写入，提供取消与报告导出能力，避免 UI 阻塞。
