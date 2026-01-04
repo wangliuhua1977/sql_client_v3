@@ -26,6 +26,7 @@ import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.pg.PgRoutineService;
 import tools.sqlclient.pg.RoutineInfo;
+import tools.sqlclient.importer.TableImportWizardDialog;
 import tools.sqlclient.ui.TemporaryNoteWindow;
 import tools.sqlclient.ui.ThemeManager;
 import tools.sqlclient.ui.ThemeOption;
@@ -1002,6 +1003,16 @@ public class MainFrame extends JFrame {
                 });
             }
         }));
+
+        JMenuItem importToPg = new JMenuItem(new AbstractAction("表格导入到PG(粘贴/CSV/XLSX)...") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                TableImportWizardDialog.showDialog(MainFrame.this);
+            }
+        });
+        importToPg.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_I,
+                Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx() | KeyEvent.SHIFT_DOWN_MASK));
+        tools.add(importToPg);
 
         tools.add(new JMenuItem(new AbstractAction("取消元数据刷新") {
             @Override
