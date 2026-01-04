@@ -328,7 +328,8 @@ public class SqlExecutionService {
                 Integer returnedRowCount = resp.getReturnedRowCount();
                 Integer actualRowCount = resp.getActualRowCount();
                 Boolean hasResultSet = resp.getHasResultSet();
-                String message = pickMessage(resp);
+                String tableErrorText = TableErrorFormatter.buildTableErrorText(resp);
+                String message = tableErrorText != null ? tableErrorText : pickMessage(resp);
                 logAttempt(jobId, attempt, pageIndex, page, finalPageSize, offset, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
 
                 boolean expectResult = shouldExpectResult(finalStatus, hasResultSet, actualRowCount, returnedRowCount, respStatus);
@@ -421,7 +422,8 @@ public class SqlExecutionService {
             Long queueDelayMillis = resp.getQueueDelayMillis();
             Boolean overloaded = resp.getOverloaded();
             ThreadPoolSnapshot threadPool = resp.getThreadPool();
-            String message = pickMessage(resp);
+            String tableErrorText = TableErrorFormatter.buildTableErrorText(resp);
+            String message = tableErrorText != null ? tableErrorText : pickMessage(resp);
             List<String> notices = resp.getNotices();
             List<String> warnings = resp.getWarnings();
 
@@ -482,12 +484,22 @@ public class SqlExecutionService {
                     .warnings(warnings);
 
             if (!success) {
+                String fallbackStatus = (jobId != null ? "任务" + jobId + " 状态 " : "") + status;
+                String errorText = tableErrorText != null ? tableErrorText : message;
+                if (errorText == null || errorText.isBlank()) {
+                    errorText = fallbackStatus;
+                }
+                List<ColumnDef> errorDefs = List.of(new ColumnDef("error", "错误", "错误"));
+                List<List<String>> errorRows = List.of(List.of(errorText));
+                List<java.util.Map<String, String>> errorRowMaps = List.of(Map.of("错误", errorText));
                 return builder
-                        .columns(List.of())
-                        .rows(List.of())
-                        .rowMaps(List.of())
-                        .rowCount(0)
-                        .hasResultSet(false)
+                        .columns(List.of("错误"))
+                        .columnDefs(errorDefs)
+                        .rows(errorRows)
+                        .rowMaps(errorRowMaps)
+                        .rowCount(errorRows.size())
+                        .hasResultSet(true)
+                        .message(errorText)
                         .build();
             }
 
