@@ -19,6 +19,7 @@ import tools.sqlclient.exec.ErrorDisplayFormatter;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlExecutionException;
 import tools.sqlclient.exec.SqlExecutionService;
+import tools.sqlclient.importer.TableImportWizardDialog;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
@@ -966,6 +967,16 @@ public class MainFrame extends JFrame {
         });
         editorSettings.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_COMMA, InputEvent.CTRL_DOWN_MASK));
         edit.add(editorSettings);
+
+        JMenuItem importTable = new JMenuItem(new AbstractAction("表格导入到PG(粘贴/CSV/XLSX)...") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                TableImportWizardDialog.showDialog(MainFrame.this);
+            }
+        });
+        int mask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx() | InputEvent.SHIFT_DOWN_MASK;
+        importTable.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_I, mask));
+        tools.add(importTable);
 
         tools.add(new JMenuItem(new AbstractAction("刷新元数据") {
             @Override
