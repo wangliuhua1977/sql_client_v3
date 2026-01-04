@@ -1,6 +1,7 @@
 package tools.sqlclient.exec;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import tools.sqlclient.remote.RemoteSqlClient;
 import tools.sqlclient.remote.RemoteSqlConfig;
 import tools.sqlclient.util.Config;
@@ -129,18 +130,13 @@ public class SqlExecutionService {
                                     }
                                 });
                     }
-                    String message = ErrorDisplayFormatter.chooseDisplayMessage(
-                            status.getError(),
-                            null,
-                            status.getMessage(),
-                            "任务" + status.getJobId() + " 状态 " + status.getStatus());
-                    SqlExecutionException failure = new SqlExecutionException(
-                            message != null ? message : "任务失败或排队超时",
-                            status.getError());
-                    if (onError != null) {
-                        onError.accept(failure);
-                    }
-                    return CompletableFuture.completedFuture(null);
+                    return CompletableFuture.supplyAsync(() -> buildFailedResult(status, trimmed, pageSize), ThreadPools.NETWORK_POOL)
+                            .thenAccept(res -> {
+                                notifyStatus(onStatus, status);
+                                if (onSuccess != null) {
+                                    onSuccess.accept(res);
+                                }
+                            });
                 })
                 .exceptionally(ex -> {
                     if (onError != null) {
@@ -202,7 +198,7 @@ public class SqlExecutionService {
     private AsyncJobStatus requestStatus(String jobId) {
         AsyncJobStatus status = remoteClient.pollStatus(jobId);
         logStatus("状态轮询", status);
-        if (isTerminalFailure(status)) {
+        if (isTerminalFailure(status) && (status.getStatus() == null || !"FAILED".equalsIgnoreCase(status.getStatus()))) {
             String message = ErrorDisplayFormatter.chooseDisplayMessage(status.getError(), null, status.getMessage(), status.getStatus());
             throw new SqlExecutionException(message != null ? message : "任务失败或排队超时", status.getError());
         }
@@ -395,6 +391,60 @@ public class SqlExecutionService {
             throw new TransientResultUnavailableException(jobId, lastError != null ? lastError.getMessage() : "结果暂不可用", lastError);
         }
         throw lastError != null ? lastError : new RuntimeException("结果获取失败");
+    }
+
+    private SqlExecResult buildFailedResult(AsyncJobStatus status, String sql, Integer pageSizeOverride) {
+        String jobId = status != null ? status.getJobId() : null;
+        int resolvedPageSize = resolvePageSize(pageSizeOverride);
+        try {
+            ResultResponse resp = remoteClient.fetchResult(jobId, false, null, resolvedPageSize, null, null);
+            if (resp == null) {
+                throw new RuntimeException("空的失败结果响应");
+            }
+            return parseResultResponse(resp, sql, jobId, 1, resolvedPageSize);
+        } catch (Exception ex) {
+            OperationLog.log("[" + jobId + "] 拉取失败结果表失败: " + ex.getMessage());
+            return buildFallbackErrorResult(status, sql);
+        }
+    }
+
+    private SqlExecResult buildFallbackErrorResult(AsyncJobStatus status, String sql) {
+        JsonObject body = new JsonObject();
+        if (status != null) {
+            if (status.getStatus() != null) {
+                body.addProperty("status", status.getStatus());
+            }
+            if (status.getMessage() != null) {
+                body.addProperty("errorMessage", status.getMessage());
+            }
+            if (status.getError() != null && status.getError().getPosition() != null) {
+                body.addProperty("position", status.getError().getPosition());
+            }
+            if (status.getSqlSummary() != null) {
+                body.addProperty("sqlSummary", status.getSqlSummary());
+            }
+            if (status.getJobId() != null) {
+                body.addProperty("jobId", status.getJobId());
+            }
+        }
+        TableErrorFormatter.ErrorTable table = StatusErrorResultBuilder.buildErrorResultTable(body);
+        List<ColumnDef> defs = table.columnDefs();
+        List<String> columns = defs.stream().map(ColumnDef::getDisplayName).toList();
+        List<List<String>> rows = table.rows();
+        List<java.util.Map<String, String>> rowMaps = table.rowMaps();
+        String message = table.displayMessage() != null ? table.displayMessage() : "数据库未返回错误信息";
+        return SqlExecResult.builder(sql)
+                .columns(columns)
+                .columnDefs(defs)
+                .rows(rows)
+                .rowMaps(rowMaps)
+                .rowCount(rows.size())
+                .success(false)
+                .hasResultSet(true)
+                .message(message)
+                .jobId(status != null ? status.getJobId() : null)
+                .status(status != null ? status.getStatus() : "FAILED")
+                .build();
     }
 
     SqlExecResult parseResultResponse(ResultResponse resp, String sql, String jobId, int requestedPage, int requestedPageSize) {

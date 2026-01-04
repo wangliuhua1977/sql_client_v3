@@ -228,7 +228,21 @@ public class RemoteSqlClient {
         Boolean overloaded = readBoolean(obj, "overloaded");
         ThreadPoolSnapshot threadPool = parseThreadPool(obj);
         String message = readString(obj, "message");
+        String errorMessage = readString(obj, "errorMessage");
+        if (message == null || message.isBlank()) {
+            message = errorMessage;
+        }
+        Integer position = readInt(obj, "position");
+        if (position == null) {
+            position = readInt(obj, "Position");
+        }
         DatabaseErrorInfo error = parseError(obj);
+        if (error == null && (errorMessage != null || position != null)) {
+            error = DatabaseErrorInfo.builder()
+                    .message(errorMessage)
+                    .position(position)
+                    .build();
+        }
         return new AsyncJobStatus(jobId, success, status, progress, elapsed, submittedAt, startedAt, finishedAt, label,
                 sqlSummary, dbUser, rowsAffected, returnedRowCount, hasResultSet, actualRowCount, message, error, queuedAt,
                 queueDelayMillis, overloaded, threadPool);
