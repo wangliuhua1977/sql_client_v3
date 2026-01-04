@@ -1,6 +1,7 @@
 package tools.sqlclient.exec;
 
 import com.google.gson.JsonArray;
+import com.google.gson.annotations.SerializedName;
 
 import java.util.List;
 import java.util.Map;
@@ -49,6 +50,8 @@ public class ResultResponse {
     private String message;
     private String errorMessage;
     private Integer position;
+    @SerializedName("Position")
+    private Integer positionUpper;
     private String note;
     private List<String> notices;
     private List<String> warnings;
@@ -230,6 +233,10 @@ public class ResultResponse {
 
     public Integer getPosition() {
         return position;
+    }
+
+    public Integer getPositionUpper() {
+        return positionUpper;
     }
 
     public String getNote() {
@@ -442,6 +449,10 @@ public class ResultResponse {
 
     public void setPosition(Integer position) {
         this.position = position;
+    }
+
+    public void setPositionUpper(Integer positionUpper) {
+        this.positionUpper = positionUpper;
     }
 
     public void setNote(String note) {
