@@ -162,7 +162,8 @@ public class DatabaseErrorInfo {
                 builder.datatype = serverError.getDatatype();
                 builder.constraint = serverError.getConstraint();
                 builder.file = serverError.getFile();
-                builder.line = serverError.getLine();
+                int lineNumber = serverError.getLine();
+                builder.line = lineNumber > 0 ? String.valueOf(lineNumber) : null;
                 builder.routine = serverError.getRoutine();
             }
         }
