@@ -199,20 +199,25 @@
   4. 所有字段均缺失时，使用固定文案“数据库未返回错误信息”，不再将 `jobId/status` 填入结果表格正文。
 - 表格渲染器支持多行换行，错误正文会直接显示在结果表格的错误列/行中，无需额外弹窗。
 
-## 失败也返回结果表格行
-- 所有失败的 SQL（SELECT/DDL/DML/存储过程）都会像成功一样返回可渲染的结果表格，至少包含 `ERROR_MESSAGE` 与 `POSITION` 两列。
-- 结果表格至少一行：`ERROR_MESSAGE` 显示后端的 `errorMessage` 或 `error.raw/message`，`POSITION` 读取 `position/Position/error.position`，缺失时留空。
-- 禁止将“任务<jobId> 状态 FAILED”当作错误正文放入表格，`jobId/status` 仅显示在状态栏或日志。
-- 示例：
-  - 后端返回：`{"status":"FAILED","jobId":"123","errorMessage":"syntax error","position":15}`
-  - 前端表格：
-    - 列：`ERROR_MESSAGE | POSITION`
-    - 行：`syntax error | 15`
-- 示例：后端返回 `{ "status": "FAILED", "jobId": "x", "errorMessage": "syntax error", "position": 18 }` 时，错误列内容为：
+## 失败结果表格化展示
+- 失败状态与成功路径一致，会在结果集区域生成“结果1/结果N”标签页展示错误详情，而非仅渲染单行状态文本。
+- 失败结果的表格列固定为：`ERROR_MESSAGE`、`POSITION`，至少包含一行数据；`ERROR_MESSAGE` 保留后端原始换行。
+- `POSITION` 取值优先级：1）`position` 字段；2）`Position` 字段；3）正则解析 `errorMessage` 中的 `Position: <number>`（不区分大小写）。解析不到则留空。
+- 严禁在表格正文填入“任务<jobId> 状态 FAILED”或“SQL 执行失败: <sql> | 任务...FAILED”等拼接文本，这类文案仅用于日志或状态栏。
+- 样例：后端返回
+  ```json
+  {
+    "status": "FAILED",
+    "sqlSummary": "select * from t1",
+    "hasResultSet": false,
+    "errorMessage": "ERROR: relation \"t1\" does not exist\n  Position: 30",
+    "jobId": "44908dbf-397d-407c-b425-9103dd9a4ff3"
+  }
   ```
-  syntax error
-  Position: 18
-  ```
+  前端结果表格渲染：
+  | ERROR_MESSAGE | POSITION |
+  | --- | --- |
+  | ERROR: relation "t1" does not exist (换行保留) | 30 |
 
 ## SQL 子窗口布局说明
 - 每个编辑 Tab 固定使用上下分割的 `JSplitPane`：上侧为编辑器工具条+正文，下侧为结果集/消息导航区，不再存在“编辑/结果”切换标签。

@@ -128,10 +128,14 @@ public final class TableErrorFormatter {
         if (resp.getError() != null && resp.getError().getPosition() != null && resp.getError().getPosition() > 0) {
             return resp.getError().getPosition();
         }
+        Integer parsed = StatusErrorResultBuilder.extractPositionFromMessage(resp.getErrorMessage());
+        if (parsed != null && parsed > 0) {
+            return parsed;
+        }
         return null;
     }
 
-    private static String buildDisplayMessage(String errorMessage, Integer position) {
+    public static String buildDisplayMessage(String errorMessage, Integer position) {
         List<String> lines = new ArrayList<>();
         if (errorMessage != null && !errorMessage.isBlank()) {
             lines.add(errorMessage);
