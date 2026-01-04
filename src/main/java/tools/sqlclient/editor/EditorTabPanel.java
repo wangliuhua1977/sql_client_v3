@@ -8,6 +8,8 @@ import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.editor.NotePersistenceStrategy;
+import tools.sqlclient.editor.PersistentNotePersistenceStrategy;
 import tools.sqlclient.ui.scroll.EditorWheelScrollSupport;
 import tools.sqlclient.ui.swing.ScrollBarWheelSupport;
 import tools.sqlclient.util.AutoSaveService;
@@ -51,6 +53,7 @@ public class EditorTabPanel extends JPanel {
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
+    private final NotePersistenceStrategy persistenceStrategy;
     private final Consumer<String> linkOpener;
     private final FullWidthFilter fullWidthFilter;
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
@@ -83,12 +86,14 @@ public class EditorTabPanel extends JPanel {
                           EditorStyle style,
                           Consumer<EditorTabPanel> focusNotifier,
                           Consumer<String> linkOpener,
-                          int defaultPageSize) {
+                          int defaultPageSize,
+                          NotePersistenceStrategy persistenceStrategy) {
         super(new BorderLayout());
         this.defaultPageSize = Math.max(1, defaultPageSize);
         this.noteRepository = noteRepository;
         this.note = note;
         this.databaseType = note.getDatabaseType();
+        this.persistenceStrategy = persistenceStrategy == null ? new PersistentNotePersistenceStrategy() : persistenceStrategy;
         this.textArea = createEditor();
         this.currentStyle = style;
         this.defaultStyle = style;
@@ -131,7 +136,10 @@ public class EditorTabPanel extends JPanel {
         applyStyle(style);
         initLayout();
         LinkResolver.install(textArea, this::handleLinkClick);
-        autoSaveService.startAutoSave(this::autoSave);
+        lastSaveLabel.setText(this.persistenceStrategy.initialAutoSaveLabel());
+        if (this.persistenceStrategy.shouldAutoSave()) {
+            autoSaveService.startAutoSave(this::autoSave);
+        }
         updateTitle();
     }
 
@@ -561,13 +569,18 @@ public class EditorTabPanel extends JPanel {
     }
 
     private void saveInternal(boolean notify) {
+        if (!persistenceStrategy.isPersistenceEnabled()) {
+            return;
+        }
         try {
-            noteRepository.updateContent(note, textArea.getText());
+            persistenceStrategy.save(noteRepository, note, textArea.getText());
             String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
             lastSaveLabel.setText("自动保存: " + time);
             autoSaveService.onSaved(time);
             updateTitle();
-            persistLinksAsync();
+            if (persistenceStrategy.shouldPersistLinks()) {
+                persistLinksAsync();
+            }
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "保存失败: " + ex.getMessage());
         }
@@ -591,8 +604,12 @@ public class EditorTabPanel extends JPanel {
     }
 
     public void rename(String newTitle) {
+        if (!persistenceStrategy.isPersistenceEnabled()) {
+            JOptionPane.showMessageDialog(this, "当前为临时窗口，无法重命名");
+            return;
+        }
         try {
-            noteRepository.rename(note, newTitle);
+            persistenceStrategy.rename(noteRepository, note, newTitle);
             updateTitle();
         } catch (IllegalArgumentException ex) {
             JOptionPane.showMessageDialog(this, ex.getMessage());
