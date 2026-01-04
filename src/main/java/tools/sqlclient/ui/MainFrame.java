@@ -10,6 +10,7 @@ import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.db.SqlHistoryRepository;
 import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
+import tools.sqlclient.editor.PersistentNotePersistenceStrategy;
 import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.ColumnOrderDecider;
@@ -24,6 +25,7 @@ import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.pg.PgRoutineService;
 import tools.sqlclient.pg.RoutineInfo;
+import tools.sqlclient.ui.TemporaryNoteWindow;
 import tools.sqlclient.ui.ThemeManager;
 import tools.sqlclient.ui.ThemeOption;
 import tools.sqlclient.ui.QueryResultPanel;
@@ -1619,7 +1621,8 @@ public class MainFrame extends JFrame {
                     resolveStyleForNote(note),
                     this::onPanelFocused,
                     this::openNoteByTitle,
-                    defaultPageSize
+                    defaultPageSize,
+                    new PersistentNotePersistenceStrategy()
             );
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
@@ -2791,23 +2794,39 @@ public class MainFrame extends JFrame {
                 JOptionPane.showMessageDialog(this, "获取源码失败: " + ex.getMessage());
                 return;
             }
-            String noteTitle = buildRoutineNoteTitle(info);
-            Note note = noteRepository.findOrCreateByTitle(noteTitle);
-            try {
-                noteRepository.updateContent(note, ddl);
-            } catch (Exception ignored) {
-            }
-            EditorTabPanel panel = getOrCreatePanel(note);
+            Note tempNote = createTemporaryNote(info, ddl);
+            TemporaryNoteWindow window = new TemporaryNoteWindow(
+                    this,
+                    noteRepository,
+                    metadataService,
+                    tempNote,
+                    resolveStyleForNote(tempNote),
+                    convertFullWidth,
+                    defaultPageSize,
+                    this::openPermanentNote,
+                    info.displayName());
+            EditorTabPanel panel = window.getEditorPanel();
             panel.setTextContent(ddl);
             panel.configureRoutineContext("例程: " + info.displayName(), editable, () -> publishRoutine(panel, info));
             panel.setReadOnly(!editable);
-            markRoutinePanel(panel, info, editable);
-            openNoteInCurrentMode(note);
+            window.setVisible(true);
             if (afterOpen != null) {
                 afterOpen.accept(panel);
             }
             statusLabel.setText("已载入: " + info.displayName());
         }));
+    }
+
+    private Note createTemporaryNote(RoutineInfo info, String ddl) {
+        long now = System.currentTimeMillis();
+        String title = "临时查看: " + info.displayName();
+        long tempId = -Math.abs(java.util.concurrent.ThreadLocalRandom.current().nextLong(Long.MAX_VALUE));
+        return new Note(tempId, title, ddl == null ? "" : ddl, DatabaseType.POSTGRESQL, now, now,
+                "", false, false, 0, "");
+    }
+
+    void openPermanentNote(Note note) {
+        openNoteInCurrentMode(note);
     }
 
     private String buildRoutineNoteTitle(RoutineInfo info) {
