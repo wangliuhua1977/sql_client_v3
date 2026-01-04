@@ -29,6 +29,7 @@ public class SqlExecResult {
     private final Integer maxTotalRows;
     private final Integer totalRows;
     private final Boolean hasResultSet;
+    private final DatabaseErrorInfo error;
     private final Integer page;
     private final Integer pageSize;
     private final Boolean hasNext;
@@ -200,6 +201,7 @@ public class SqlExecResult {
         this.maxTotalRows = builder.maxTotalRows;
         this.totalRows = builder.totalRows != null ? builder.totalRows : builder.rowsCount;
         this.hasResultSet = builder.hasResultSet != null ? builder.hasResultSet : guessHasResultSet();
+        this.error = builder.error;
         this.page = builder.page;
         this.pageSize = builder.pageSize;
         this.hasNext = builder.hasNext;
@@ -264,6 +266,7 @@ public class SqlExecResult {
         private Integer maxTotalRows;
         private Integer totalRows;
         private Boolean hasResultSet;
+        private DatabaseErrorInfo error;
         private Integer page;
         private Integer pageSize;
         private Boolean hasNext;
@@ -379,6 +382,11 @@ public class SqlExecResult {
 
         public Builder hasResultSet(Boolean hasResultSet) {
             this.hasResultSet = hasResultSet;
+            return this;
+        }
+
+        public Builder error(DatabaseErrorInfo error) {
+            this.error = error;
             return this;
         }
 
@@ -530,6 +538,10 @@ public class SqlExecResult {
 
     public Boolean getHasResultSet() {
         return hasResultSet;
+    }
+
+    public DatabaseErrorInfo getError() {
+        return error;
     }
 
     public Integer getPage() {

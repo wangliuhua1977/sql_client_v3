@@ -7,6 +7,7 @@ import com.google.gson.JsonObject;
 import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnMeta;
 import tools.sqlclient.exec.ColumnNameNormalizer;
+import tools.sqlclient.exec.DatabaseErrorInfo;
 import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
 import tools.sqlclient.exec.ResultNotReadyException;
@@ -227,8 +228,9 @@ public class RemoteSqlClient {
         Boolean overloaded = readBoolean(obj, "overloaded");
         ThreadPoolSnapshot threadPool = parseThreadPool(obj);
         String message = readString(obj, "message");
+        DatabaseErrorInfo error = parseError(obj);
         return new AsyncJobStatus(jobId, success, status, progress, elapsed, submittedAt, startedAt, finishedAt, label,
-                sqlSummary, dbUser, rowsAffected, returnedRowCount, hasResultSet, actualRowCount, message, queuedAt,
+                sqlSummary, dbUser, rowsAffected, returnedRowCount, hasResultSet, actualRowCount, message, error, queuedAt,
                 queueDelayMillis, overloaded, threadPool);
     }
 
@@ -280,6 +282,7 @@ public class RemoteSqlClient {
         rr.setPageSize(readInt(obj, "pageSize"));
         rr.setHasNext(readBoolean(obj, "hasNext"));
         rr.setTruncated(readBoolean(obj, "truncated"));
+        rr.setError(parseError(obj));
         rr.setMessage(readString(obj, "message"));
         rr.setErrorMessage(readString(obj, "errorMessage"));
         rr.setNote(readString(obj, "note"));
@@ -550,6 +553,17 @@ public class RemoteSqlClient {
             return v.getAsString();
         }
         return gson.toJson(v);
+    }
+
+    private DatabaseErrorInfo parseError(JsonObject obj) {
+        if (obj == null || !obj.has("error") || obj.get("error").isJsonNull()) {
+            return null;
+        }
+        try {
+            return DatabaseErrorInfo.fromJson(obj.getAsJsonObject("error"));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private String readString(JsonObject obj, String key) {
