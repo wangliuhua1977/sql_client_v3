@@ -190,6 +190,20 @@
 - 结果计数、状态与 message 仍与后端字段同步；如仍为空白，可通过操作日志确认后端是否返回 `returnedRowCount`/`resultRows`。
 - 失败信息透传：无论 SELECT 还是非 SELECT，只要 `success=false`，客户端都会使用服务端返回的 `errorMessage/message/note` 作为结果面板与 OperationLog 的文案，避免“失败但无详情”的情况。非查询失败同样会展示完整错误原因。
 
+## 错误展示优先级与表格展示规则
+- 判断 SQL 执行报错：响应状态为 `FAILED`，或响应中存在 `errorMessage`/`position`/`Position` 字段时，结果表格会切换到错误行展示模式。
+- 错误正文优先级：
+  1. 第一行展示 `errorMessage`（非空时）。
+  2. 若存在位置偏移（`position` 或 `Position` 大于 0），第二行追加 `Position: <数字>`。
+  3. 若 `errorMessage` 为空，会回退使用 `error.message/raw`（如果存在）。
+  4. 仅当上述字段均缺失时，才退回显示 `任务<jobId> 状态 FAILED`。
+- 表格渲染器支持多行换行，错误正文会直接显示在结果表格的错误列/行中，无需额外弹窗。
+- 示例：后端返回 `{ "status": "FAILED", "jobId": "x", "errorMessage": "syntax error", "position": 18 }` 时，错误列内容为：
+  ```
+  syntax error
+  Position: 18
+  ```
+
 ## SQL 子窗口布局说明
 - 每个编辑 Tab 固定使用上下分割的 `JSplitPane`：上侧为编辑器工具条+正文，下侧为结果集/消息导航区，不再存在“编辑/结果”切换标签。
 - 默认分割比例约 65%（编辑）/35%（结果），工具条提供 70/30、60/40、40/60 预设，拖拽分隔条也会实时记忆位置。

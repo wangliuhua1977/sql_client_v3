@@ -285,6 +285,11 @@ public class RemoteSqlClient {
         rr.setError(parseError(obj));
         rr.setMessage(readString(obj, "message"));
         rr.setErrorMessage(readString(obj, "errorMessage"));
+        Integer position = readInt(obj, "position");
+        if (position == null) {
+            position = readInt(obj, "Position");
+        }
+        rr.setPosition(position);
         rr.setNote(readString(obj, "note"));
         rr.setNotices(readStringList(obj, "notices"));
         rr.setWarnings(readStringList(obj, "warnings"));
