@@ -51,5 +51,20 @@ class TableErrorFormatterTest {
 
         assertEquals("任务8dd01734-1429-42cb-bfca-7b5dc5f626e9 状态 FAILED", text);
     }
+
+    @Test
+    void shouldUseErrorRawWhenMessageMissing() {
+        ResultResponse resp = new ResultResponse();
+        resp.setStatus("FAILED");
+        DatabaseErrorInfo error = DatabaseErrorInfo.builder()
+                .raw("syntax error near FROM")
+                .position(12)
+                .build();
+        resp.setError(error);
+
+        String text = TableErrorFormatter.buildTableErrorText(resp);
+
+        assertEquals("syntax error near FROM\nPosition: 12", text);
+    }
 }
 

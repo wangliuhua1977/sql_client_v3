@@ -195,7 +195,8 @@
 - 错误正文优先级：
   1. 第一行展示 `errorMessage`（非空时）。
   2. 若存在位置偏移（`position` 或 `Position` 大于 0），第二行追加 `Position: <数字>`。
-  3. 仅当上述字段均缺失时，才退回显示 `任务<jobId> 状态 FAILED`。
+  3. 若 `errorMessage` 为空，会回退使用 `error.message/raw`（如果存在）。
+  4. 仅当上述字段均缺失时，才退回显示 `任务<jobId> 状态 FAILED`。
 - 表格渲染器支持多行换行，错误正文会直接显示在结果表格的错误列/行中，无需额外弹窗。
 - 示例：后端返回 `{ "status": "FAILED", "jobId": "x", "errorMessage": "syntax error", "position": 18 }` 时，错误列内容为：
   ```
