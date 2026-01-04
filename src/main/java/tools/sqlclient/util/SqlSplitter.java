@@ -1,11 +1,10 @@
 package tools.sqlclient.util;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 /**
- * 基于分号的 SQL 语句切分与 block 分组工具，忽略字符串与注释内部的分号。
+ * SQL 语句与代码块解析工具，忽略字符串、注释与 dollar-quote 内部的分号。
  */
 public final class SqlSplitter {
 
@@ -134,130 +133,122 @@ public final class SqlSplitter {
         return null;
     }
 
-    public static List<SqlBlock> groupIntoBlocks(String fullText, List<SqlStatement> statements) {
-        if (statements == null || statements.isEmpty()) {
+    public static List<SqlBlock> splitToBlocks(String fullText) {
+        if (fullText == null || fullText.isBlank()) {
             return List.of();
         }
-        List<LineRange> isolationLines = findIsolationLines(fullText);
         List<SqlBlock> blocks = new ArrayList<>();
-        List<SqlStatement> current = new ArrayList<>();
-        int blockStart = lineStart(fullText, statements.get(0).startOffset());
-        for (int i = 0; i < statements.size(); i++) {
-            SqlStatement stmt = statements.get(i);
-            if (!current.isEmpty() && hasIsolationBetween(current.get(current.size() - 1), stmt, isolationLines)) {
-                OperationLog.log("SQL_SPLIT_WARNING: blank line between statements ignored by rule");
-                int blockEnd = current.get(current.size() - 1).endOffset();
-                blocks.add(new SqlBlock(List.copyOf(current), blockStart, blockEnd));
-                current.clear();
-                blockStart = lineStart(fullText, stmt.startOffset());
+        int length = fullText.length();
+        int cursor = 0;
+        int blockStart = -1;
+        while (cursor <= length) {
+            int lineStart = cursor;
+            int lineBreak = fullText.indexOf('\n', cursor);
+            if (lineBreak < 0) {
+                lineBreak = length;
             }
-            current.add(stmt);
+            int lineEnd = lineBreak;
+            if (lineEnd > lineStart && fullText.charAt(lineEnd - 1) == '\r') {
+                lineEnd -= 1;
+            }
+            String lineText = fullText.substring(lineStart, Math.max(lineStart, lineEnd));
+            boolean isBlank = lineText.trim().isEmpty();
+            if (isBlank) {
+                if (blockStart >= 0) {
+                    blocks.add(new SqlBlock(blockStart, lineStart, fullText.substring(blockStart, lineStart)));
+                    blockStart = -1;
+                }
+            } else {
+                if (blockStart < 0) {
+                    blockStart = lineStart;
+                }
+            }
+            if (lineBreak == length) {
+                break;
+            }
+            cursor = lineBreak + 1;
         }
-        if (!current.isEmpty()) {
-            int blockEnd = current.get(current.size() - 1).endOffset();
-            blocks.add(new SqlBlock(List.copyOf(current), blockStart, blockEnd));
+        if (blockStart >= 0) {
+            blocks.add(new SqlBlock(blockStart, length, fullText.substring(blockStart)));
         }
         return blocks;
     }
 
-    private static boolean hasIsolationBetween(SqlStatement left, SqlStatement right, List<LineRange> isolationLines) {
-        int gapStart = left.endOffset();
-        int gapEnd = right.startOffset();
-        for (LineRange lr : isolationLines) {
-            if (lr.intersects(gapStart, gapEnd)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static List<LineRange> findIsolationLines(String fullText) {
-        if (fullText == null || fullText.isEmpty()) {
-            return List.of();
-        }
-        List<LineRange> ranges = new ArrayList<>();
-        int offset = 0;
-        String[] lines = fullText.split("\\r?\\n", -1);
-        for (String line : lines) {
-            int lengthWithBreak = line.length() + 1;
-            int start = offset;
-            int end = offset + line.length();
-            if (isIsolationLine(line)) {
-                ranges.add(new LineRange(start, offset + line.length()));
-            }
-            offset += lengthWithBreak;
-        }
-        return ranges;
-    }
-
-    public static SqlBlock findBlockAtCaret(int caretOffset, String fullText, List<SqlBlock> blocks) {
-        if (blocks == null || blocks.isEmpty()) {
+    public static SqlBlock findBlockAtCaret(String fullText, int caretOffset) {
+        List<SqlBlock> blocks = splitToBlocks(fullText);
+        if (blocks.isEmpty()) {
             return null;
         }
-        int caret = Math.max(0, caretOffset);
+        int caret = Math.max(0, Math.min(caretOffset, fullText.length()));
         for (SqlBlock block : blocks) {
-            if (caret >= block.blockStartOffset() && caret <= block.blockEndOffset()) {
+            if (caret >= block.startOffset() && caret < block.endOffset()) {
+                return block;
+            }
+            if (caret == fullText.length() && caret == block.endOffset()) {
                 return block;
             }
         }
-        for (int i = 0; i < blocks.size() - 1; i++) {
-            SqlBlock first = blocks.get(i);
-            SqlBlock second = blocks.get(i + 1);
-            if (caret > first.blockEndOffset() && caret < second.blockStartOffset()) {
-                return !first.statements().isEmpty() ? first : second;
+        int lineStart = lineStart(fullText, caret);
+        int lineEnd = lineEnd(fullText, caret);
+        String lineText = fullText.substring(lineStart, lineEnd);
+        if (lineText.trim().isEmpty()) {
+            for (SqlBlock block : blocks) {
+                if (block.startOffset() > caret) {
+                    return block;
+                }
             }
-        }
-        if (caret < blocks.get(0).blockStartOffset()) {
-            return blocks.get(0);
-        }
-        return blocks.get(blocks.size() - 1);
-    }
-
-    public static SqlStatement findStatementAtCaret(int caretOffset, List<SqlStatement> statements) {
-        if (statements == null || statements.isEmpty()) {
+            for (int i = blocks.size() - 1; i >= 0; i--) {
+                SqlBlock block = blocks.get(i);
+                if (block.endOffset() < caret) {
+                    return block;
+                }
+            }
             return null;
         }
-        int caret = Math.max(0, caretOffset);
-        SqlStatement candidate = null;
-        for (SqlStatement stmt : statements) {
-            if (caret >= stmt.startOffset() && caret <= stmt.endOffset()) {
-                return stmt;
-            }
-            if (stmt.startOffset() < caret) {
-                candidate = stmt;
-            }
-        }
-        return candidate;
+        return null;
     }
 
-    public static boolean isIsolationLine(String lineText) {
-        if (lineText == null) {
-            return false;
+    public static List<String> splitBlockToStatements(String blockText) {
+        if (blockText == null || blockText.isBlank()) {
+            return List.of();
         }
-        return lineText.trim().isEmpty();
+        return split(blockText).stream()
+                .map(SqlStatement::text)
+                .map(String::trim)
+                .filter(s -> !s.isBlank())
+                .toList();
     }
 
     private static int lineStart(String text, int offset) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
         int safe = Math.max(0, Math.min(offset, text.length()));
-        int idx = text.lastIndexOf('\n', safe);
+        int idx = text.lastIndexOf('\n', Math.max(0, safe - 1));
         if (idx < 0) {
             return 0;
         }
         return idx + 1;
     }
 
+    private static int lineEnd(String text, int offset) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        int safe = Math.max(0, Math.min(offset, text.length()));
+        int idx = text.indexOf('\n', safe);
+        if (idx < 0) {
+            idx = text.length();
+        }
+        if (idx > 0 && text.charAt(idx - 1) == '\r') {
+            return idx - 1;
+        }
+        return idx;
+    }
+
     public record SqlStatement(String text, int startOffset, int endOffset, boolean terminatedBySemicolon) {
     }
 
-    public record SqlBlock(List<SqlStatement> statements, int blockStartOffset, int blockEndOffset) {
-        public List<SqlStatement> statements() {
-            return statements == null ? Collections.emptyList() : statements;
-        }
-    }
-
-    private record LineRange(int start, int end) {
-        boolean intersects(int from, int to) {
-            return Math.max(start, from) <= Math.min(end, to);
-        }
+    public record SqlBlock(int startOffset, int endOffset, String text) {
     }
 }
