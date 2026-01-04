@@ -1937,7 +1937,7 @@ public class MainFrame extends JFrame {
     }
 
     private void executeCurrentSql() {
-        executeCurrentSql(false);
+        executeCurrentSql(true);
     }
 
     private void executeCurrentSql(boolean blockMode) {
