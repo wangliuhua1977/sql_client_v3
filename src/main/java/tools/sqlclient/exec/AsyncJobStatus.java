@@ -20,6 +20,7 @@ public class AsyncJobStatus {
     private final Boolean hasResultSet;
     private final Integer actualRowCount;
     private final String message;
+    private final DatabaseErrorInfo error;
     private final Long queuedAt;
     private final Long queueDelayMillis;
     private final Boolean overloaded;
@@ -41,6 +42,7 @@ public class AsyncJobStatus {
                           Boolean hasResultSet,
                           Integer actualRowCount,
                           String message,
+                          DatabaseErrorInfo error,
                           Long queuedAt,
                           Long queueDelayMillis,
                           Boolean overloaded,
@@ -61,6 +63,7 @@ public class AsyncJobStatus {
         this.hasResultSet = hasResultSet;
         this.actualRowCount = actualRowCount;
         this.message = message;
+        this.error = error;
         this.queuedAt = queuedAt;
         this.queueDelayMillis = queueDelayMillis;
         this.overloaded = overloaded;
@@ -129,6 +132,10 @@ public class AsyncJobStatus {
 
     public String getMessage() {
         return message;
+    }
+
+    public DatabaseErrorInfo getError() {
+        return error;
     }
 
     public Long getQueuedAt() {

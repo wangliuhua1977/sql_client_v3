@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -71,13 +72,18 @@ public class SqlExecutionService {
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
             if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
-                throw new RuntimeException(finalStatus.getMessage() != null
-                        ? finalStatus.getMessage()
-                        : ("任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus()));
+                String message = ErrorDisplayFormatter.chooseDisplayMessage(finalStatus.getError(), null,
+                        finalStatus.getMessage(), "任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus());
+                ResultResponse failedResp = remoteClient.fetchResult(finalStatus.getJobId(), false, null, null, null, null);
+                SqlExecResult failedResult = parseResultResponse(failedResp, sql, finalStatus.getJobId(), 1, MAX_PAGE_SIZE);
+                throw new SqlExecutionException(message, failedResult.getError());
             }
             return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, pageSizeOverride, finalStatus);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof SqlExecutionException se) {
+                throw se;
+            }
             throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
         }
     }
@@ -123,9 +129,14 @@ public class SqlExecutionService {
                                     }
                                 });
                     }
-                    RuntimeException failure = new RuntimeException(status.getMessage() != null
-                            ? status.getMessage()
-                            : ("任务" + status.getJobId() + " 状态 " + status.getStatus()));
+                    String message = ErrorDisplayFormatter.chooseDisplayMessage(
+                            status.getError(),
+                            null,
+                            status.getMessage(),
+                            "任务" + status.getJobId() + " 状态 " + status.getStatus());
+                    SqlExecutionException failure = new SqlExecutionException(
+                            message != null ? message : "任务失败或排队超时",
+                            status.getError());
                     if (onError != null) {
                         onError.accept(failure);
                     }
@@ -133,8 +144,12 @@ public class SqlExecutionService {
                 })
                 .exceptionally(ex -> {
                     if (onError != null) {
-                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                        onError.accept(new RuntimeException(cause));
+                        Throwable cause = unwrapCompletion(ex);
+                        if (cause instanceof SqlExecutionException se) {
+                            onError.accept(se);
+                        } else {
+                            onError.accept(new RuntimeException(cause.getMessage(), cause));
+                        }
                     }
                     return null;
                 });
@@ -188,7 +203,8 @@ public class SqlExecutionService {
         AsyncJobStatus status = remoteClient.pollStatus(jobId);
         logStatus("状态轮询", status);
         if (isTerminalFailure(status)) {
-            throw new RuntimeException(status.getMessage() != null ? status.getMessage() : "任务失败或排队超时");
+            String message = ErrorDisplayFormatter.chooseDisplayMessage(status.getError(), null, status.getMessage(), status.getStatus());
+            throw new SqlExecutionException(message != null ? message : "任务失败或排队超时", status.getError());
         }
         return status;
     }
@@ -412,16 +428,11 @@ public class SqlExecutionService {
             Integer affectedRows = resolveAffectedRows(rowsAffected, updateCount, commandTag);
             boolean finalHasResultSet = determineHasResultSet(sql, hasResultSet, isSelect, resultType);
 
-            if (!success) {
-                OperationLog.log("[" + jobId + "] 任务失败/未完成: " + message);
-                throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
-            }
-
             List<ColumnMeta> columnMetas = resp.getColumnMetas() != null ? resp.getColumnMetas() : List.of();
             List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
             List<String> columns = resolveColumns(columnMetas, resp.getColumns(), rowMaps);
             List<ColumnDef> columnDefs = buildColumnDefs(columns, columnMetas);
-            if (Boolean.TRUE.equals(finalHasResultSet) && columns.isEmpty()) {
+            if (Boolean.TRUE.equals(finalHasResultSet) && columns.isEmpty() && success) {
                 OperationLog.log("[" + jobId + "] 无法获取列信息，columns 为空");
                 throw new RuntimeException("无法获取列信息");
             }
@@ -443,8 +454,9 @@ public class SqlExecutionService {
                     .rows(rows)
                     .rowMaps(rowMaps)
                     .rowCount(rowCount)
-                    .success(true)
+                    .success(success)
                     .message(message)
+                    .error(resp.getError())
                     .jobId(jobId)
                     .status(status)
                     .progressPercent(progress)
@@ -468,6 +480,16 @@ public class SqlExecutionService {
                     .updateCount(updateCount)
                     .notices(notices)
                     .warnings(warnings);
+
+            if (!success) {
+                return builder
+                        .columns(List.of())
+                        .rows(List.of())
+                        .rowMaps(List.of())
+                        .rowCount(0)
+                        .hasResultSet(false)
+                        .build();
+            }
 
             if (!finalHasResultSet) {
                 return builder
@@ -840,15 +862,7 @@ public class SqlExecutionService {
         if (resp == null) {
             return null;
         }
-        String error = trimToNull(resp.getErrorMessage());
-        String message = trimToNull(resp.getMessage());
-        if (error != null) {
-            return error;
-        }
-        if (message != null) {
-            return message;
-        }
-        return trimToNull(resp.getNote());
+        return ErrorDisplayFormatter.chooseDisplayMessage(resp.getError(), resp.getErrorMessage(), resp.getMessage(), resp.getStatus());
     }
 
     private String trimToNull(String text) {
@@ -873,7 +887,7 @@ public class SqlExecutionService {
             return true;
         }
         if ("FAILED".equalsIgnoreCase(status.getStatus())) {
-            String msg = status.getMessage();
+            String msg = ErrorDisplayFormatter.chooseDisplayMessage(status.getError(), null, status.getMessage(), status.getStatus());
             if (status.getOverloaded() != null && status.getOverloaded()) {
                 return true;
             }
@@ -888,6 +902,13 @@ public class SqlExecutionService {
         if (onStatus != null && status != null) {
             onStatus.accept(status);
         }
+    }
+
+    private Throwable unwrapCompletion(Throwable throwable) {
+        if (throwable instanceof CompletionException ce && ce.getCause() != null) {
+            return ce.getCause();
+        }
+        return throwable;
     }
 
     private void logStatus(String scene, AsyncJobStatus status) {

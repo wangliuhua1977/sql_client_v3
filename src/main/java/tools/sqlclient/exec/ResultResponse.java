@@ -45,6 +45,7 @@ public class ResultResponse {
     private Integer pageSize;
     private Boolean hasNext;
     private Boolean truncated;
+    private DatabaseErrorInfo error;
     private String message;
     private String errorMessage;
     private String note;
@@ -216,6 +217,10 @@ public class ResultResponse {
 
     public String getMessage() {
         return message;
+    }
+
+    public DatabaseErrorInfo getError() {
+        return error;
     }
 
     public String getErrorMessage() {
@@ -420,6 +425,10 @@ public class ResultResponse {
 
     public void setMessage(String message) {
         this.message = message;
+    }
+
+    public void setError(DatabaseErrorInfo error) {
+        this.error = error;
     }
 
     public void setErrorMessage(String errorMessage) {
