@@ -26,6 +26,7 @@ import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 import tools.sqlclient.pg.PgRoutineService;
 import tools.sqlclient.pg.RoutineInfo;
+import tools.sqlclient.importer.TableImportWizardDialog;
 import tools.sqlclient.ui.TemporaryNoteWindow;
 import tools.sqlclient.ui.ThemeManager;
 import tools.sqlclient.ui.ThemeOption;
@@ -142,6 +143,7 @@ public class MainFrame extends JFrame {
     private JTabbedPane auxiliaryTabs;
     private JComponent historyPanel;
     private JComponent inspectorPanel;
+    private TableImportWizardDialog importWizardDialog;
     private ObjectBrowserDialog objectBrowserDialog;
     private ObjectBrowserPanel navigationBrowserPanel;
     private JTree navigationTree;
@@ -1012,6 +1014,16 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        JMenuItem importToPg = new JMenuItem(new AbstractAction("表格导入到PG(粘贴/CSV/XLSX)...") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                TableImportWizardDialog.showDialog(MainFrame.this);
+            }
+        });
+        importToPg.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_I,
+                Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx() | KeyEvent.SHIFT_DOWN_MASK));
+        tools.add(importToPg);
+
         tools.add(new JMenuItem(new AbstractAction("取消元数据刷新") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -1089,6 +1101,16 @@ public class MainFrame extends JFrame {
                 dialog.setVisible(true);
             }
         }));
+
+        JMenuItem importTableItem = new JMenuItem(new AbstractAction("表格导入到PG(粘贴/CSV/XLSX)...") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openImportWizard();
+            }
+        });
+        int mask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx() | InputEvent.SHIFT_DOWN_MASK;
+        importTableItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_I, mask));
+        tools.add(importTableItem);
 
         view.add(new JMenuItem(new AbstractAction("切换左侧面板") {
             @Override
@@ -2578,6 +2600,14 @@ public class MainFrame extends JFrame {
             }
             frames[i].setBounds(c * w, r * h, w, h);
         }
+    }
+
+    private void openImportWizard() {
+        if (importWizardDialog == null) {
+            importWizardDialog = new TableImportWizardDialog(this);
+        }
+        importWizardDialog.setVisible(true);
+        importWizardDialog.toFront();
     }
 
     private void updateAutosaveTime(String text) {

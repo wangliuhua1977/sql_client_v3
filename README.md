@@ -98,6 +98,7 @@
 
 ## 最近更新
 - 新增 Alt+E 联想开关、元数据状态提示与日志面板默认收拢，执行/停止按钮随焦点窗口切换。
+- 新增“表格导入到PG(粘贴/CSV/XLSX)...”向导：Tools 菜单或 Ctrl+Shift+I / Meta+Shift+I 调出，支持粘贴区域、CSV、XLSX 流式读取，分步预览、类型推断与三种写入模式（新建表、TRUNCATE 插入、追加去重），批量分段提交并生成导入报告。
 
 ## 结果集表格复制（Swing JTable）
 - 触发入口：在结果集 JTable 中按 `Ctrl+C`，或使用右键菜单的“复制选中单元格/复制选中列内容/复制选中列名（逗号分隔）”。
@@ -570,3 +571,10 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 ### 日志定位方法
 - 结果集请求会输出 `JOB_RESULT_FETCH: jobId=... offset=... limit=...`，便于排查分页是否正确。
 - 结果解析会记录列数/行数/totalRows 统计、是否截断、线程池快照等。
+
+## 表格导入到 PostgreSQL
+- 入口：菜单“工具” -> “表格导入到PG(粘贴/CSV/XLSX)...”，快捷键 Ctrl+Shift+I（macOS 使用 ⌘+Shift+I）。
+- 向导步骤：选择数据源 -> 配置粘贴/CSV/XLSX -> 预览字段 -> 执行导入并查看报告。
+- 数据源：粘贴区域、CSV 文件、XLSX 文件（SAX 读取）。
+- 写入模式：新建表、截断后插入、追加插入（去重）。
+- 采用流式读取与分批写入，提供取消与报告导出能力，避免 UI 阻塞。
