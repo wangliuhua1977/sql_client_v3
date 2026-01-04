@@ -48,6 +48,7 @@ public class ResultResponse {
     private DatabaseErrorInfo error;
     private String message;
     private String errorMessage;
+    private Integer position;
     private String note;
     private List<String> notices;
     private List<String> warnings;
@@ -225,6 +226,10 @@ public class ResultResponse {
 
     public String getErrorMessage() {
         return errorMessage;
+    }
+
+    public Integer getPosition() {
+        return position;
     }
 
     public String getNote() {
@@ -433,6 +438,10 @@ public class ResultResponse {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public void setPosition(Integer position) {
+        this.position = position;
     }
 
     public void setNote(String note) {

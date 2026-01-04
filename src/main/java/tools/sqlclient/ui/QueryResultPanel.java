@@ -56,8 +56,31 @@ public class QueryResultPanel extends JPanel {
 
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
+            String text = value == null ? "" : value.toString();
+            boolean multiline = text.contains("\n");
+            if (multiline) {
+                JTextArea area = new JTextArea(text);
+                area.setLineWrap(true);
+                area.setWrapStyleWord(true);
+                area.setOpaque(true);
+                area.setBorder(new EmptyBorder(4, 8, 4, 8));
+                area.setFont(table.getFont());
+                if (isSelected) {
+                    area.setBackground(selection);
+                    area.setForeground(selectionText);
+                } else {
+                    area.setBackground(row % 2 == 0 ? even : odd);
+                    area.setForeground(new Color(0x1F2933));
+                }
+                int preferredHeight = Math.max(table.getRowHeight(), area.getPreferredSize().height + 4);
+                if (table.getRowHeight(row) < preferredHeight) {
+                    table.setRowHeight(row, preferredHeight);
+                }
+                return area;
+            }
+
             JLabel label = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            label.setText(value == null ? "" : value.toString());
+            label.setText(text);
             label.setHorizontalAlignment(SwingConstants.LEFT);
             label.setBorder(new EmptyBorder(0, 8, 0, 8));
             if (isSelected) {
