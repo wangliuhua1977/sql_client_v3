@@ -750,29 +750,18 @@ public class EditorTabPanel extends JPanel {
     public java.util.List<String> getExecutableStatements(boolean blockMode) {
         String selected = textArea.getSelectedText();
         if (selected != null && !selected.isBlank()) {
-            var statements = SqlSplitter.split(selected);
-            SqlSplitter.groupIntoBlocks(selected, statements);
-            return statements.stream().map(SqlSplitter.SqlStatement::text).filter(s -> !s.isBlank()).toList();
+            return SqlSplitter.splitBlockToStatements(selected);
         }
         String full = textArea.getText();
-        var statements = SqlSplitter.split(full);
-        var blocks = SqlSplitter.groupIntoBlocks(full, statements);
-        if (blockMode) {
-            var targetBlock = SqlSplitter.findBlockAtCaret(textArea.getCaretPosition(), full, blocks);
-            if (targetBlock == null || targetBlock.statements().isEmpty()) {
-                return java.util.List.of();
-            }
-            return targetBlock.statements().stream().map(SqlSplitter.SqlStatement::text).filter(s -> !s.isBlank()).toList();
-        }
-        var stmt = SqlSplitter.findStatementAtCaret(textArea.getCaretPosition(), statements);
-        if (stmt == null || stmt.text().isBlank()) {
+        SqlSplitter.SqlBlock block = SqlSplitter.findBlockAtCaret(full, textArea.getCaretPosition());
+        if (block == null) {
             return java.util.List.of();
         }
-        return java.util.List.of(stmt.text().trim());
+        return SqlSplitter.splitBlockToStatements(block.text());
     }
 
     public java.util.List<String> getExecutableStatements() {
-        return getExecutableStatements(false);
+        return getExecutableStatements(true);
     }
 
     public void insertSqlAtCaret(String sql) {
