@@ -241,6 +241,49 @@
 - 笔记链接同步的成功日志已降级为 DEBUG，不再通过右侧“操作日志”面板输出“更新链接/Update link”等文案；如需排查可改用文件日志（`NoteRepository`）。
 - 仍保留解析/保存失败的提示，且改为“保存笔记关联失败”以便快速定位异常。
 
+## 错误模型与展示规则
+
+异步接口返回的错误统一落在 `error` 对象中，客户端不会再将“任务状态 FAILED”当作正文。
+
+- **字段定义**
+  - `message`: 数据库原始错误信息（PG/JDBC message）
+  - `sqlState`: `SQLException.getSQLState()`
+  - `vendorCode`: `SQLException.getErrorCode()`
+  - `detail/hint/position/where/schema/table/column/datatype/constraint/file/line/routine`: `PSQLException.getServerErrorMessage()` 中的对应字段，缺失则为 `null`
+  - `raw`: 直接可展示的多行文本，拼接规则如下
+- **raw 拼接规则**
+  1. 第一行：`message`
+  2. 若存在 `sqlState`：追加一行 `SQLSTATE: <sqlState>`
+  3. 若存在 `position`：追加一行 `Position: <position>`
+  4. 依次追加 `Detail:`、`Hint:`、`Where:` 行（有值才追加）
+- **前端展示优先级**
+  1. `error.raw`
+  2. 旧字段（如顶层 `errorMessage`/`message`）
+  3. 兜底状态文本（例如 `FAILED`），不再作为正文
+- **示例**
+  - 语法错误：
+    - `message`: `syntax error at or near "asselect"`
+    - `sqlState`: `42601`
+    - `position`: `123`
+    - `raw` 展示：
+      ```
+      syntax error at or near "asselect"
+      SQLSTATE: 42601
+      Position: 123
+      ```
+  - 约束错误：
+    - `message`: `duplicate key value violates unique constraint "users_pkey"`
+    - `sqlState`: `23505`
+    - `detail`: `Key (id)=(1) already exists.`
+    - `constraint`: `users_pkey`
+    - `raw` 展示：
+      ```
+      duplicate key value violates unique constraint "users_pkey"
+      SQLSTATE: 23505
+      Detail: Key (id)=(1) already exists.
+      ```
+  - 约定：错误正文始终使用数据库返回的原始文本，不再显示“任务状态 FAILED”或其他抽象描述。
+
 ### 本地 SQLite 存储路径与迁移
 - 本地缓存数据库统一存放在 `%USERPROFILE%\\.Sql_client_v3\\metadata.db`（Windows 为 `C:\\Users\\<用户名>\\.Sql_client_v3\\metadata.db`）。
 - 启动时若目录不存在会自动创建；若发现旧的工作目录下仍有 `metadata.db` 且新目录为空，会自动复制至新位置并在日志中提示已迁移。
