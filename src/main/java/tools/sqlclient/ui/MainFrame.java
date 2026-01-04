@@ -19,6 +19,7 @@ import tools.sqlclient.exec.ErrorDisplayFormatter;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlExecutionException;
 import tools.sqlclient.exec.SqlExecutionService;
+import tools.sqlclient.importer.TableImportWizardDialog;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
@@ -141,6 +142,7 @@ public class MainFrame extends JFrame {
     private JTabbedPane auxiliaryTabs;
     private JComponent historyPanel;
     private JComponent inspectorPanel;
+    private TableImportWizardDialog importWizardDialog;
     private ObjectBrowserDialog objectBrowserDialog;
     private ObjectBrowserPanel navigationBrowserPanel;
     private JTree navigationTree;
@@ -1078,6 +1080,16 @@ public class MainFrame extends JFrame {
                 dialog.setVisible(true);
             }
         }));
+
+        JMenuItem importTableItem = new JMenuItem(new AbstractAction("表格导入到PG(粘贴/CSV/XLSX)...") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                openImportWizard();
+            }
+        });
+        int mask = Toolkit.getDefaultToolkit().getMenuShortcutKeyMaskEx() | InputEvent.SHIFT_DOWN_MASK;
+        importTableItem.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_I, mask));
+        tools.add(importTableItem);
 
         view.add(new JMenuItem(new AbstractAction("切换左侧面板") {
             @Override
@@ -2567,6 +2579,14 @@ public class MainFrame extends JFrame {
             }
             frames[i].setBounds(c * w, r * h, w, h);
         }
+    }
+
+    private void openImportWizard() {
+        if (importWizardDialog == null) {
+            importWizardDialog = new TableImportWizardDialog(this);
+        }
+        importWizardDialog.setVisible(true);
+        importWizardDialog.toFront();
     }
 
     private void updateAutosaveTime(String text) {
