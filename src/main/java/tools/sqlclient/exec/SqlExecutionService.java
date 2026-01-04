@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -80,6 +81,9 @@ public class SqlExecutionService {
             return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, pageSizeOverride, finalStatus);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof SqlExecutionException se) {
+                throw se;
+            }
             throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
         }
     }
@@ -125,9 +129,14 @@ public class SqlExecutionService {
                                     }
                                 });
                     }
-                    RuntimeException failure = new RuntimeException(status.getMessage() != null
-                            ? status.getMessage()
-                            : ("任务" + status.getJobId() + " 状态 " + status.getStatus()));
+                    String message = ErrorDisplayFormatter.chooseDisplayMessage(
+                            status.getError(),
+                            null,
+                            status.getMessage(),
+                            "任务" + status.getJobId() + " 状态 " + status.getStatus());
+                    SqlExecutionException failure = new SqlExecutionException(
+                            message != null ? message : "任务失败或排队超时",
+                            status.getError());
                     if (onError != null) {
                         onError.accept(failure);
                     }
@@ -135,8 +144,12 @@ public class SqlExecutionService {
                 })
                 .exceptionally(ex -> {
                     if (onError != null) {
-                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                        onError.accept(new RuntimeException(cause));
+                        Throwable cause = unwrapCompletion(ex);
+                        if (cause instanceof SqlExecutionException se) {
+                            onError.accept(se);
+                        } else {
+                            onError.accept(new RuntimeException(cause.getMessage(), cause));
+                        }
                     }
                     return null;
                 });
@@ -889,6 +902,13 @@ public class SqlExecutionService {
         if (onStatus != null && status != null) {
             onStatus.accept(status);
         }
+    }
+
+    private Throwable unwrapCompletion(Throwable throwable) {
+        if (throwable instanceof CompletionException ce && ce.getCause() != null) {
+            return ce.getCause();
+        }
+        return throwable;
     }
 
     private void logStatus(String scene, AsyncJobStatus status) {
