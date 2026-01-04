@@ -2,23 +2,47 @@ package tools.sqlclient.importer;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.stream.Collectors;
 
 public class ImportReport {
     private String sourceType;
-    private String sourcePath;
-    private String tableName;
-    private boolean cancelled;
+    private String sourceDescription;
+    private String targetTable;
+    private List<ColumnSpec> columns;
     private long sourceRowCount;
-    private long insertedRowCount;
-    private long dedupSkippedRowCount;
-    private long failedRowCount;
+    private long insertedRows;
+    private long skippedRows;
+    private long failedRows;
     private int batchCount;
-    private Instant startTime = Instant.now();
-    private Instant endTime;
-    private final List<String> warnings = new ArrayList<>();
+    private Instant start;
+    private Instant end;
+    private String errorMessage;
+
+    public String format() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("数据源: ").append(sourceType).append("\n");
+        sb.append("来源描述: ").append(sourceDescription).append("\n");
+        sb.append("目标表: ").append(targetTable).append("\n");
+        sb.append("列: \n");
+        if (columns != null) {
+            for (ColumnSpec c : columns) {
+                sb.append("  ").append(c.getOriginalHeader()).append(" -> ").append(c.getNormalizedName())
+                        .append(" (").append(c.getInferredType()).append(")\n");
+            }
+        }
+        sb.append("总行数: ").append(sourceRowCount).append("\n");
+        sb.append("成功插入: ").append(insertedRows).append("\n");
+        sb.append("去重跳过: ").append(skippedRows).append("\n");
+        sb.append("失败: ").append(failedRows).append("\n");
+        sb.append("批次数: ").append(batchCount).append("\n");
+        if (start != null && end != null) {
+            sb.append("耗时: ").append(Duration.between(start, end).toMillis()).append(" ms\n");
+        }
+        if (errorMessage != null) {
+            sb.append("错误: ").append(errorMessage).append("\n");
+        }
+        return sb.toString();
+    }
 
     public String getSourceType() {
         return sourceType;
@@ -28,28 +52,28 @@ public class ImportReport {
         this.sourceType = sourceType;
     }
 
-    public String getSourcePath() {
-        return sourcePath;
+    public String getSourceDescription() {
+        return sourceDescription;
     }
 
-    public void setSourcePath(String sourcePath) {
-        this.sourcePath = sourcePath;
+    public void setSourceDescription(String sourceDescription) {
+        this.sourceDescription = sourceDescription;
     }
 
-    public String getTableName() {
-        return tableName;
+    public String getTargetTable() {
+        return targetTable;
     }
 
-    public void setTableName(String tableName) {
-        this.tableName = tableName;
+    public void setTargetTable(String targetTable) {
+        this.targetTable = targetTable;
     }
 
-    public boolean isCancelled() {
-        return cancelled;
+    public List<ColumnSpec> getColumns() {
+        return columns;
     }
 
-    public void setCancelled(boolean cancelled) {
-        this.cancelled = cancelled;
+    public void setColumns(List<ColumnSpec> columns) {
+        this.columns = columns;
     }
 
     public long getSourceRowCount() {
@@ -60,72 +84,59 @@ public class ImportReport {
         this.sourceRowCount = sourceRowCount;
     }
 
-    public long getInsertedRowCount() {
-        return insertedRowCount;
+    public long getInsertedRows() {
+        return insertedRows;
     }
 
-    public void setInsertedRowCount(long insertedRowCount) {
-        this.insertedRowCount = insertedRowCount;
+    public void setInsertedRows(long insertedRows) {
+        this.insertedRows = insertedRows;
     }
 
-    public long getDedupSkippedRowCount() {
-        return dedupSkippedRowCount;
+    public long getSkippedRows() {
+        return skippedRows;
     }
 
-    public void setDedupSkippedRowCount(long dedupSkippedRowCount) {
-        this.dedupSkippedRowCount = dedupSkippedRowCount;
+    public void setSkippedRows(long skippedRows) {
+        this.skippedRows = skippedRows;
     }
 
-    public long getFailedRowCount() {
-        return failedRowCount;
+    public long getFailedRows() {
+        return failedRows;
     }
 
-    public void setFailedRowCount(long failedRowCount) {
-        this.failedRowCount = failedRowCount;
+    public void setFailedRows(long failedRows) {
+        this.failedRows = failedRows;
     }
 
     public int getBatchCount() {
         return batchCount;
     }
 
-    public void incrementBatchCount() {
-        this.batchCount++;
-    }
-
     public void setBatchCount(int batchCount) {
         this.batchCount = batchCount;
     }
 
-    public Instant getStartTime() {
-        return startTime;
+    public Instant getStart() {
+        return start;
     }
 
-    public void markStart() {
-        this.startTime = Instant.now();
+    public void setStart(Instant start) {
+        this.start = start;
     }
 
-    public Instant getEndTime() {
-        return endTime;
+    public Instant getEnd() {
+        return end;
     }
 
-    public void markEnd() {
-        this.endTime = Instant.now();
+    public void setEnd(Instant end) {
+        this.end = end;
     }
 
-    public void addWarning(String warning) {
-        this.warnings.add(warning);
+    public String getErrorMessage() {
+        return errorMessage;
     }
 
-    public String toText() {
-        String duration = endTime != null ? Duration.between(startTime, endTime).toMillis() + " ms" : "";
-        return "表格导入报告" +
-                "\n源类型: " + sourceType +
-                "\n源路径: " + sourcePath +
-                "\n目标表: leshan." + tableName +
-                "\n行数: 源=" + sourceRowCount + " 插入=" + insertedRowCount + " 跳过=" + dedupSkippedRowCount + " 失败=" + failedRowCount +
-                "\n批次数: " + batchCount +
-                "\n耗时: " + duration +
-                (cancelled ? "\n状态: 已取消" : "\n状态: 完成") +
-                (warnings.isEmpty() ? "" : "\n警告:\n" + warnings.stream().collect(Collectors.joining("\n")));
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
     }
 }

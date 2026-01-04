@@ -2,17 +2,21 @@ package tools.sqlclient.importer;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.Iterator;
 import java.util.List;
 
-public interface RowSource extends Closeable, Iterable<List<String>> {
-    @Override
-    Iterator<List<String>> iterator();
+/**
+ * 可流式读取行的来源定义。
+ */
+public interface RowSource extends Closeable {
+    void open() throws IOException;
+
+    List<String> getHeaders();
+
+    /**
+     * 读取下一行数据，返回 null 表示结束。
+     */
+    RowData nextRow() throws IOException;
 
     @Override
     void close() throws IOException;
-
-    default String name() {
-        return getClass().getSimpleName();
-    }
 }

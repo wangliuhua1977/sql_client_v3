@@ -1,78 +1,111 @@
 package tools.sqlclient.importer;
 
 import java.io.BufferedReader;
-import java.io.Closeable;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
 
+/**
+ * 流式 CSV 读取，保留空列与尾随分隔符。
+ */
 public class CsvRowSource implements RowSource {
-    private final BufferedReader reader;
+    private final Path csvFile;
+    private final Charset charset;
     private final char delimiter;
-    private List<String> next;
+    private final char quote;
+    private BufferedReader reader;
+    private List<String> headers;
+    private long lineNumber;
 
-    public CsvRowSource(String path, Charset charset, char delimiter) throws IOException {
-        this.reader = new BufferedReader(new InputStreamReader(new FileInputStream(path), charset));
+    public CsvRowSource(Path csvFile, Charset charset, char delimiter, char quote) {
+        this.csvFile = csvFile;
+        this.charset = charset;
         this.delimiter = delimiter;
-        this.next = readLine();
+        this.quote = quote;
     }
 
-    private List<String> readLine() throws IOException {
+    @Override
+    public void open() throws IOException {
+        this.reader = Files.newBufferedReader(csvFile, charset);
+        this.headers = null;
+        this.lineNumber = 0;
+    }
+
+    @Override
+    public List<String> getHeaders() {
+        return headers == null ? List.of() : headers;
+    }
+
+    @Override
+    public RowData nextRow() throws IOException {
+        if (reader == null) {
+            return null;
+        }
         String line = reader.readLine();
         if (line == null) {
             return null;
         }
-        List<String> result = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        boolean quoted = false;
-        for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
-            if (c == '"') {
-                quoted = !quoted;
-                continue;
-            }
-            if (!quoted && c == delimiter) {
-                result.add(current.toString());
-                current.setLength(0);
-            } else {
-                current.append(c);
-            }
+        lineNumber++;
+        List<String> cols = parseCsv(line);
+        if (headers == null) {
+            headers = cols;
+            return nextRow();
         }
-        result.add(current.toString());
-        return result;
+        ensureColumnCount(cols);
+        return new RowData(lineNumber - 1, cols);
     }
 
-    @Override
-    public Iterator<List<String>> iterator() {
-        return new Iterator<>() {
-            @Override
-            public boolean hasNext() {
-                return next != null;
+    private List<String> parseCsv(String line) throws IOException {
+        List<String> cols = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inQuote = false;
+        for (int i = 0; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (inQuote) {
+                if (c == quote) {
+                    if (i + 1 < line.length() && line.charAt(i + 1) == quote) {
+                        current.append(quote);
+                        i++;
+                    } else {
+                        inQuote = false;
+                    }
+                } else {
+                    current.append(c);
+                }
+            } else {
+                if (c == quote) {
+                    inQuote = true;
+                } else if (c == delimiter) {
+                    cols.add(current.toString());
+                    current.setLength(0);
+                } else {
+                    current.append(c);
+                }
             }
+        }
+        cols.add(current.toString());
+        if (inQuote) {
+            throw new IOException("CSV 引号不匹配，第 " + lineNumber + " 行");
+        }
+        return cols;
+    }
 
-            @Override
-            public List<String> next() {
-                if (next == null) {
-                    throw new NoSuchElementException();
-                }
-                List<String> current = next;
-                try {
-                    next = readLine();
-                } catch (IOException e) {
-                    next = null;
-                }
-                return current;
-            }
-        };
+    private void ensureColumnCount(List<String> cols) {
+        if (headers == null) {
+            return;
+        }
+        if (cols.size() != headers.size()) {
+            throw new IllegalStateException("列数不一致: 期望 " + headers.size() + " 实际 " + cols.size());
+        }
     }
 
     @Override
     public void close() throws IOException {
-        reader.close();
+        if (reader != null) {
+            reader.close();
+        }
     }
 }

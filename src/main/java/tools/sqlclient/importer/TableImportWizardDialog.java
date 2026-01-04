@@ -1,65 +1,62 @@
 package tools.sqlclient.importer;
 
+import tools.sqlclient.exec.SqlExecutionService;
+
 import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.table.DefaultTableModel;
 import java.awt.*;
-import java.awt.datatransfer.DataFlavor;
-import java.awt.datatransfer.UnsupportedFlavorException;
 import java.awt.event.ActionEvent;
 import java.io.IOException;
+import java.nio.charset.Charset;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * A lightweight wizard dialog that guides users to import tabular data into PostgreSQL.
- * This implementation focuses on UI scaffolding and lifecycle safety; heavy lifting
- * is delegated to helper classes that stream data and perform inserts.
+ * 表格导入向导（简化实现）。
  */
 public class TableImportWizardDialog extends JDialog {
     private final CardLayout cardLayout = new CardLayout();
-    private final JPanel cards = new JPanel(cardLayout);
-    private final JButton backButton = new JButton("上一步");
-    private final JButton nextButton = new JButton("下一步");
-    private final JButton startButton = new JButton("开始导入");
-    private final JButton cancelButton = new JButton("取消");
-    private final JTextArea pasteArea = new JTextArea();
-    private final JTextField csvPathField = new JTextField();
-    private final JTextField xlsxPathField = new JTextField();
+    private final JPanel cardPanel = new JPanel(cardLayout);
+    private final JTextArea pasteArea = new JTextArea(10, 80);
+    private final JTextField csvField = new JTextField();
+    private final JTextField xlsxField = new JTextField();
+    private final JTextField sheetField = new JTextField("Sheet1");
+    private final JTable previewTable = new JTable();
+    private final JTextField tableNameField = new JTextField("import_table");
+    private final JComboBox<ImportExecutionService.Mode> modeBox = new JComboBox<>(ImportExecutionService.Mode.values());
+    private RowSource currentSource;
+    private List<ColumnSpec> inferredColumns = new ArrayList<>();
+    private final JTextArea logArea = new JTextArea();
     private final JTextArea reportArea = new JTextArea();
-    private final JProgressBar progressBar = new JProgressBar();
-    private final JLabel statusLabel = new JLabel("等待开始");
-    private final AtomicBoolean cancelled = new AtomicBoolean(false);
-
-    private int step = 0;
+    private final ImportExecutionService importService = new ImportExecutionService();
+    private final ImportAuditService auditService = new ImportAuditService();
+    private final AtomicBoolean cancelFlag = new AtomicBoolean(false);
+    private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
 
     public TableImportWizardDialog(Frame owner) {
-        super(owner, "表格导入向导", false);
-        setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
-        setPreferredSize(new Dimension(900, 640));
-        setLayout(new BorderLayout());
-
-        cards.add(buildStep0(), "step0");
-        cards.add(buildStep1(), "step1");
-        cards.add(buildStep2(), "step2");
-        cards.add(buildStep3(), "step3");
-
-        JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        backButton.addActionListener(e -> prev());
-        nextButton.addActionListener(e -> next());
-        startButton.addActionListener(this::startImport);
-        cancelButton.addActionListener(e -> cancelImport());
-        footer.add(backButton);
-        footer.add(nextButton);
-        footer.add(startButton);
-        footer.add(cancelButton);
-
-        add(cards, BorderLayout.CENTER);
-        add(footer, BorderLayout.SOUTH);
-        pack();
+        super(owner, "表格导入到PG(粘贴/CSV/XLSX)", false);
+        setSize(900, 700);
         setLocationRelativeTo(owner);
-        updateButtons();
+        buildSteps();
+    }
+
+    private void buildSteps() {
+        cardPanel.add(buildStep0(), "step0");
+        cardPanel.add(buildStep1(), "step1");
+        cardPanel.add(buildStep2(), "step2");
+        cardPanel.add(buildStep3(), "step3");
+        setLayout(new BorderLayout());
+        add(cardPanel, BorderLayout.CENTER);
+        cardLayout.show(cardPanel, "step0");
     }
 
     private JPanel buildStep0() {
         JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(new EmptyBorder(10, 10, 10, 10));
+        JPanel options = new JPanel(new GridLayout(3, 1, 8, 8));
         ButtonGroup group = new ButtonGroup();
         JRadioButton paste = new JRadioButton("粘贴", true);
         JRadioButton csv = new JRadioButton("CSV 文件");
@@ -67,146 +64,174 @@ public class TableImportWizardDialog extends JDialog {
         group.add(paste);
         group.add(csv);
         group.add(xlsx);
-        JPanel options = new JPanel(new GridLayout(3, 1));
         options.add(paste);
         options.add(csv);
         options.add(xlsx);
-        panel.add(new JLabel("选择数据源："), BorderLayout.NORTH);
+        JButton next = new JButton("下一步");
+        next.addActionListener(e -> {
+            if (paste.isSelected()) {
+                cardLayout.show(cardPanel, "step1");
+                cardPanel.putClientProperty("sourceType", "PASTE");
+            } else if (csv.isSelected()) {
+                cardLayout.show(cardPanel, "step1");
+                cardPanel.putClientProperty("sourceType", "CSV");
+            } else {
+                cardLayout.show(cardPanel, "step1");
+                cardPanel.putClientProperty("sourceType", "XLSX");
+            }
+        });
         panel.add(options, BorderLayout.CENTER);
-        panel.putClientProperty("pasteRadio", paste);
-        panel.putClientProperty("csvRadio", csv);
-        panel.putClientProperty("xlsxRadio", xlsx);
+        panel.add(next, BorderLayout.SOUTH);
         return panel;
     }
 
     private JPanel buildStep1() {
         JPanel panel = new JPanel(new BorderLayout());
+        panel.setBorder(new EmptyBorder(10, 10, 10, 10));
         JTabbedPane tabs = new JTabbedPane();
-        JScrollPane pasteScroll = new JScrollPane(pasteArea);
-        pasteArea.setLineWrap(true);
-        tabs.addTab("粘贴", pasteScroll);
-
-        JPanel csvPanel = new JPanel(new BorderLayout(5, 5));
-        JButton csvBrowse = new JButton("选择 CSV...");
-        csvBrowse.addActionListener(e -> chooseFile(csvPathField));
-        csvPanel.add(csvPathField, BorderLayout.CENTER);
-        csvPanel.add(csvBrowse, BorderLayout.EAST);
-        tabs.addTab("CSV", csvPanel);
-
-        JPanel xlsxPanel = new JPanel(new BorderLayout(5, 5));
-        JButton xlsxBrowse = new JButton("选择 XLSX...");
-        xlsxBrowse.addActionListener(e -> chooseFile(xlsxPathField));
-        xlsxPanel.add(xlsxPathField, BorderLayout.CENTER);
-        xlsxPanel.add(xlsxBrowse, BorderLayout.EAST);
-        tabs.addTab("XLSX", xlsxPanel);
-
-        panel.add(new JLabel("配置数据源并读取预览。"), BorderLayout.NORTH);
+        tabs.addTab("粘贴", new JScrollPane(pasteArea));
+        tabs.addTab("CSV", buildCsvPanel());
+        tabs.addTab("XLSX", buildXlsxPanel());
         panel.add(tabs, BorderLayout.CENTER);
+        JButton next = new JButton("读取并预览");
+        next.addActionListener(this::handleReadSample);
+        panel.add(next, BorderLayout.SOUTH);
         return panel;
+    }
+
+    private JPanel buildCsvPanel() {
+        JPanel p = new JPanel(new BorderLayout(6, 6));
+        JButton choose = new JButton("选择 CSV 文件");
+        choose.addActionListener(e -> chooseFile(csvField));
+        p.add(choose, BorderLayout.WEST);
+        p.add(csvField, BorderLayout.CENTER);
+        return p;
+    }
+
+    private JPanel buildXlsxPanel() {
+        JPanel p = new JPanel(new GridLayout(3, 1, 6, 6));
+        JPanel row1 = new JPanel(new BorderLayout(6, 6));
+        JButton choose = new JButton("选择 XLSX 文件");
+        choose.addActionListener(e -> chooseFile(xlsxField));
+        row1.add(choose, BorderLayout.WEST);
+        row1.add(xlsxField, BorderLayout.CENTER);
+        JPanel row2 = new JPanel(new BorderLayout(6, 6));
+        row2.add(new JLabel("Sheet 名称"), BorderLayout.WEST);
+        row2.add(sheetField, BorderLayout.CENTER);
+        p.add(row1);
+        p.add(row2);
+        return p;
     }
 
     private JPanel buildStep2() {
         JPanel panel = new JPanel(new BorderLayout());
-        panel.add(new JLabel("预览与字段推断（简化预览，仅展示部分行）。"), BorderLayout.NORTH);
-        JTable table = new JTable(new Object[][]{{"预览尚未实现"}}, new String[]{"Preview"});
-        panel.add(new JScrollPane(table), BorderLayout.CENTER);
+        panel.setBorder(new EmptyBorder(10, 10, 10, 10));
+        panel.add(new JScrollPane(previewTable), BorderLayout.CENTER);
+        JPanel bottom = new JPanel(new GridLayout(2, 2, 6, 6));
+        bottom.add(new JLabel("表名"));
+        bottom.add(tableNameField);
+        bottom.add(new JLabel("模式"));
+        bottom.add(modeBox);
+        JButton next = new JButton("开始导入");
+        next.addActionListener(e -> cardLayout.show(cardPanel, "step3"));
+        panel.add(bottom, BorderLayout.NORTH);
+        panel.add(next, BorderLayout.SOUTH);
         return panel;
     }
 
     private JPanel buildStep3() {
         JPanel panel = new JPanel(new BorderLayout());
-        JPanel top = new JPanel(new BorderLayout());
-        top.add(statusLabel, BorderLayout.WEST);
-        top.add(progressBar, BorderLayout.CENTER);
-        panel.add(top, BorderLayout.NORTH);
+        panel.setBorder(new EmptyBorder(10, 10, 10, 10));
+        logArea.setEditable(false);
         reportArea.setEditable(false);
-        panel.add(new JScrollPane(reportArea), BorderLayout.CENTER);
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(logArea), new JScrollPane(reportArea));
+        split.setResizeWeight(0.6);
+        panel.add(split, BorderLayout.CENTER);
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton start = new JButton("开始");
+        JButton cancel = new JButton("取消");
+        start.addActionListener(e -> startImport());
+        cancel.addActionListener(e -> cancelFlag.set(true));
+        buttons.add(start);
+        buttons.add(cancel);
+        panel.add(buttons, BorderLayout.SOUTH);
         return panel;
     }
 
-    private void chooseFile(JTextField target) {
+    private void chooseFile(JTextField field) {
         JFileChooser chooser = new JFileChooser();
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            target.setText(chooser.getSelectedFile().getAbsolutePath());
+        int ret = chooser.showOpenDialog(this);
+        if (ret == JFileChooser.APPROVE_OPTION) {
+            field.setText(chooser.getSelectedFile().getAbsolutePath());
         }
     }
 
-    private void next() {
-        if (step < 3) {
-            step++;
-            cardLayout.show(cards, "step" + step);
-            updateButtons();
+    private void handleReadSample(ActionEvent e) {
+        String type = (String) cardPanel.getClientProperty("sourceType");
+        try {
+            if ("PASTE".equals(type)) {
+                currentSource = RowSourceFactory.forClipboard(pasteArea.getText());
+            } else if ("CSV".equals(type)) {
+                currentSource = RowSourceFactory.forCsv(Path.of(csvField.getText()), Charset.forName("UTF-8"), ',', '"');
+            } else {
+                currentSource = RowSourceFactory.forXlsx(Path.of(xlsxField.getText()), sheetField.getText());
+            }
+            currentSource.open();
+            List<String> headers = currentSource.getHeaders();
+            List<List<String>> sampleRows = new ArrayList<>();
+            RowData row;
+            int maxPreview = 50;
+            while ((row = currentSource.nextRow()) != null && sampleRows.size() < maxPreview) {
+                sampleRows.add(row.getValues());
+            }
+            inferredColumns = new TypeInferer().infer(headers, sampleRows);
+            fillPreviewTable(headers, sampleRows);
+            cardLayout.show(cardPanel, "step2");
+        } catch (Exception ex) {
+            JOptionPane.showMessageDialog(this, "读取失败: " + ex.getMessage(), "错误", JOptionPane.ERROR_MESSAGE);
+        } finally {
+            try {
+                if (currentSource != null) {
+                    currentSource.close();
+                }
+            } catch (IOException ignored) {
+            }
         }
     }
 
-    private void prev() {
-        if (step > 0) {
-            step--;
-            cardLayout.show(cards, "step" + step);
-            updateButtons();
+    private void fillPreviewTable(List<String> headers, List<List<String>> rows) {
+        DefaultTableModel model = new DefaultTableModel();
+        for (String h : headers) {
+            model.addColumn(h);
         }
+        for (List<String> row : rows) {
+            model.addRow(row.toArray());
+        }
+        previewTable.setModel(model);
     }
 
-    private void updateButtons() {
-        backButton.setEnabled(step > 0);
-        nextButton.setEnabled(step < 2);
-        startButton.setEnabled(step == 2);
-        cancelButton.setEnabled(step >= 2);
-    }
-
-    private void startImport(ActionEvent e) {
-        step = 3;
-        cardLayout.show(cards, "step3");
-        updateButtons();
-        cancelled.set(false);
-        statusLabel.setText("导入中…");
-        progressBar.setIndeterminate(true);
+    private void startImport() {
+        cancelFlag.set(false);
+        if (currentSource == null) {
+            JOptionPane.showMessageDialog(this, "请先读取数据", "错误", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
         new Thread(() -> {
             try {
-                simulateImport();
-            } finally {
-                SwingUtilities.invokeLater(() -> progressBar.setIndeterminate(false));
+                ImportExecutionService.Mode mode = (ImportExecutionService.Mode) modeBox.getSelectedItem();
+                importService.execute(currentSource, inferredColumns, "leshan", tableNameField.getText(), mode, List.of(),
+                        msg -> SwingUtilities.invokeLater(() -> logArea.append(msg + "\n")),
+                        report -> SwingUtilities.invokeLater(() -> showReport(mode, report)),
+                        cancelFlag);
+            } catch (Exception ex) {
+                SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "导入失败: " + ex.getMessage(), "错误", JOptionPane.ERROR_MESSAGE));
             }
-        }, "import-preview-thread").start();
+        }, "import-launcher").start();
     }
 
-    private void simulateImport() {
-        ImportReport report = new ImportReport();
-        report.setSourceType("PASTE/CSV/XLSX");
-        report.setTableName("demo_table");
-        try {
-            Thread.sleep(1200);
-            if (cancelled.get()) {
-                report.setCancelled(true);
-            } else {
-                report.setInsertedRowCount(0);
-                report.setSourceRowCount(0);
-            }
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            report.setCancelled(true);
-        }
-        SwingUtilities.invokeLater(() -> {
-            statusLabel.setText(report.isCancelled() ? "已取消" : "完成");
-            reportArea.setText(report.toText());
-        });
-    }
-
-    private void cancelImport() {
-        cancelled.set(true);
-        statusLabel.setText("已请求取消");
-    }
-
-    public static void showDialog(Frame owner) {
-        TableImportWizardDialog dialog = new TableImportWizardDialog(owner);
-        dialog.setVisible(true);
-    }
-
-    public static String readClipboardText() {
-        try {
-            return (String) Toolkit.getDefaultToolkit().getSystemClipboard().getData(DataFlavor.stringFlavor);
-        } catch (UnsupportedFlavorException | IOException e) {
-            return "";
-        }
+    private void showReport(ImportExecutionService.Mode mode, ImportReport report) {
+        boolean pass = auditService.auditCounts(mode, report);
+        String text = report.format() + "稽核: " + (pass ? "PASS" : "FAIL");
+        reportArea.setText(text);
     }
 }
