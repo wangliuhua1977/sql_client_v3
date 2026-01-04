@@ -2,6 +2,7 @@ package tools.sqlclient.ui;
 
 import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
+import tools.sqlclient.exec.DatabaseErrorInfo;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlTopLevelClassifier;
 
@@ -234,18 +235,64 @@ public class QueryResultPanel extends JPanel {
         return model.getColumnCount();
     }
 
-    public void renderError(String message) {
-        List<ColumnDef> defs = List.of(new ColumnDef("error#1", "错误", "错误"));
-        List<List<String>> rows = List.of(List.of(message));
+    public void renderError(DatabaseErrorInfo errorInfo, String message, Integer statementIndex, String sqlFragment) {
+        String displayMessage = (message == null || message.isBlank()) ? "执行失败" : message;
+        List<ColumnDef> defs = List.of(
+                new ColumnDef("field", "字段", "字段"),
+                new ColumnDef("value", "内容", "内容")
+        );
+        List<List<String>> rows = new ArrayList<>();
+        if (statementIndex != null) {
+            rows.add(List.of("语句序号", "第 " + statementIndex + " 条"));
+        }
+        if (sqlFragment != null && !sqlFragment.isBlank()) {
+            rows.add(List.of("SQL 片段", abbreviate(sqlFragment)));
+        }
+        rows.add(List.of("raw", displayMessage));
+        if (errorInfo != null) {
+            addIfPresent(rows, "message", errorInfo.getMessage());
+            addIfPresent(rows, "sqlState", errorInfo.getSqlState());
+            addIfPresent(rows, "position", errorInfo.getPosition());
+            addIfPresent(rows, "detail", errorInfo.getDetail());
+            addIfPresent(rows, "hint", errorInfo.getHint());
+            addIfPresent(rows, "where", errorInfo.getWhere());
+            addIfPresent(rows, "schema", errorInfo.getSchema());
+            addIfPresent(rows, "table", errorInfo.getTable());
+            addIfPresent(rows, "column", errorInfo.getColumn());
+            addIfPresent(rows, "datatype", errorInfo.getDatatype());
+            addIfPresent(rows, "constraint", errorInfo.getConstraint());
+            addIfPresent(rows, "file", errorInfo.getFile());
+            addIfPresent(rows, "line", errorInfo.getLine());
+            addIfPresent(rows, "routine", errorInfo.getRoutine());
+        }
         model.setData(defs, rows);
         applyColumnIdentifiers(defs);
-        messageLabel.setText(message);
+        messageLabel.setText(displayMessage);
         setJobStatus(null, "FAILED", 100, null);
         applyStripedRenderer();
         table.revalidate();
         table.repaint();
         resizeColumns();
         setBusy(false);
+    }
+
+    private void addIfPresent(List<List<String>> rows, String field, Object value) {
+        if (value == null) {
+            return;
+        }
+        String text = String.valueOf(value);
+        if (text.isBlank()) {
+            return;
+        }
+        rows.add(List.of(field, text));
+    }
+
+    private String abbreviate(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.strip();
+        return trimmed.length() > 200 ? trimmed.substring(0, 200) + "..." : trimmed;
     }
 
     private void applyStripedRenderer() {
