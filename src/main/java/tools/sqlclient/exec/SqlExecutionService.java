@@ -484,16 +484,21 @@ public class SqlExecutionService {
                     .warnings(warnings);
 
             if (!success) {
-                String fallbackStatus = (jobId != null ? "任务" + jobId + " 状态 " : "") + status;
-                String errorText = tableErrorText != null ? tableErrorText : message;
+                TableErrorFormatter.ErrorTable errorTable = TableErrorFormatter.buildErrorTable(resp);
+                String errorText = errorTable != null ? errorTable.displayMessage() : tableErrorText;
                 if (errorText == null || errorText.isBlank()) {
-                    errorText = fallbackStatus;
+                    errorText = "数据库未返回错误信息";
                 }
-                List<ColumnDef> errorDefs = List.of(new ColumnDef("error", "错误", "错误"));
-                List<List<String>> errorRows = List.of(List.of(errorText));
-                List<java.util.Map<String, String>> errorRowMaps = List.of(Map.of("错误", errorText));
+                List<ColumnDef> errorDefs = errorTable != null ? errorTable.columnDefs() :
+                        List.of(new ColumnDef("ERROR_MESSAGE", "ERROR_MESSAGE", "ERROR_MESSAGE"),
+                                new ColumnDef("POSITION", "POSITION", "POSITION"));
+                List<List<String>> errorRows = errorTable != null ? errorTable.rows() :
+                        List.of(List.of(errorText, ""));
+                List<java.util.Map<String, String>> errorRowMaps = errorTable != null ? errorTable.rowMaps() :
+                        List.of(Map.of("ERROR_MESSAGE", errorText, "POSITION", ""));
+                List<String> errorColumns = errorDefs.stream().map(ColumnDef::getDisplayName).toList();
                 return builder
-                        .columns(List.of("错误"))
+                        .columns(errorColumns)
                         .columnDefs(errorDefs)
                         .rows(errorRows)
                         .rowMaps(errorRowMaps)

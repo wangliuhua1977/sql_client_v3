@@ -2,54 +2,65 @@ package tools.sqlclient.exec;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class TableErrorFormatterTest {
 
     @Test
-    void shouldRenderErrorMessageAndPosition() {
+    void shouldBuildErrorTableWithMessageAndPosition() {
         ResultResponse resp = new ResultResponse();
         resp.setStatus("FAILED");
         resp.setJobId("x");
         resp.setErrorMessage("syntax error at or near \"asselect\"");
         resp.setPosition(123);
 
-        String text = TableErrorFormatter.buildTableErrorText(resp);
-
-        assertEquals("syntax error at or near \"asselect\"\nPosition: 123", text);
+        TableErrorFormatter.ErrorTable table = TableErrorFormatter.buildErrorTable(resp);
+        assertNotNull(table);
+        assertEquals("syntax error at or near \"asselect\"\nPosition: 123", table.displayMessage());
+        assertEquals(List.of("ERROR_MESSAGE", "POSITION"),
+                table.columnDefs().stream().map(ColumnDef::getDisplayName).toList());
+        assertEquals("syntax error at or near \"asselect\"", table.rows().get(0).get(0));
+        assertEquals("123", table.rows().get(0).get(1));
     }
 
     @Test
-    void shouldRenderErrorMessageOnlyWhenNoPosition() {
+    void shouldBuildErrorTableWithEmptyPosition() {
         ResultResponse resp = new ResultResponse();
         resp.setStatus("FAILED");
         resp.setErrorMessage("bad sql");
 
-        String text = TableErrorFormatter.buildTableErrorText(resp);
-
-        assertEquals("bad sql", text);
+        TableErrorFormatter.ErrorTable table = TableErrorFormatter.buildErrorTable(resp);
+        assertNotNull(table);
+        assertEquals("bad sql", table.displayMessage());
+        assertEquals("", table.rows().get(0).get(1));
     }
 
     @Test
-    void shouldRenderPositionOnly() {
+    void shouldReadCapitalizedPosition() {
         ResultResponse resp = new ResultResponse();
         resp.setStatus("FAILED");
-        resp.setPosition(77);
+        resp.setPositionUpper(77);
+        resp.setErrorMessage("syntax error");
 
-        String text = TableErrorFormatter.buildTableErrorText(resp);
-
-        assertEquals("Position: 77", text);
+        TableErrorFormatter.ErrorTable table = TableErrorFormatter.buildErrorTable(resp);
+        assertEquals("77", table.rows().get(0).get(1));
+        assertEquals("syntax error\nPosition: 77", table.displayMessage());
     }
 
     @Test
-    void shouldFallbackToJobStatusWhenNoErrorFields() {
+    void shouldFallbackToDefaultMessageWhenNoErrorFields() {
         ResultResponse resp = new ResultResponse();
         resp.setStatus("FAILED");
         resp.setJobId("8dd01734-1429-42cb-bfca-7b5dc5f626e9");
 
-        String text = TableErrorFormatter.buildTableErrorText(resp);
-
-        assertEquals("任务8dd01734-1429-42cb-bfca-7b5dc5f626e9 状态 FAILED", text);
+        TableErrorFormatter.ErrorTable table = TableErrorFormatter.buildErrorTable(resp);
+        assertNotNull(table);
+        assertEquals("数据库未返回错误信息", table.rows().get(0).get(0));
+        assertEquals("", table.rows().get(0).get(1));
+        assertEquals("数据库未返回错误信息", table.displayMessage());
     }
 
     @Test
@@ -62,9 +73,11 @@ class TableErrorFormatterTest {
                 .build();
         resp.setError(error);
 
-        String text = TableErrorFormatter.buildTableErrorText(resp);
+        TableErrorFormatter.ErrorTable table = TableErrorFormatter.buildErrorTable(resp);
 
-        assertEquals("syntax error near FROM\nPosition: 12", text);
+        assertEquals("syntax error near FROM\nPosition: 12", table.displayMessage());
+        assertEquals("syntax error near FROM", table.rows().get(0).get(0));
+        assertEquals("12", table.rows().get(0).get(1));
     }
 }
 

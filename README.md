@@ -195,9 +195,19 @@
 - 错误正文优先级：
   1. 第一行展示 `errorMessage`（非空时）。
   2. 若存在位置偏移（`position` 或 `Position` 大于 0），第二行追加 `Position: <数字>`。
-  3. 若 `errorMessage` 为空，会回退使用 `error.message/raw`（如果存在）。
-  4. 仅当上述字段均缺失时，才退回显示 `任务<jobId> 状态 FAILED`。
+  3. 若 `errorMessage` 为空，会回退使用 `error.raw`/`error.message` 或响应体中的 `message`。
+  4. 所有字段均缺失时，使用固定文案“数据库未返回错误信息”，不再将 `jobId/status` 填入结果表格正文。
 - 表格渲染器支持多行换行，错误正文会直接显示在结果表格的错误列/行中，无需额外弹窗。
+
+## 失败也返回结果表格行
+- 所有失败的 SQL（SELECT/DDL/DML/存储过程）都会像成功一样返回可渲染的结果表格，至少包含 `ERROR_MESSAGE` 与 `POSITION` 两列。
+- 结果表格至少一行：`ERROR_MESSAGE` 显示后端的 `errorMessage` 或 `error.raw/message`，`POSITION` 读取 `position/Position/error.position`，缺失时留空。
+- 禁止将“任务<jobId> 状态 FAILED”当作错误正文放入表格，`jobId/status` 仅显示在状态栏或日志。
+- 示例：
+  - 后端返回：`{"status":"FAILED","jobId":"123","errorMessage":"syntax error","position":15}`
+  - 前端表格：
+    - 列：`ERROR_MESSAGE | POSITION`
+    - 行：`syntax error | 15`
 - 示例：后端返回 `{ "status": "FAILED", "jobId": "x", "errorMessage": "syntax error", "position": 18 }` 时，错误列内容为：
   ```
   syntax error
