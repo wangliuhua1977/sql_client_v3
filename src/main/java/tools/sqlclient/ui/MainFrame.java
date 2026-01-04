@@ -11,8 +11,12 @@ import tools.sqlclient.db.SqlHistoryRepository;
 import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
 import tools.sqlclient.exec.AsyncJobStatus;
+import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.ColumnOrderDecider;
+import tools.sqlclient.exec.DatabaseErrorInfo;
+import tools.sqlclient.exec.ErrorDisplayFormatter;
 import tools.sqlclient.exec.SqlExecResult;
+import tools.sqlclient.exec.SqlExecutionException;
 import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
@@ -2007,7 +2011,7 @@ public class MainFrame extends JFrame {
                                     refreshed -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, refreshed, pendingPanel)));
                             SwingUtilities.invokeLater(() -> renderResult(noteId, panel, normalized, pendingPanel));
                         },
-                        ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage(), pendingPanel)),
+                        ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex, pendingPanel)),
                         status -> SwingUtilities.invokeLater(() -> handleStatusUpdate(handle, status, panel))
                 );
 
@@ -2085,21 +2089,24 @@ public class MainFrame extends JFrame {
         updateExecutionButtons();
     }
 
-    private void renderError(long noteId, EditorTabPanel panel, String sql, String message, QueryResultPanel existingPanel) {
+    private void renderError(long noteId, EditorTabPanel panel, String sql, Exception ex, QueryResultPanel existingPanel) {
+        DatabaseErrorInfo errorInfo = ex instanceof SqlExecutionException se ? se.getErrorInfo() : null;
+        Integer statementIndex = ex instanceof SqlExecutionException se ? se.getStatementIndex() : null;
+        String sqlFragment = ex instanceof SqlExecutionException se ? se.getSqlFragment() : null;
+        String message = ErrorDisplayFormatter.chooseDisplayMessage(errorInfo, null, ex.getMessage(), "FAILED");
+
         if (existingPanel != null) {
-            existingPanel.renderError(message);
+            existingPanel.renderError(errorInfo, message, statementIndex, sqlFragment);
         } else {
-            JPanel error = new JPanel(new BorderLayout());
-            error.setBorder(javax.swing.BorderFactory.createTitledBorder("执行失败"));
-            error.setToolTipText(sql);
-            error.add(new JLabel(message), BorderLayout.CENTER);
+            QueryResultPanel qp = QueryResultPanel.pending(sql);
+            qp.renderError(errorInfo, message, statementIndex, sqlFragment);
             String tabTitle = windowMode ? "错误" + nextResultIndex(noteId)
                     : panel.getNote().getTitle() + "-错误" + nextResultIndex(noteId);
             if (windowMode) {
-                panel.addLocalResultPanel(tabTitle, error, sql);
+                panel.addLocalResultPanel(tabTitle, qp, sql);
             } else {
                 SharedResultView view = ensureSharedView();
-                view.addResultTab(tabTitle, error, sql);
+                view.addResultTab(tabTitle, qp, sql);
                 expandSharedResults();
             }
         }
@@ -2897,7 +2904,7 @@ public class MainFrame extends JFrame {
                     });
                 },
                 ex -> SwingUtilities.invokeLater(() -> {
-                    renderError(noteId, panel, sql, ex.getMessage(), pendingPanel);
+                    renderError(noteId, panel, sql, ex, pendingPanel);
                     if (onError != null) {
                         onError.accept(ex.getMessage());
                     }
