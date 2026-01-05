@@ -256,7 +256,10 @@ public class MetadataService {
             affectedRows = resp.getUpdateCount();
         }
         if ((affectedRows == null || affectedRows < 0) && resp.getCommandTag() != null) {
-            affectedRows = CommandTagParser.parseAffectedRows(resp.getCommandTag()).orElse(null);
+            OptionalInt parsed = CommandTagParser.parseAffectedRows(resp.getCommandTag());
+            if (parsed.isPresent()) {
+                affectedRows = parsed.getAsInt();
+            }
         }
 
         return SqlExecResult.builder(sql)
