@@ -192,14 +192,14 @@ public class ExcelPasteImportDialog extends JDialog {
 
         JPanel fieldHeader = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 4));
         fieldToggle.addActionListener(e -> fieldPanel.setVisible(fieldToggle.isSelected()));
-        JButton resetBtn = new JButton(new javax.swing.AbstractAction("重置推断") {
+        JButton resetInferenceBtn = new JButton(new javax.swing.AbstractAction("重置推断") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 applyColumns(columns);
             }
         });
         fieldHeader.add(fieldToggle);
-        fieldHeader.add(resetBtn);
+        fieldHeader.add(resetInferenceBtn);
         JPanel fieldWrapper = new JPanel(new BorderLayout());
         fieldWrapper.add(fieldHeader, BorderLayout.NORTH);
         fieldWrapper.add(fieldPanel, BorderLayout.CENTER);
@@ -964,7 +964,7 @@ public class ExcelPasteImportDialog extends JDialog {
             SqlExecResult result = sqlExecutionService.executeSync(sql, 0);
             List<TableColumnMeta> list = new ArrayList<>();
             if (result.getRows() != null) {
-                for (List<Object> row : result.getRows()) {
+                for (List<?> row : result.getRows()) {
                     String name = Objects.toString(row.get(0), "");
                     String type = Objects.toString(row.get(1), "text");
                     list.add(new TableColumnMeta(name, normalizeType(type), list.size()));
