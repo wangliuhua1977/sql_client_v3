@@ -1415,6 +1415,10 @@ public class ExcelPasteImportDialog extends JDialog {
         BOOLEAN, INTEGER, BIGINT, NUMERIC, DATE, TIMESTAMP, UUID, JSONB, VARCHAR, TEXT
     }
 
+    private enum DataCandidate {
+        BOOLEAN, INTEGER, BIGINT, NUMERIC, DATE, TIMESTAMP, UUID, JSONB, VARCHAR, TEXT
+    }
+
     private static class ClipboardPayload {
         private final String html;
         private final String tsv;
