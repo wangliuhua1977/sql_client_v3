@@ -1071,6 +1071,16 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        JMenuItem pasteImport = new JMenuItem(new AbstractAction("粘贴导入") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                ExcelPasteImportDialog dialog = new ExcelPasteImportDialog(MainFrame.this, sqlExecutionService);
+                dialog.setVisible(true);
+            }
+        });
+        pasteImport.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_V, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+        tools.add(pasteImport);
+
         tools.add(new JMenuItem(new AbstractAction("文本解析") {
             @Override
             public void actionPerformed(ActionEvent e) {

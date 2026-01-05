@@ -563,3 +563,39 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 ### 日志定位方法
 - 结果集请求会输出 `JOB_RESULT_FETCH: jobId=... offset=... limit=...`，便于排查分页是否正确。
 - 结果解析会记录列数/行数/totalRows 统计、是否截断、线程池快照等。
+
+## 前端开发技术文档：粘贴导入 PG
+
+### 功能入口与用户步骤
+- 工具菜单新增“粘贴导入”（Ctrl+Shift+V），打开 `ExcelPasteImportDialog`。默认单页：左侧粘贴区（Ctrl+V 捕获剪贴板）、右侧预览区，底部字段设置可折叠。
+- 推荐流程：粘贴 Excel 选区（含表头）→ 等待自动采样/预览 → 点击“导入”。如需调整列名/类型/勾选，可展开“字段设置”表格编辑或使用“重置推断”。
+
+### 表名规则与避让
+- 默认表名输入框初始 `tmp_wlh_import_1`；导入时按用户输入为基名，在当前 Schema（下拉可编辑，默认 leshan/public）下检测是否已存在。
+- 若存在同名表，自动附加 `_1/_2...` 递增直到不存在，并在状态栏提示“最终表名”。建表/插入均使用该最终名称。
+
+### 大批量处理策略
+- 剪贴板内容上限 20MB，HTML 通道单独限制 5MB；超限直接报错拒绝，避免一次性持有超大字符串导致 OOM。
+- 粘贴后立即将内容落盘为 UTF-8 TSV 临时文件（`java.io.tmpdir`，导入完成后删除），不保留全量二维列表；仅预览前 20 行在内存中。
+- 类型推断最多采样前 5000 行，仅保存统计信息（长度/命中次数），不缓存原值。
+- 导入流式读取临时文件，跳过表头；批量 INSERT 默认 200 行，并基于 SQL 长度上限 512KB 自动提前 flush，避免单条语句过大。
+- 支持取消：对话框“取消”会中断后台 SwingWorker，终止后回滚事务并清理临时文件。
+
+### 解析与回退策略
+- 优先尝试剪贴板 `text/html` 表格，通过 `ParserDelegator` 流式解析 `<tr>/<td>` 转为 TSV；若 HTML 超限或无表格则回退 `text/plain`（Tab 分隔）。
+- 行列对齐：以首行表头为起点，后续行若列数增加会自动补充 `col_n` 列名，缺失列补空字符串。
+- 表头规范化：去空白、转小写、非 `[a-z0-9_]` 替换为 `_`，数字开头前缀 `c_`，常见保留字前缀 `c_`，重名追加 `_2/_3...`。
+
+### 类型推断规则
+- 采样命中率≥98% 时优先判定：boolean → integer → bigint → numeric(p,s)（p/s 基于最大精度/小数位，p>38 自动降级文本）→ date → timestamp → uuid；JSONB 需 ≥95% 行以 `{`/`[` 开头。
+- 其余使用 `varchar(255/500)` 或 `text` 兜底。用户可在字段表中手动覆盖目标类型。
+
+### 导入执行与错误定位
+- 顺序：BEGIN → CREATE TABLE → 批量 INSERT → COMMIT。失败时 ROLLBACK，若表已创建则自动 DROP；错误消息透传 PG 返回的 raw/Position/SQLSTATE，并标注失败批次行号范围。
+- 值写入：按列勾选与目标类型生成 INSERT，空值写 NULL；数值/时间/布尔/UUID/JSONB 均使用 `CAST('value' AS type)` 明确报错位置。
+- 进度：进度条基于采样行数，批次插入时实时更新“已处理 N 行”；取消或异常均提示状态并停止后续批次。
+
+### 关键类与职责
+- `tools.sqlclient.ui.ExcelPasteImportDialog`：主对话框，负责剪贴板落盘、采样推断、预览渲染、字段设置、建表/插入及进度与取消处理。
+- 复用 `SqlExecutionService` 提交 DDL/DML；`OperationLog` 记录解析通道、最终表名、建表 SQL、批次执行/失败原因。
+- 临时文件管理与大对象引用在导入完成/取消后清理，防止 SwingWorker 持有全量数据。
