@@ -591,8 +591,8 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 - 表头规范化：去空白、转小写、非 `[a-z0-9_]` 替换为 `_`，数字开头前缀 `c_`，常见保留字前缀 `c_`，重名追加 `_2/_3...`。
 
 ### 类型推断规则
-- 采样阶段与全量阶段均使用候选淘汰法：每列初始候选 boolean/int/bigint/numeric/date/timestamp/uuid/jsonb/varchar/text，遇到不匹配的值立即移除候选，记录非空计数与最大长度。JSON 仅在值以`{`或`[`开头且解析成功时才计入，否则会立刻淘汰 jsonb 候选，避免误判普通文本/数字列。
-- 全量扫描完成后按优先级选择最终类型：boolean > integer > bigint > numeric > date > timestamp > uuid > jsonb（需 ≥95% 非空值可解析 JSON）> varchar(<=255) > text。JSON 校验使用 Gson 解析，失败即淘汰。
+- 采样阶段与全量阶段均使用候选淘汰法：每列初始候选 boolean/int/bigint/numeric/date/timestamp/uuid/jsonb/varchar/text，遇到不匹配的值立即移除候选，记录非空计数与最大长度。JSON 仅在值以`{`或`[`开头且解析成功时才计入，否则会立刻淘汰 jsonb 候选，避免误判普通文本/数字列；且至少需要 3 个非空值通过校验才会选择 jsonb。
+- 全量扫描完成后按优先级选择最终类型：boolean > integer > bigint > numeric > date > timestamp > uuid > jsonb（需 ≥95% 非空值可解析 JSON 且满足最少样本）> varchar(<=255) > text。JSON 校验使用 Gson 解析，失败即淘汰。
 - 字段表新增来源列：auto(采样)/auto(全量)/user。用户改动目标字段名/类型即锁定（user），后续全量推断不会覆盖。目标名为空/非法（非 `[a-zA-Z_][a-zA-Z0-9_]*`）或重复时行内标红且禁用“导入”。
 - 其余使用 `varchar` 或 `text` 兜底；字段表仅允许选择上述无精度类型。若用户输入了 `numeric(10,2)` / `varchar(255)` 等，会自动规范化为无精度版本并在状态栏提示一次。
 

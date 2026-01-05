@@ -189,7 +189,8 @@ public class ExcelPasteImportDialog extends JDialog {
 
         add(centerSplit, BorderLayout.CENTER);
 
-        fieldPanel.setVisible(false);
+        fieldToggle.setSelected(true);
+        fieldPanel.setVisible(true);
         fieldPanel.setBorder(BorderFactory.createTitledBorder("字段设置（可修改目标名/类型/导入勾选）"));
         fieldTable.setModel(new DefaultTableModel(new Object[][]{}, new String[]{"导入", "源列", "目标字段名", "目标类型", "来源"}) {
             @Override
@@ -1323,7 +1324,9 @@ public class ExcelPasteImportDialog extends JDialog {
             if (candidates.contains(DataCandidate.DATE)) return "date";
             if (candidates.contains(DataCandidate.TIMESTAMP)) return "timestamp";
             if (candidates.contains(DataCandidate.UUID)) return "uuid";
-            if (candidates.contains(DataCandidate.JSONB) && jsonOk * 100 >= nonEmpty * 95) return "jsonb";
+            if (candidates.contains(DataCandidate.JSONB) && jsonOk > 0 && nonEmpty >= 3 && jsonOk * 100 >= nonEmpty * 95) {
+                return "jsonb";
+            }
             return fallbackVarchar();
         }
 
@@ -1409,10 +1412,6 @@ public class ExcelPasteImportDialog extends JDialog {
             String trimmed = v.trim();
             return trimmed.startsWith("{") || trimmed.startsWith("[");
         }
-    }
-
-    private enum DataCandidate {
-        BOOLEAN, INTEGER, BIGINT, NUMERIC, DATE, TIMESTAMP, UUID, JSONB, VARCHAR, TEXT
     }
 
     private enum DataCandidate {
