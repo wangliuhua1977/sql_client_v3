@@ -1,6 +1,7 @@
 package tools.sqlclient.exec;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import tools.sqlclient.remote.RemoteSqlClient;
 import tools.sqlclient.remote.RemoteSqlConfig;
 import tools.sqlclient.util.Config;
@@ -12,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -72,13 +74,18 @@ public class SqlExecutionService {
         try {
             AsyncJobStatus finalStatus = pollJobUntilDone(submitted.getJobId(), null).join();
             if (!"SUCCEEDED".equalsIgnoreCase(finalStatus.getStatus())) {
-                throw new RuntimeException(finalStatus.getMessage() != null
-                        ? finalStatus.getMessage()
-                        : ("任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus()));
+                String message = ErrorDisplayFormatter.chooseDisplayMessage(finalStatus.getError(), null,
+                        finalStatus.getMessage(), "任务" + finalStatus.getJobId() + " 状态 " + finalStatus.getStatus());
+                ResultResponse failedResp = remoteClient.fetchResult(finalStatus.getJobId(), false, null, null, null, null);
+                SqlExecResult failedResult = parseResultResponse(failedResp, sql, finalStatus.getJobId(), 1, MAX_PAGE_SIZE);
+                throw new SqlExecutionException(message, failedResult.getError());
             }
             return requestResultPaged(submitted.getJobId(), sql, fetchAllPages, pageSizeOverride, finalStatus);
         } catch (Exception e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
+            if (cause instanceof SqlExecutionException se) {
+                throw se;
+            }
             throw new RuntimeException("执行 SQL 失败: " + cause.getMessage(), cause);
         }
     }
@@ -124,18 +131,22 @@ public class SqlExecutionService {
                                     }
                                 });
                     }
-                    RuntimeException failure = new RuntimeException(status.getMessage() != null
-                            ? status.getMessage()
-                            : ("任务" + status.getJobId() + " 状态 " + status.getStatus()));
-                    if (onError != null) {
-                        onError.accept(failure);
-                    }
-                    return CompletableFuture.completedFuture(null);
+                    return CompletableFuture.supplyAsync(() -> buildFailedResult(status, trimmed, pageSize), ThreadPools.NETWORK_POOL)
+                            .thenAccept(res -> {
+                                notifyStatus(onStatus, status);
+                                if (onSuccess != null) {
+                                    onSuccess.accept(res);
+                                }
+                            });
                 })
                 .exceptionally(ex -> {
                     if (onError != null) {
-                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                        onError.accept(new RuntimeException(cause));
+                        Throwable cause = unwrapCompletion(ex);
+                        if (cause instanceof SqlExecutionException se) {
+                            onError.accept(se);
+                        } else {
+                            onError.accept(new RuntimeException(cause.getMessage(), cause));
+                        }
                     }
                     return null;
                 });
@@ -188,8 +199,9 @@ public class SqlExecutionService {
     private AsyncJobStatus requestStatus(String jobId) {
         AsyncJobStatus status = remoteClient.pollStatus(jobId);
         logStatus("状态轮询", status);
-        if (isTerminalFailure(status)) {
-            throw new RuntimeException(status.getMessage() != null ? status.getMessage() : "任务失败或排队超时");
+        if (isTerminalFailure(status) && (status.getStatus() == null || !"FAILED".equalsIgnoreCase(status.getStatus()))) {
+            String message = ErrorDisplayFormatter.chooseDisplayMessage(status.getError(), null, status.getMessage(), status.getStatus());
+            throw new SqlExecutionException(message != null ? message : "任务失败或排队超时", status.getError());
         }
         return status;
     }
@@ -304,15 +316,18 @@ public class SqlExecutionService {
         while (attempt < attempts) {
             attempt++;
             int page = context.computePageNumber(pageIndex, useAlternateBase);
+            int offset = Math.max(0, pageIndex * finalPageSize);
             try {
-                ResultResponse resp = remoteClient.fetchResult(jobId, context.shouldUseRemoveAfterFetch(pageIndex), page, finalPageSize, null, null);
+                OperationLog.log("JOB_RESULT_FETCH: jobId=" + jobId + ", offset=" + offset + ", limit=" + finalPageSize);
+                ResultResponse resp = remoteClient.fetchResult(jobId, context.shouldUseRemoveAfterFetch(pageIndex), page, finalPageSize, offset, finalPageSize);
                 boolean success = Boolean.TRUE.equals(resp.getSuccess());
                 String respStatus = resp.getStatus();
                 Integer returnedRowCount = resp.getReturnedRowCount();
                 Integer actualRowCount = resp.getActualRowCount();
                 Boolean hasResultSet = resp.getHasResultSet();
-                String message = resp.getMessage();
-                logAttempt(jobId, attempt, pageIndex, page, finalPageSize, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
+                String tableErrorText = TableErrorFormatter.buildTableErrorText(resp);
+                String message = tableErrorText != null ? tableErrorText : pickMessage(resp);
+                logAttempt(jobId, attempt, pageIndex, page, finalPageSize, offset, context, success, returnedRowCount, actualRowCount, hasResultSet, message, useAlternateBase);
 
                 boolean expectResult = shouldExpectResult(finalStatus, hasResultSet, actualRowCount, returnedRowCount, respStatus);
                 boolean transientUnavailable = isTransientUnavailable(message) || (!success && expectResult);
@@ -379,6 +394,60 @@ public class SqlExecutionService {
         throw lastError != null ? lastError : new RuntimeException("结果获取失败");
     }
 
+    private SqlExecResult buildFailedResult(AsyncJobStatus status, String sql, Integer pageSizeOverride) {
+        String jobId = status != null ? status.getJobId() : null;
+        int resolvedPageSize = resolvePageSize(pageSizeOverride);
+        try {
+            ResultResponse resp = remoteClient.fetchResult(jobId, false, null, resolvedPageSize, null, null);
+            if (resp == null) {
+                throw new RuntimeException("空的失败结果响应");
+            }
+            return parseResultResponse(resp, sql, jobId, 1, resolvedPageSize);
+        } catch (Exception ex) {
+            OperationLog.log("[" + jobId + "] 拉取失败结果表失败: " + ex.getMessage());
+            return buildFallbackErrorResult(status, sql);
+        }
+    }
+
+    private SqlExecResult buildFallbackErrorResult(AsyncJobStatus status, String sql) {
+        JsonObject body = new JsonObject();
+        if (status != null) {
+            if (status.getStatus() != null) {
+                body.addProperty("status", status.getStatus());
+            }
+            if (status.getMessage() != null) {
+                body.addProperty("errorMessage", status.getMessage());
+            }
+            if (status.getError() != null && status.getError().getPosition() != null) {
+                body.addProperty("position", status.getError().getPosition());
+            }
+            if (status.getSqlSummary() != null) {
+                body.addProperty("sqlSummary", status.getSqlSummary());
+            }
+            if (status.getJobId() != null) {
+                body.addProperty("jobId", status.getJobId());
+            }
+        }
+        TableErrorFormatter.ErrorTable table = StatusErrorResultBuilder.buildErrorResultTable(body);
+        List<ColumnDef> defs = table.columnDefs();
+        List<String> columns = defs.stream().map(ColumnDef::getDisplayName).toList();
+        List<List<String>> rows = table.rows();
+        List<java.util.Map<String, String>> rowMaps = table.rowMaps();
+        String message = table.displayMessage() != null ? table.displayMessage() : "数据库未返回错误信息";
+        return SqlExecResult.builder(sql)
+                .columns(columns)
+                .columnDefs(defs)
+                .rows(rows)
+                .rowMaps(rowMaps)
+                .rowCount(rows.size())
+                .success(false)
+                .hasResultSet(true)
+                .message(message)
+                .jobId(status != null ? status.getJobId() : null)
+                .status(status != null ? status.getStatus() : "FAILED")
+                .build();
+    }
+
     SqlExecResult parseResultResponse(ResultResponse resp, String sql, String jobId, int requestedPage, int requestedPageSize) {
         try {
             boolean success = Boolean.TRUE.equals(resp.getSuccess());
@@ -404,33 +473,43 @@ public class SqlExecutionService {
             Long queueDelayMillis = resp.getQueueDelayMillis();
             Boolean overloaded = resp.getOverloaded();
             ThreadPoolSnapshot threadPool = resp.getThreadPool();
-            String message = resp.getMessage();
+            String tableErrorText = TableErrorFormatter.buildTableErrorText(resp);
+            String message = tableErrorText != null ? tableErrorText : pickMessage(resp);
             List<String> notices = resp.getNotices();
             List<String> warnings = resp.getWarnings();
 
             Integer affectedRows = resolveAffectedRows(rowsAffected, updateCount, commandTag);
             boolean finalHasResultSet = determineHasResultSet(sql, hasResultSet, isSelect, resultType);
 
-            if (!success) {
-                OperationLog.log("[" + jobId + "] 任务失败/未完成: " + message);
-                throw new RuntimeException(message != null ? message : "结果已过期，请重新执行 SQL");
-            }
-
-            List<String> columns = resp.getColumns() != null ? resp.getColumns() : List.of();
+            List<ColumnMeta> columnMetas = resp.getColumnMetas() != null ? resp.getColumnMetas() : List.of();
             List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
+            List<String> columns = resolveColumns(columnMetas, resp.getColumns(), rowMaps);
+            List<ColumnDef> columnDefs = buildColumnDefs(columns, columnMetas);
+            if (Boolean.TRUE.equals(finalHasResultSet) && columns.isEmpty() && success) {
+                OperationLog.log("[" + jobId + "] 无法获取列信息，columns 为空");
+                throw new RuntimeException("无法获取列信息");
+            }
             List<List<String>> rows = extractRows(rowMaps, columns);
-            int rowCount = returnedRowCount != null ? returnedRowCount : rows.size();
+            Integer totalRows = resp.getTotalRows();
+            int rowCount = firstPositive(totalRows, returnedRowCount, rows.size());
 
-            logResultDetails(jobId, respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
+            logResultDetails(jobId, status, finalHasResultSet, resp.getResultAvailable(), resp.getArchived(), respPage, respPageSize, returnedRowCount, actualRowCount, maxVisibleRows, maxTotalRows,
                     hasNext, truncated, note, columns, resp.getRawRows(), rows, queuedAt, queueDelayMillis, overloaded, threadPool);
+
+            OperationLog.log("JOB_RESULT_STATS: jobId=" + jobId
+                    + ", columns=" + columns.size()
+                    + ", rows=" + rows.size()
+                    + ", totalRows=" + (totalRows != null ? totalRows : rowCount));
 
             SqlExecResult.Builder builder = SqlExecResult.builder(sql)
                     .columns(columns)
+                    .columnDefs(columnDefs)
                     .rows(rows)
                     .rowMaps(rowMaps)
                     .rowCount(rowCount)
-                    .success(true)
+                    .success(success)
                     .message(message)
+                    .error(resp.getError())
                     .jobId(jobId)
                     .status(status)
                     .progressPercent(progress)
@@ -440,6 +519,7 @@ public class SqlExecutionService {
                     .actualRowCount(actualRowCount)
                     .maxVisibleRows(maxVisibleRows)
                     .maxTotalRows(maxTotalRows)
+                    .totalRows(totalRows)
                     .page(respPage)
                     .pageSize(respPageSize)
                     .hasNext(hasNext)
@@ -453,6 +533,31 @@ public class SqlExecutionService {
                     .updateCount(updateCount)
                     .notices(notices)
                     .warnings(warnings);
+
+            if (!success) {
+                TableErrorFormatter.ErrorTable errorTable = TableErrorFormatter.buildErrorTable(resp);
+                String errorText = errorTable != null ? errorTable.displayMessage() : tableErrorText;
+                if (errorText == null || errorText.isBlank()) {
+                    errorText = "数据库未返回错误信息";
+                }
+                List<ColumnDef> errorDefs = errorTable != null ? errorTable.columnDefs() :
+                        List.of(new ColumnDef("ERROR_MESSAGE", "ERROR_MESSAGE", "ERROR_MESSAGE"),
+                                new ColumnDef("POSITION", "POSITION", "POSITION"));
+                List<List<String>> errorRows = errorTable != null ? errorTable.rows() :
+                        List.of(List.of(errorText, ""));
+                List<java.util.Map<String, String>> errorRowMaps = errorTable != null ? errorTable.rowMaps() :
+                        List.of(Map.of("ERROR_MESSAGE", errorText, "POSITION", ""));
+                List<String> errorColumns = errorDefs.stream().map(ColumnDef::getDisplayName).toList();
+                return builder
+                        .columns(errorColumns)
+                        .columnDefs(errorDefs)
+                        .rows(errorRows)
+                        .rowMaps(errorRowMaps)
+                        .rowCount(errorRows.size())
+                        .hasResultSet(true)
+                        .message(errorText)
+                        .build();
+            }
 
             if (!finalHasResultSet) {
                 return builder
@@ -471,6 +576,47 @@ public class SqlExecutionService {
         }
     }
 
+    private List<ColumnDef> buildColumnDefs(List<String> columns, List<ColumnMeta> metas) {
+        List<ColumnDef> defs = new ArrayList<>();
+        List<String> safe = columns == null ? List.of() : columns;
+        int seq = 1;
+        for (String col : safe) {
+            String display = col == null ? "" : col;
+            defs.add(new ColumnDef(display + "#" + seq, display, display));
+            seq++;
+        }
+        return defs;
+    }
+
+    private List<String> resolveColumns(List<ColumnMeta> metas, List<String> provided, List<java.util.Map<String, String>> rowMaps) {
+        if (metas != null && !metas.isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (ColumnMeta meta : metas) {
+                if (meta != null && meta.getName() != null) {
+                    names.add(meta.getName());
+                }
+            }
+            if (!names.isEmpty()) {
+                return names;
+            }
+        }
+        if (provided != null && !provided.isEmpty()) {
+            return provided;
+        }
+        if (rowMaps != null && !rowMaps.isEmpty()) {
+            java.util.Set<String> keys = new java.util.LinkedHashSet<>();
+            for (java.util.Map<String, String> map : rowMaps) {
+                if (map != null) {
+                    keys.addAll(map.keySet());
+                }
+            }
+            if (!keys.isEmpty()) {
+                return new ArrayList<>(keys);
+            }
+        }
+        return List.of();
+    }
+
     private Integer resolveAffectedRows(Integer rowsAffected, Integer updateCount, String commandTag) {
         Integer candidate = firstNonNegative(rowsAffected, updateCount);
         if (candidate != null) {
@@ -482,6 +628,7 @@ public class SqlExecutionService {
         }
         return null;
     }
+
 
     private boolean determineHasResultSet(String sql, Boolean respHasResultSet, Boolean isSelect, String resultType) {
         if (respHasResultSet != null) {
@@ -549,11 +696,16 @@ public class SqlExecutionService {
         return rows;
     }
 
-    private void logResultDetails(String jobId, Integer respPage, Integer respPageSize, Integer returnedRowCount,
+    private void logResultDetails(String jobId, String status, Boolean hasResultSet, Boolean resultAvailable, Boolean archived,
+                                  Integer respPage, Integer respPageSize, Integer returnedRowCount,
                                   Integer actualRowCount, Integer maxVisibleRows, Integer maxTotalRows, Boolean hasNext,
                                   Boolean truncated, String note, List<String> columns, JsonArray rowsJson, List<List<String>> rows,
                                   Long queuedAt, Long queueDelayMillis, Boolean overloaded, ThreadPoolSnapshot threadPool) {
-        OperationLog.log("[" + jobId + "] 任务完成，page=" + respPage + " pageSize=" + respPageSize
+        OperationLog.log("[" + jobId + "] 任务完成，status=" + status
+                + (hasResultSet != null ? ("，hasResultSet=" + hasResultSet) : "")
+                + (resultAvailable != null ? ("，resultAvailable=" + resultAvailable) : "")
+                + (archived != null ? ("，archived=" + archived) : "")
+                + "，page=" + respPage + " pageSize=" + respPageSize
                 + "，returnedRowCount=" + (returnedRowCount != null ? returnedRowCount : rows.size())
                 + (actualRowCount != null ? ("，actualRowCount=" + actualRowCount) : "")
                 + (maxVisibleRows != null ? ("，maxVisibleRows=" + maxVisibleRows) : "")
@@ -581,13 +733,14 @@ public class SqlExecutionService {
         }
     }
 
-    private void logAttempt(String jobId, int attempt, int pageIndex, int page, int pageSize, ResultFetchContext context,
+    private void logAttempt(String jobId, int attempt, int pageIndex, int page, int pageSize, int offset, ResultFetchContext context,
                             boolean success, Integer returnedRowCount, Integer actualRowCount, Boolean hasResultSet,
                             String message, boolean alternateBase) {
         OperationLog.log("[" + jobId + "] /jobs/result attempt=" + attempt
                 + " page=" + page
                 + " (base=" + context.describeBase(page, alternateBase) + ")"
                 + " pageSize=" + pageSize
+                + " offset=" + offset
                 + " removeAfterFetch=" + context.shouldUseRemoveAfterFetch(pageIndex)
                 + " success=" + success
                 + (hasResultSet != null ? (" hasResultSet=" + hasResultSet) : "")
@@ -776,6 +929,21 @@ public class SqlExecutionService {
         return remoteClient.listActiveJobs();
     }
 
+    private String pickMessage(ResultResponse resp) {
+        if (resp == null) {
+            return null;
+        }
+        return ErrorDisplayFormatter.chooseDisplayMessage(resp.getError(), resp.getErrorMessage(), resp.getMessage(), resp.getStatus());
+    }
+
+    private String trimToNull(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     private boolean isTerminal(String status) {
         if (status == null) return true;
         String s = status.toUpperCase();
@@ -790,7 +958,7 @@ public class SqlExecutionService {
             return true;
         }
         if ("FAILED".equalsIgnoreCase(status.getStatus())) {
-            String msg = status.getMessage();
+            String msg = ErrorDisplayFormatter.chooseDisplayMessage(status.getError(), null, status.getMessage(), status.getStatus());
             if (status.getOverloaded() != null && status.getOverloaded()) {
                 return true;
             }
@@ -805,6 +973,13 @@ public class SqlExecutionService {
         if (onStatus != null && status != null) {
             onStatus.accept(status);
         }
+    }
+
+    private Throwable unwrapCompletion(Throwable throwable) {
+        if (throwable instanceof CompletionException ce && ce.getCause() != null) {
+            return ce.getCause();
+        }
+        return throwable;
     }
 
     private void logStatus(String scene, AsyncJobStatus status) {

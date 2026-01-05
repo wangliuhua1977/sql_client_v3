@@ -8,13 +8,17 @@ import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.editor.NotePersistenceStrategy;
+import tools.sqlclient.editor.PersistentNotePersistenceStrategy;
+import tools.sqlclient.ui.scroll.EditorWheelScrollSupport;
+import tools.sqlclient.ui.swing.ScrollBarWheelSupport;
 import tools.sqlclient.util.AutoSaveService;
 import tools.sqlclient.util.Config;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
 import tools.sqlclient.util.SuggestionEngine;
 import tools.sqlclient.util.ThreadPools;
-import tools.sqlclient.util.SqlBlockDetector;
+import tools.sqlclient.util.SqlSplitter;
 import tools.sqlclient.ui.QueryResultPanel;
 
 import javax.swing.*;
@@ -49,6 +53,7 @@ public class EditorTabPanel extends JPanel {
     private final Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
     private final Note note;
+    private final NotePersistenceStrategy persistenceStrategy;
     private final Consumer<String> linkOpener;
     private final FullWidthFilter fullWidthFilter;
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
@@ -60,6 +65,9 @@ public class EditorTabPanel extends JPanel {
     private boolean editorMaximized;
     private javax.swing.Timer execTimer;
     private Runnable executeHandler;
+    private JButton routinePublishButton;
+    private JLabel routineLabel;
+    private Runnable routinePublishHandler;
     private EditorStyle currentStyle;
     private EditorStyle defaultStyle;
     private int runtimeFontSize;
@@ -78,12 +86,14 @@ public class EditorTabPanel extends JPanel {
                           EditorStyle style,
                           Consumer<EditorTabPanel> focusNotifier,
                           Consumer<String> linkOpener,
-                          int defaultPageSize) {
+                          int defaultPageSize,
+                          NotePersistenceStrategy persistenceStrategy) {
         super(new BorderLayout());
         this.defaultPageSize = Math.max(1, defaultPageSize);
         this.noteRepository = noteRepository;
         this.note = note;
         this.databaseType = note.getDatabaseType();
+        this.persistenceStrategy = persistenceStrategy == null ? new PersistentNotePersistenceStrategy() : persistenceStrategy;
         this.textArea = createEditor();
         this.currentStyle = style;
         this.defaultStyle = style;
@@ -126,7 +136,10 @@ public class EditorTabPanel extends JPanel {
         applyStyle(style);
         initLayout();
         LinkResolver.install(textArea, this::handleLinkClick);
-        autoSaveService.startAutoSave(this::autoSave);
+        lastSaveLabel.setText(this.persistenceStrategy.initialAutoSaveLabel());
+        if (this.persistenceStrategy.shouldAutoSave()) {
+            autoSaveService.startAutoSave(this::autoSave);
+        }
         updateTitle();
     }
 
@@ -354,6 +367,8 @@ public class EditorTabPanel extends JPanel {
     private void initLayout() {
         RTextScrollPane scrollPane = new RTextScrollPane(textArea);
         scrollPane.setFoldIndicatorEnabled(true);
+        ScrollBarWheelSupport.enableWheelOnVerticalScrollBar(scrollPane);
+        EditorWheelScrollSupport.install(textArea, scrollPane);
         editorPanel = new JPanel(new BorderLayout());
         editorPanel.add(scrollPane, BorderLayout.CENTER);
 
@@ -430,6 +445,19 @@ public class EditorTabPanel extends JPanel {
         toolBar.addSeparator();
         toolBar.add(new JLabel("pageSize:"));
         toolBar.add(pageSizeSelector);
+
+        routineLabel = new JLabel();
+        routineLabel.setVisible(false);
+        routinePublishButton = new JButton("保存/发布");
+        routinePublishButton.setVisible(false);
+        routinePublishButton.addActionListener(e -> {
+            if (routinePublishHandler != null) {
+                routinePublishHandler.run();
+            }
+        });
+        toolBar.addSeparator();
+        toolBar.add(routineLabel);
+        toolBar.add(routinePublishButton);
 
         installLayoutShortcuts(toolBar);
         return toolBar;
@@ -541,13 +569,18 @@ public class EditorTabPanel extends JPanel {
     }
 
     private void saveInternal(boolean notify) {
+        if (!persistenceStrategy.isPersistenceEnabled()) {
+            return;
+        }
         try {
-            noteRepository.updateContent(note, textArea.getText());
+            persistenceStrategy.save(noteRepository, note, textArea.getText());
             String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
             lastSaveLabel.setText("自动保存: " + time);
             autoSaveService.onSaved(time);
             updateTitle();
-            persistLinksAsync();
+            if (persistenceStrategy.shouldPersistLinks()) {
+                persistLinksAsync();
+            }
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, "保存失败: " + ex.getMessage());
         }
@@ -571,8 +604,12 @@ public class EditorTabPanel extends JPanel {
     }
 
     public void rename(String newTitle) {
+        if (!persistenceStrategy.isPersistenceEnabled()) {
+            JOptionPane.showMessageDialog(this, "当前为临时窗口，无法重命名");
+            return;
+        }
         try {
-            noteRepository.rename(note, newTitle);
+            persistenceStrategy.rename(noteRepository, note, newTitle);
             updateTitle();
         } catch (IllegalArgumentException ex) {
             JOptionPane.showMessageDialog(this, ex.getMessage());
@@ -691,6 +728,14 @@ public class EditorTabPanel extends JPanel {
         suggestionEngine.closePopup();
     }
 
+    public void focusEditorArea() {
+        textArea.requestFocusInWindow();
+    }
+
+    public void focusResultArea() {
+        resultArea.focusCurrent();
+    }
+
     public void revealMatch(int offset, String keyword) {
         String text = textArea.getText();
         if (text == null) {
@@ -721,31 +766,19 @@ public class EditorTabPanel extends JPanel {
 
     public java.util.List<String> getExecutableStatements(boolean blockMode) {
         String selected = textArea.getSelectedText();
-        String target;
         if (selected != null && !selected.isBlank()) {
-            SqlBlockDetector.DdlBlockDetectionResult detectionResult = SqlBlockDetector.detectSingleDdlBlock(selected);
-            if (detectionResult.isSingleDdlBlock()) {
-                java.util.List<String> list = new java.util.ArrayList<>();
-                list.add(selected);
-                return list;
-            }
-            target = selected;
-        } else if (blockMode) {
-            target = extractBlockAroundCaret();
-        } else {
-            target = extractStatementAtCaret();
+            return SqlSplitter.splitBlockToStatements(selected);
         }
-        java.util.List<String> list = new java.util.ArrayList<>();
-        for (String part : target.split(";")) {
-            if (!part.trim().isEmpty()) {
-                list.add(part.trim());
-            }
+        String full = textArea.getText();
+        SqlSplitter.SqlBlock block = SqlSplitter.findBlockAtCaret(full, textArea.getCaretPosition());
+        if (block == null) {
+            return java.util.List.of();
         }
-        return list;
+        return SqlSplitter.splitBlockToStatements(block.text());
     }
 
     public java.util.List<String> getExecutableStatements() {
-        return getExecutableStatements(false);
+        return getExecutableStatements(true);
     }
 
     public void insertSqlAtCaret(String sql) {
@@ -757,6 +790,91 @@ public class EditorTabPanel extends JPanel {
         textArea.requestFocusInWindow();
         textArea.replaceRange(sql, start, end);
         textArea.setCaretPosition(start + sql.length());
+    }
+
+    public void setTextContent(String text) {
+        SwingUtilities.invokeLater(() -> {
+            textArea.setText(text == null ? "" : text);
+            textArea.setCaretPosition(0);
+        });
+    }
+
+    public String getSqlText() {
+        return textArea.getText();
+    }
+
+    public void setReadOnly(boolean readOnly) {
+        SwingUtilities.invokeLater(() -> {
+            textArea.setEditable(!readOnly);
+            if (routinePublishButton != null) {
+                routinePublishButton.setEnabled(!readOnly && routinePublishButton.isVisible());
+            }
+        });
+    }
+
+    public void configureRoutineContext(String label, boolean editable, Runnable publishHandler) {
+        SwingUtilities.invokeLater(() -> {
+            routinePublishHandler = publishHandler;
+            if (routineLabel != null) {
+                routineLabel.setText(label == null ? "" : label);
+                routineLabel.setVisible(true);
+            }
+            if (routinePublishButton != null) {
+                routinePublishButton.setVisible(true);
+                routinePublishButton.setEnabled(editable);
+            }
+            textArea.setEditable(editable);
+        });
+    }
+
+    public void clearRoutineContext() {
+        SwingUtilities.invokeLater(() -> {
+            routinePublishHandler = null;
+            if (routineLabel != null) {
+                routineLabel.setVisible(false);
+                routineLabel.setText("");
+            }
+            if (routinePublishButton != null) {
+                routinePublishButton.setVisible(false);
+            }
+            textArea.setEditable(true);
+        });
+    }
+
+    public void highlightLine(int lineNumber) {
+        if (lineNumber <= 0) return;
+        SwingUtilities.invokeLater(() -> {
+            try {
+                int target = textArea.getLineStartOffset(Math.max(0, lineNumber - 1));
+                int end = textArea.getLineEndOffset(Math.max(0, lineNumber - 1));
+                textArea.requestFocusInWindow();
+                textArea.setCaretPosition(target);
+                textArea.select(target, end);
+                Rectangle2D view = textArea.modelToView2D(target);
+                if (view != null) {
+                    textArea.scrollRectToVisible(view.getBounds());
+                }
+            } catch (BadLocationException ignored) {
+            }
+        });
+    }
+
+    public void highlightPosition(int position) {
+        if (position <= 0) return;
+        SwingUtilities.invokeLater(() -> {
+            int target = Math.max(0, Math.min(position - 1, textArea.getDocument().getLength()));
+            textArea.requestFocusInWindow();
+            textArea.setCaretPosition(target);
+            int end = Math.min(textArea.getDocument().getLength(), target + 1);
+            textArea.select(target, end);
+            try {
+                Rectangle2D view = textArea.modelToView2D(target);
+                if (view != null) {
+                    textArea.scrollRectToVisible(view.getBounds());
+                }
+            } catch (BadLocationException ignored) {
+            }
+        });
     }
 
     private String extractStatementAtCaret() {
@@ -796,7 +914,7 @@ public class EditorTabPanel extends JPanel {
                 int lineStart = textArea.getLineStartOffset(line);
                 int lineEnd = textArea.getLineEndOffset(line);
                 String lineText = full.substring(lineStart, Math.min(lineEnd, full.length()));
-                if (lineText.trim().isEmpty()) {
+                if (isIsolationLine(lineText)) {
                     break;
                 }
                 startLine = line;
@@ -808,7 +926,7 @@ public class EditorTabPanel extends JPanel {
                 int lineStart = textArea.getLineStartOffset(line);
                 int lineEnd = textArea.getLineEndOffset(line);
                 String lineText = full.substring(lineStart, Math.min(lineEnd, full.length()));
-                if (lineText.trim().isEmpty()) {
+                if (isIsolationLine(lineText)) {
                     break;
                 }
                 endLine = line;
@@ -825,6 +943,22 @@ public class EditorTabPanel extends JPanel {
             // 出现异常时退化为整篇文本，保证不会崩
             return full;
         }
+    }
+
+    /**
+     * 仅包含空格或制表符的行视为隔离行，用于 Ctrl+Enter 分段。
+     */
+    private boolean isIsolationLine(String lineText) {
+        if (lineText == null || lineText.isEmpty()) {
+            return true;
+        }
+        for (int i = 0; i < lineText.length(); i++) {
+            char ch = lineText.charAt(i);
+            if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+                return false;
+            }
+        }
+        return true;
     }
 
     public void clearLocalResults() {
@@ -923,6 +1057,10 @@ public class EditorTabPanel extends JPanel {
             if (entry.component instanceof QueryResultPanel qp) {
                 action.accept(qp);
             }
+        }
+
+        private void focusCurrent() {
+            applyToCurrent(QueryResultPanel::focusTable);
         }
     }
 

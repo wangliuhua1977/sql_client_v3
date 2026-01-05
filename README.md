@@ -9,6 +9,25 @@
 
 > 若容器/网络限制导致构建失败，可在联网环境下重新执行 Maven 下载依赖。
 
+## UI 设计与交互
+- 主布局：左侧对象/笔记树（可折叠）、中间 SQL 编辑器、多标签或子窗体，底部为结果/消息分栏，整体由左右、上下双重 SplitPane 构成；右侧日志/历史/设置区默认隐藏，仅通过 View 菜单显式打开。
+- 菜单结构：File（新建/导入/保存/关闭标签）、Edit（编辑器选项）、Run（执行/停止/标签切换）、View（区域显隐、布局重置、模式切换、焦点循环）、Tools（元数据/调试/备份/文本工具等低频入口）、Help（使用说明、快捷键）。
+- 辅助面板默认隐藏：日志、历史、设置等低频区域初始不可见，仅在 View 菜单勾选后出现，状态可被 LayoutState 记住；对象浏览器保留在左侧，弹出式浏览器通过菜单或按钮打开。
+- 快捷键表：
+
+  | 快捷键 | 作用 |
+  | --- | --- |
+  | Ctrl+Enter | 执行当前 SQL/选中块 |
+  | Ctrl+W | 关闭当前编辑标签或子窗体 |
+  | Ctrl+Tab / Ctrl+Shift+Tab | 在标签/窗口间向前/向后切换 |
+  | Ctrl+L | 聚焦编辑器输入区 |
+  | Esc | 停止/取消正在执行的任务 |
+  | F6 | 在对象树、编辑器、结果区之间循环焦点 |
+  | Alt+W / Alt+Q | 打开 SQL 片段库 / 执行历史 |
+  | Ctrl+, | 打开 SQL 编辑器选项 |
+
+- 渲染器与 UIManager 收敛：全局字体统一为 13px，无衬线；JTree/JTable 行高约 22~24，选中背景为浅蓝；自定义树渲染器根据对象类型突出颜色与粗体，表格渲染器弱化网格、空值显示为空并强化选中态；UIManager 统一 SplitPane、ScrollPane 边框与 Tab 内边距，表头加粗、分隔线改为轻量 MatteBorder。
+
 ## 界面布局与面板停靠
 - 默认布局：左侧“对象/笔记”导航，中央 SQL 编辑器，底部停靠“结果/日志/任务/历史”多标签面板，右侧为 Inspector 预留区。
 - 视图菜单：
@@ -28,6 +47,22 @@
 - **标签模式**：针对窄屏可切换为 Editor/Result 标签页，无需拖动即可查看结果；切换时记住上次选择的模式。
 
 ## 核心操作
+### 函数/存储过程源码编辑与调试运行
+- 入口：在对象浏览器中右键 leshan schema 下的函数/存储过程节点，可选择“打开源码（只读）/编辑源码/运行/调试运行…”。同名重载会先列出 identity 参数供选择，内部以 OID 精确定位。
+- 源码读取：通过异步 SQL `SELECT pg_get_functiondef(:oid) AS ddl;` 拉取完整 DDL 并在 SQL 编辑 Tab 打开，Tab 标题形如 `leshan.func(arg1 int)`，只读模式禁用发布按钮。
+- 编辑/发布：在可编辑模式下直接修改 DDL，点击工具条上的“保存/发布”会原样执行 `CREATE OR REPLACE ...`（不包裹事务、不改写文本）。执行完成后刷新对象浏览器对应节点；失败时在结果面板展示错误并停止进度动画。
+- 调试运行：右键选择“运行/调试运行…”弹出参数对话框，空值默认填 NULL，可直接输入 SQL 字面量。SQL 生成规则：
+  - 存储过程：`CALL leshan.proc_name(arg1, arg2, ...);`
+  - 函数：返回类型以 `SETOF ` 开头时生成 `SELECT * FROM leshan.func_name(...);`，否则生成 `SELECT leshan.func_name(...);`
+  - 结果集与无结果集均复用现有结果渲染/提示链路。
+- 错误定位：发布或运行失败时解析错误文本中的 `LINE n:` 或 `Position: n`，在编辑器内高亮对应行/字符偏移，解析不到则仅保留错误提示。
+- 线程边界：源码拉取、发布与运行均复用既有异步 SQL 提交流程；网络/计算在后台线程完成，所有 Swing 组件更新（进度条、Tab 切换、光标定位、对话框弹出）均通过 `SwingUtilities.invokeLater` 回到 EDT。
+
+## 临时笔记窗口（过程/函数查看）
+- 触发场景：对象树中双击函数/存储过程节点、右键选择“打开源码（只读）/查看定义/Show DDL”等入口，或任何读取例程定义的动作，都会打开“临时查看：<schema.object()>”独立窗口。
+- 默认行为：窗口内的编辑器允许查看与临时修改源码，但不自动保存、不写入笔记数据库、不记录最近笔记；关闭窗口直接丢弃更改，不弹保存确认。
+- 保存为永久笔记：工具栏提供“保存为永久笔记…”按钮，点击后输入目标标题并确认，才会创建正式笔记并写入内容（可在主窗口继续编辑）。未点击前不会产生任何文件或数据库记录。
+
 ### 窗口与焦点
 - 支持独立窗口模式与面板模式，子窗口可拖动、最大化/最小化或平铺。
 - 程序启动会恢复上次的窗口集合，并自动把焦点放在最后一个打开的子窗口。
@@ -38,7 +73,7 @@
 - 激活时，在输入表/视图、字段、函数或存储过程位置自动弹出联想列表，连续输入会保持弹窗开启；敲回车选择或在语句末尾输入分号会收起弹窗。
 
 ### SQL 执行
-- Ctrl+Enter 会执行选中内容、光标所在语句或连续非空行块，分号拆分后串行提交，结果出现在当前窗口或底部共享结果区。
+- Ctrl+Enter 会执行选中内容或光标所在的整个 SQL 代码块（空行分块），块内语句按顶层分号拆分后串行提交，结果出现在当前窗口或底部共享结果区。
 - 运行中的窗口禁用“执行”并启用“停止”，停止会中止对应的 HTTPS 请求。
 
 ### 双向链接标签
@@ -56,6 +91,26 @@
 
 ## 最近更新
 - 新增 Alt+E 联想开关、元数据状态提示与日志面板默认收拢，执行/停止按钮随焦点窗口切换。
+
+## 结果集表格复制（Swing JTable）
+- 触发入口：在结果集 JTable 中按 `Ctrl+C`，或使用右键菜单的“复制选中单元格/复制选中列内容/复制选中列名（逗号分隔）”。
+- 复制格式：单元格与多单元格复制使用 `\t` 分隔同一行的列，`\n` 分隔不同行，`null` 视为 **空字符串**。列名复制使用英文逗号+空格（如 `colA, colB`），列值复制遵循当前表格已加载的数据，不触发额外网络请求。
+- 选区规则：支持不连续多选（行/列/单元格皆可），右键点击未选中的单元格会先将焦点移动到该单元格，列复制会优先使用选中的列；若未显式选列，则使用当前焦点列。
+- 边界行为：表格无数据或无有效选区时菜单项自动禁用；复制动作写入系统剪贴板（AWT Clipboard）。所有 UI 更新与剪贴板操作均在 EDT 触发或通过 `SwingUtilities.invokeLater` 派发，避免线程安全问题。
+
+## 执行进度条/Loading 状态收敛（Swing）
+- 统一入口：`QueryResultPanel#setBusy(boolean)` 统一控制执行态，`busy=true` 时进度条可见且处于动画/不定模式，`busy=false` 时停止动画并隐藏。
+- 收敛时机：
+  - 提交/队列或轮询更新：收到 QUEUED/RUNNING 等状态会自动置为 `busy=true`。
+  - 终态（SUCCEEDED/FAILED/CANCELLED 等）或渲染完成（包含结果集、非查询信息、错误提示）后调用 `setBusy(false)`，确保无漏关。
+  - 异常/失败：展示错误提示后同样关闭动画，不会因异常提前返回而悬停。
+- 线程规则：所有 `setBusy` 和状态标签更新均通过 EDT 执行，避免跨线程修改 Swing 组件。
+
+## SQL 编辑器滚动条滚轮支持（子窗体/面板模式）
+- 适用范围：`EditorTabPanel` 作为独立子窗体（JInternalFrame/JDialog/JFrame）或主界面内嵌面板（tabbed 面板模式）时，SQL 编辑区无论鼠标停在正文编辑区域还是右侧竖向滚动条上，滚轮都能驱动同一垂直滚动条滚动。
+- 实现方式：封装工具类 `tools.sqlclient.ui.swing.ScrollBarWheelSupport#enableWheelOnVerticalScrollBar(JScrollPane)`，在 SQL 编辑器的 `RTextScrollPane` 上安装 `MouseWheelListener`，仅监听垂直 `JScrollBar`，不改动编辑器本体的原生滚轮行为。
+- 方向与步进：使用 `MouseWheelEvent#getUnitsToScroll()` 与滚动条 `getUnitIncrement`（回退 `getBlockIncrement`）计算步进，向下滚动（值大于 0）使滚动条 value 增大、内容下移，向上滚动相反；结果值在 `minimum` 与 `maximum - visibleAmount` 之间夹紧。
+- 绑定与线程：通过滚动条 `clientProperty` 标记避免重复绑定，初始化时若不在 EDT 会使用 `SwingUtilities.invokeLater` 派发安装，确保监听注册与 UI 更新在事件派发线程完成。
 
 ## 问题根因与修复说明
 - **失败链路**：元数据刷新在拉取表/视图/字段时直接调用 `/waf/api/jobs/result`，SQL 只做 `LIMIT 1000` 的 keyset 分页，未在客户端裁剪 pageSize 或使用 SQL 级 OFFSET 分页；当 schema 超过 1000 行时，后端窗口被截断并返回 `RESULT_NOT_READY` / HTTP 410 `RESULT_EXPIRED`，旧逻辑在 60s 超时时抛出异常，刷新失败且 staging 未写回。代码可见 `MetadataRefreshService#waitUntilReady` 的轮询与超时逻辑。
@@ -119,7 +174,7 @@
 - **清单 SQL 模板**：
   - 表：`SELECT table_schema AS schema_name, table_name AS object_name FROM information_schema.tables WHERE table_schema='leshan' AND table_type='BASE TABLE' ORDER BY table_name OFFSET :offset LIMIT 1000`。
   - 视图：`SELECT table_schema AS schema_name, table_name AS object_name FROM information_schema.views WHERE table_schema='leshan' ORDER BY table_name OFFSET :offset LIMIT 1000`。
-  - 函数：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND (p.prokind='f' OR p.proisagg=FALSE) ORDER BY p.proname OFFSET :offset LIMIT 1000`。
+- 函数：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind IN ('f','w') ORDER BY p.proname OFFSET :offset LIMIT 1000`。
   - 过程：`SELECT n.nspname AS schema_name, p.proname AS object_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='leshan' AND p.prokind='p' ORDER BY p.proname OFFSET :offset LIMIT 1000`（`prokind` 不可用时返回空列表以避免大包）。
 - **差分写库**：全量同步只对新增/删除对象做 INSERT/DELETE，移除的表/视图会顺带清理对应列缓存，避免全表重建带来的抖动。
 
@@ -142,6 +197,36 @@
 - 结果面板在重用 pending 面板时未必会重新应用渲染器，部分环境下 JTable 不会自动刷新背景与结构，易出现“已完成但表格空白”的错觉。
 - 现在每次渲染/报错都会重新绑定条纹渲染器、调用 `revalidate/repaint` 并重算列宽，确保列头/行数据即时出现在结果栏。
 - 结果计数、状态与 message 仍与后端字段同步；如仍为空白，可通过操作日志确认后端是否返回 `returnedRowCount`/`resultRows`。
+- 失败信息透传：无论 SELECT 还是非 SELECT，只要 `success=false`，客户端都会使用服务端返回的 `errorMessage/message/note` 作为结果面板与 OperationLog 的文案，避免“失败但无详情”的情况。非查询失败同样会展示完整错误原因。
+
+## 错误展示优先级与表格展示规则
+- 判断 SQL 执行报错：响应状态为 `FAILED`，或响应中存在 `errorMessage`/`position`/`Position` 字段时，结果表格会切换到错误行展示模式。
+- 错误正文优先级：
+  1. 第一行展示 `errorMessage`（非空时）。
+  2. 若存在位置偏移（`position` 或 `Position` 大于 0），第二行追加 `Position: <数字>`。
+  3. 若 `errorMessage` 为空，会回退使用 `error.raw`/`error.message` 或响应体中的 `message`。
+  4. 所有字段均缺失时，使用固定文案“数据库未返回错误信息”，不再将 `jobId/status` 填入结果表格正文。
+- 表格渲染器支持多行换行，错误正文会直接显示在结果表格的错误列/行中，无需额外弹窗。
+
+## 失败结果表格化展示
+- 失败状态与成功路径一致，会在结果集区域生成“结果1/结果N”标签页展示错误详情，而非仅渲染单行状态文本。
+- 失败结果的表格列固定为：`ERROR_MESSAGE`、`POSITION`，至少包含一行数据；`ERROR_MESSAGE` 保留后端原始换行。
+- `POSITION` 取值优先级：1）`position` 字段；2）`Position` 字段；3）正则解析 `errorMessage` 中的 `Position: <number>`（不区分大小写）。解析不到则留空。
+- 严禁在表格正文填入“任务<jobId> 状态 FAILED”或“SQL 执行失败: <sql> | 任务...FAILED”等拼接文本，这类文案仅用于日志或状态栏。
+- 样例：后端返回
+  ```json
+  {
+    "status": "FAILED",
+    "sqlSummary": "select * from t1",
+    "hasResultSet": false,
+    "errorMessage": "ERROR: relation \"t1\" does not exist\n  Position: 30",
+    "jobId": "44908dbf-397d-407c-b425-9103dd9a4ff3"
+  }
+  ```
+  前端结果表格渲染：
+  | ERROR_MESSAGE | POSITION |
+  | --- | --- |
+  | ERROR: relation "t1" does not exist (换行保留) | 30 |
 
 ## SQL 子窗口布局说明
 - 每个编辑 Tab 固定使用上下分割的 `JSplitPane`：上侧为编辑器工具条+正文，下侧为结果集/消息导航区，不再存在“编辑/结果”切换标签。
@@ -176,6 +261,16 @@
 - **字段顺序保证**：单表列请求固定按 `ordinal_position` 排序并落库为 `sort_no`，UI 直接按该顺序展示，缺失缓存时回退到后端顺序。
 - **可追溯调试**：每批请求的 SQL 与返回前 200 行会写入 `%USERPROFILE%\.Sql_client_v3\logs\metadata-*.log`，OperationLog 仅输出批次计数和耗时。
 
+### 前端开发技术文档（元数据模块）
+- **启动链路**：先读取 `metadata_snapshot` 做对象级签名比对；签名一致则跳过远端拉取，签名不一致时按 900 行分页拉取对象清单、差分写入本地 SQLite，并回写新的 snapshot。
+- **手动刷新**：菜单触发的刷新与启动链路一致，仅同步对象列表（table/view/function/procedure），不会拉取字段、也不会调用 `ensureColumnsLoaded`。
+- **字段懒加载**：只有在联想/列顺序/对象浏览器需要某表字段且本地 columns 缓存为空时，才调用 `ensureColumnsLoaded(schema, table)` 向远端查询。若缓存命中直接返回，缓存缺失会创建/复用以 `schema.table` 为键的 in-flight Future，成功写入后刷新 UI。
+- **去重策略**：对象级跳过依赖 `metadata_snapshot`，列级避免重复依赖 columns 表缓存命中；同一表的并发请求会被 in-flight map 复用，失败后自动清理以便下次重试。
+- **字段 SQL（PG12.7 兼容）**：`SELECT ... FROM pg_attribute a JOIN pg_class c ... WHERE n.nspname=:schema AND c.relname=:table ORDER BY a.attnum;` 单表查询无需分页且按 `attnum` 稳定排序，参数在拼接前会做标识符校验/转义。
+- **SQLite 结构**：objects(schema_name, object_name, object_type, use_count, last_used_at, PK(schema_name, object_name))；columns(schema_name, object_name, column_name, sort_no, use_count, last_used_at, PK 同步，索引 `idx_columns_schema_object` 支持 `(schema,table)` 快速命中)；columns_snapshot(object_name, cols_hash, updated_at)；metadata_snapshot(object_type, remote_count, remote_signature, checked_at)；meta_snapshot 仅存储补充信息哈希。
+- **清理与刷新**：差分同步或 DDL 删除对象时会同步删除 columns/columns_snapshot 记录；手动“重置元数据”仅清空本地缓存，后续依然按对象差分 + 懒加载列重新写库。
+- **关键日志**：OperationLog 会输出 `[meta] columns cache hit/miss`、`inflight reused`、`fetched count` 或失败原因，元数据刷新进度日志包含批次、对象/列计数与耗时，便于排障。
+
 ### 启动全量同步
 - 主窗口完成初始化后即触发异步元数据刷新，`meta_snapshot` 为空时执行全量同步；后续刷新仅更新变动的类别/对象。
 - 清空本地缓存（菜单“工具-重置元数据”）会删除 `objects/columns/meta_snapshot`，强制下一次重新全量拉取。
@@ -183,6 +278,49 @@
 ### 操作日志降噪
 - 笔记链接同步的成功日志已降级为 DEBUG，不再通过右侧“操作日志”面板输出“更新链接/Update link”等文案；如需排查可改用文件日志（`NoteRepository`）。
 - 仍保留解析/保存失败的提示，且改为“保存笔记关联失败”以便快速定位异常。
+
+## 错误模型与展示规则
+
+异步接口返回的错误统一落在 `error` 对象中，客户端不会再将“任务状态 FAILED”当作正文。
+
+- **字段定义**
+  - `message`: 数据库原始错误信息（PG/JDBC message）
+  - `sqlState`: `SQLException.getSQLState()`
+  - `vendorCode`: `SQLException.getErrorCode()`
+  - `detail/hint/position/where/schema/table/column/datatype/constraint/file/line/routine`: `PSQLException.getServerErrorMessage()` 中的对应字段，缺失则为 `null`
+  - `raw`: 直接可展示的多行文本，拼接规则如下
+- **raw 拼接规则**
+  1. 第一行：`message`
+  2. 若存在 `sqlState`：追加一行 `SQLSTATE: <sqlState>`
+  3. 若存在 `position`：追加一行 `Position: <position>`
+  4. 依次追加 `Detail:`、`Hint:`、`Where:` 行（有值才追加）
+- **前端展示优先级**
+  1. `error.raw`
+  2. 旧字段（如顶层 `errorMessage`/`message`）
+  3. 兜底状态文本（例如 `FAILED`），不再作为正文
+- **示例**
+  - 语法错误：
+    - `message`: `syntax error at or near "asselect"`
+    - `sqlState`: `42601`
+    - `position`: `123`
+    - `raw` 展示：
+      ```
+      syntax error at or near "asselect"
+      SQLSTATE: 42601
+      Position: 123
+      ```
+  - 约束错误：
+    - `message`: `duplicate key value violates unique constraint "users_pkey"`
+    - `sqlState`: `23505`
+    - `detail`: `Key (id)=(1) already exists.`
+    - `constraint`: `users_pkey`
+    - `raw` 展示：
+      ```
+      duplicate key value violates unique constraint "users_pkey"
+      SQLSTATE: 23505
+      Detail: Key (id)=(1) already exists.
+      ```
+  - 约定：错误正文始终使用数据库返回的原始文本，不再显示“任务状态 FAILED”或其他抽象描述。
 
 ### 本地 SQLite 存储路径与迁移
 - 本地缓存数据库统一存放在 `%USERPROFILE%\\.Sql_client_v3\\metadata.db`（Windows 为 `C:\\Users\\<用户名>\\.Sql_client_v3\\metadata.db`）。
@@ -203,6 +341,7 @@
 - **/api/jobs/submit**：`{"encryptedSql": "<Base64 AES>", "maxResultRows":5000?, "dbUser":"leshan_app"?, "label":"xxx"?}`。`dbUser` 逻辑库用户默认 `leshan`，`maxResultRows` 仅影响首次内存快照，并不限制最终可见行数。
 - **/api/jobs/status**：`{"jobId":"..."}`，返回 `status/progressPercent/elapsedMillis` 等任务信息。
 - **/api/jobs/result**：分页拉取 `{"jobId":"...", "removeAfterFetch":true?, "page":1?, "pageSize":200?}`。响应字段包含 `success/status/progressPercent/resultRows/columns/returnedRowCount/actualRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/note/page/pageSize`，客户端全部做空值兼容。
+- **removeAfterFetch 语义**：`removeAfterFetch=true` 时，后端在成功返回后会从内存缓存移除该 job，再次请求将返回 404。客户端仅在“确定不再翻页/重试”时才发起一次最终带 `removeAfterFetch=true` 的 `/jobs/result`，轮询阶段统一使用 `/jobs/status`，避免“先返回 200 再被 404 覆盖”的双请求。元数据刷新与普通查询都遵循该规则。
 
 #### 异步 SQL 结果一致性窗口与客户端重试策略
 - 状态 `SUCCEEDED` 但结果暂不可用时（`success=false` 且 message 含 “Result expired/not available” 或返回行/计数矛盾），前端自动进入自愈重试，不再直接宣告失败。
@@ -222,7 +361,7 @@
 - `ASYNC_SQL_RESULT_PAGE_BASE`：`AUTO`（默认，先 1-based 再按需回退）、`0`、`1`。通过 System Property 或 `config.properties` 覆盖。
 
 #### removeAfterFetch 策略选择
-- 元数据/短结果优先保证可重试性，首次拉取统一使用 `removeAfterFetch=false`。默认 `AUTO` 不会做二次清理，避免清理后无法重试；如确需主动清理，可设置为 `TRUE`。
+- 元数据/短结果优先保证可重试性：轮询阶段仅用 `/jobs/status`，最终确认无需再翻页时才发送一次 `removeAfterFetch=true` 的 `/jobs/result`，避免“先拉取成功又被 404 覆盖”。默认 `AUTO` 不会额外追加清理请求。
 - `ASYNC_SQL_RESULT_FETCH_REMOVE_AFTER`：`AUTO`（默认，安全保留缓存）、`TRUE`（解析成功后追加一次 `removeAfterFetch=true`）、`FALSE`（永不清理）。
 - 日志会显示 `removeAfterFetch=<true|false>` 以便确认策略，若后端专门提供清理接口可按需开启。
 
@@ -295,9 +434,10 @@
 
 ### 元数据刷新实现（PG 12.7）
 - SQL 级分页：对象与字段均按 `ORDER BY schema/object/ordinal_position OFFSET :offset LIMIT 1000` 逐页提交，见 `MetadataRefreshService#fetchPagedObjects` 与 `#fetchColumns`。
-- 轮询与重试：`waitUntilReady` 使用 `/jobs/result` 轮询，`RESULT_NOT_READY` 继续等待，HTTP 410/`RESULT_EXPIRED` 重提一次；单批超时 60s；overload 采用 500ms 起步指数退避。
+- 轮询与重试：`waitUntilReady` 统一使用 `/jobs/status` 轮询，终态后只发送一次 `/jobs/result`（带 `removeAfterFetch=true`）获取最终数据或错误详情，避免“已移除再 404”的二次拉取。单批超时 60s；overload 采用 500ms 起步指数退避。
 - 取消：`MetadataService.cancelRefresh` 设置取消标记并调用 `/jobs/cancel`（reason=`Cancelled by UI`），取消后 staging 不会覆盖正式表。
 - 本地安全：结果先写入 `objects_staging/columns_staging`，成功后一次性 `swapFromStaging`；失败/取消保留旧缓存。
+- PG12 系统表兼容：针对 `pg_proc` 采用 `prokind IN ('f','w')` 过滤函数，聚合使用 `prokind='a'`，不再引用已废弃的 `proisagg` 字段，确保 SQL 可在 PostgreSQL 12.7 正常执行。
 
 ### 常见错误与排障
 - 401：Token 错误或缺失，`RemoteSqlClient` 会抛出 “HTTP 401 未授权” 并在 OperationLog 打印请求/响应；请确认 `X-Request-Token`。
@@ -347,3 +487,131 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 - **ResultSet 渲染**：仅当后端标记 `hasResultSet/isSelect/resultType` 为 true，或分类器判定为 ResultSet 时才进入列适配/投影解析；列定义数量与每行数据列数必须一致，否则跳过重排以避免“多列表头 + 空白行”。
 - **非查询渲染**：顶层非查询或 `hasResultSet=false` 时走消息视图，显示状态、commandTag、affectedRows、elapsed/jobId 等，不做任何列解析/星号展开。CommandTag 与 affectedRows 会直接展示，无法判定时标记为 N/A。
 - **影响行数获取策略**：优先使用后端 `updateCount/affectedRows(rowsAffected)` 且值≥0；否则从 commandTag 匹配 `^(INSERT|UPDATE|DELETE|SELECT)\s+\d+` 补齐；仍不可得时显示 N/A，但 commandTag 依然保留。
+
+## 前端执行链路与规则补充
+
+### 前端开发者详细技术文档 - /jobs/result 取结果与分页
+- **请求体（POST /jobs/result）**：统一使用 `jobId + offset + limit (+ removeAfterFetch?)`，其中 limit 默认 200，前端需将 limit/pageSize 限制在 1~1000，offset 最小 0。未显式提供 offset/limit 时，可按 `offset=(page-1)*pageSize`、`limit=pageSize` 的换算规则生成；`removeAfterFetch` 默认 false，仅移除内存缓存，不影响归档。
+- **持久化优先/可重入分页**：归档命中时 status=SUCCEEDED 且 `resultAvailable=true`，同一 jobId 可重复传入不同 offset/limit 翻页；超过 1000 的窗口自动被后端截断，前端应在 hasNext=false 或 offset+limit>maxVisibleRows 时禁用继续翻页。
+- **响应字段映射**：`success/status/code/message/errorMessage` 负责提示；`hasResultSet/resultAvailable` 决定是否渲染网格；`columns`（数组，包含 name/type/position/jdbcType/precision/scale/nullable）仅出现 1 次，必须按顺序生成列头，即便 `returnedRowCount=0` 或 `resultRows=[]` 也要显示列名；`resultRows` 为对象数组，key 与 columns.name 对齐；`returnedRowCount/maxVisibleRows/maxTotalRows/hasNext/truncated/page/pageSize/offset/limit` 用于记录数与分页/截断提示；`rowsAffected/updateCount/commandTag` 用于非 SELECT 的影响行数；`submittedAt/finishedAt/durationMillis/archivedAt/expiresAt/lastAccessAt/sqlSummary/dbUser/label/archived/archiveStatus/archiveError` 直接透传到 UI 状态栏/日志。
+- **错误码与 HTTP 状态**：HTTP 410 或 `code=RESULT_EXPIRED` 需提示“结果已过期”（可携带 expiresAt）；HTTP 404 显示 jobId 不存在；HTTP 401 提示 Token 失败；HTTP 400 直接显示 errorMessage/message/code；`code=RESULT_NOT_READY` 视为未完成继续轮询；FAILED/CANCELLED 使用 `errorMessage > message > code > Unknown error` 的优先级。
+- **示例（含空结果集也包含 columns）**：
+```json
+{
+  "success": true,
+  "jobId": "uuid-1",
+  "status": "SUCCEEDED",
+  "hasResultSet": true,
+  "archived": true,
+  "archiveStatus": "ARCHIVED",
+  "resultAvailable": true,
+  "returnedRowCount": 2,
+  "truncated": false,
+  "hasNext": false,
+  "page": 1,
+  "pageSize": 200,
+  "offset": 0,
+  "limit": 200,
+  "maxVisibleRows": 1000,
+  "columns": [
+    { "name": "col", "type": "varchar", "position": 1, "jdbcType": 12, "precision": 255, "scale": 0, "nullable": 1 },
+    { "name": "amount", "type": "numeric", "position": 2, "jdbcType": 2, "precision": 18, "scale": 2, "nullable": 0 }
+  ],
+  "resultRows": [
+    { "col": "v1", "amount": 10.50 },
+    { "col": "v2", "amount": 11.30 }
+  ],
+  "submittedAt": 1717142400000,
+  "finishedAt": 1717142410000,
+  "durationMillis": 10000,
+  "archivedAt": 1717142410500,
+  "expiresAt": 1717149010500,
+  "lastAccessAt": 1717142410500,
+  "sqlSummary": "select ...",
+  "dbUser": "leshan"
+}
+```
+
+### 结果集字段兼容表
+- `/jobs/result` 响应的列名接受 `columns/resultColumns/columnNames/columnDefs`，行数据接受 `resultRows/rows/data/records`。
+- 计数与分页字段兼容 `totalRows/total/totalCount/returnedRowCount/actualRowCount`，`hasResultSet` 缺失时复用 `resultAvailable`。
+- `offset/limit/page/pageSize` 均会被日志输出，首批强制 `offset=0`。
+
+### 列名自动修复规则
+- 简单聚合：`sum(col)`→`sum_col`，`avg(col)`→`avg_col`，`min/max(col)` 同理；`count(*)`→`count_all`，`count(1)`→`count_1`，`count(col)`→`count_col`。
+- 复杂 `sum(...)`（含空格/CASE/DISTINCT/运算符/嵌套等）统一归一为 `sum_`、`sum_2`、`sum_3...`，优先尊重显式别名。
+- 其他表达式按“全小写、非字母数字转 `_`、压缩连续 `_`、首字符非字母前置 `expr_`、全局去重 _2/_3”生成；完全无信息时兜底 `col_1/col_2...`。
+
+### SQL 代码块定义（Ctrl+Enter）
+- 代码块边界：文件首尾与空行（`trim()` 为空的行）都是硬边界，空行不属于任何代码块。
+- 块内语句边界：仅顶层分号 `;` 拆分语句，忽略字符串、`--` 行注释、`/* */` 块注释以及 `$$...$$`/`$tag$...$tag$` 内的分号；块内最后一条语句可不以分号结束。
+- Ctrl+Enter 行为：
+  - 有选区：选区视为虚拟代码块，按从上到下顺序逐条执行其中的语句。
+  - 无选区：定位光标所在代码块并执行整块；若光标位于空行，优先选择下方最近的块，没有则选择上方最近的块；两侧都没有则不执行。
+  - 执行顺序：单个代码块内的语句会依次提交（statement[0]→statement[1]→...），某条失败立即中止并展示数据库原始错误信息。
+- 示例：
+  - 空行隔离：
+    ```
+    create table tmp_wlh_vvvv1 as
+    select * from mt_icb_offer_inst_attr
+
+    select * from tmp_wlh_jk3;
+    ```
+    光标落在第二段 `select` 内时仅执行第二个代码块；落在 `create table` 段时仅执行第一个代码块。
+  - 同一块多语句：
+    ```
+    select 1; select 2;
+    ```
+    光标在 `select 2` 任意位置触发 Ctrl+Enter，会按顺序执行 `select 1` 与 `select 2`。
+
+### 日志定位方法
+- 结果集请求会输出 `JOB_RESULT_FETCH: jobId=... offset=... limit=...`，便于排查分页是否正确。
+- 结果解析会记录列数/行数/totalRows 统计、是否截断、线程池快照等。
+
+## 前端开发技术文档：粘贴导入 PG
+
+### 功能入口与用户步骤
+- 工具菜单新增“粘贴导入”（Ctrl+Shift+V），打开 `ExcelPasteImportDialog`。默认单页：左侧粘贴区（Ctrl+V 捕获剪贴板）、右侧预览区，底部字段设置可折叠。
+- 推荐流程：粘贴 Excel 选区（含表头）→ 等待自动采样/预览 → 点击“导入”。如需调整列名/类型/勾选，可展开“字段设置”表格编辑或使用“重置推断”。
+
+### 表名规则与避让
+- 默认表名输入框初始 `tmp_wlh_import_1`；导入时按用户输入为基名，在当前 Schema（下拉可编辑，默认 leshan/public）下检测是否已存在。
+- 若存在同名表，自动附加 `_1/_2...` 递增直到不存在，并在状态栏提示“最终表名”。建表/插入均使用该最终名称。
+
+### 大批量处理策略
+- 剪贴板内容上限 20MB，HTML 通道单独限制 5MB；超限直接报错拒绝，避免一次性持有超大字符串导致 OOM。
+- 粘贴后立即将内容落盘为 UTF-8 TSV 临时文件（`java.io.tmpdir`，导入完成后删除），不保留全量二维列表；仅预览前 20 行在内存中。
+- 类型推断最多采样前 5000 行，仅保存统计信息（长度/命中次数），不缓存原值。
+- 导入流式读取临时文件，跳过表头；批量 INSERT 默认 200 行，并基于 SQL 长度上限 512KB 自动提前 flush，避免单条语句过大。
+- 支持取消：对话框“取消”会中断后台 SwingWorker，终止后回滚事务并清理临时文件。
+
+### 解析与回退策略
+- 优先尝试剪贴板 `text/html` 表格，通过 `ParserDelegator` 流式解析 `<tr>/<td>` 转为 TSV；若 HTML 超限或无表格则回退 `text/plain`（Tab 分隔）。
+- 行列对齐：以首行表头为起点，后续行若列数增加会自动补充 `col_n` 列名，缺失列补空字符串。
+- 表头规范化：去空白、转小写、非 `[a-z0-9_]` 替换为 `_`，数字开头前缀 `c_`，常见保留字前缀 `c_`，重名追加 `_2/_3...`。
+
+### 类型推断规则
+- 采样命中率≥98% 时优先判定：boolean → integer(int4) → bigint(int8) → numeric（不带精度）→ date → timestamp → uuid；JSONB 需 ≥95% 行以 `{`/`[` 开头。
+- 其余使用 `varchar` 或 `text` 兜底；字段表仅允许选择上述无精度类型。若用户输入了 `numeric(10,2)` / `varchar(255)` 等，会自动规范化为无精度版本并在状态栏提示一次。
+
+### 导入策略与执行
+- 导入策略下拉：自动适配（默认）、直接追加、清空插入、删除后重建。
+  - 自动适配：存在表时先拉取 information_schema.columns 判断列名与类型可否兼容（numeric/int4/int8 一组、varchar/text 一组、date/timestamp 允许互转），兼容则 TRUNCATE 再插入，否则 DROP+CREATE。
+  - 直接追加：仅 INSERT；若目标表不存在会降级为删除后重建并提示。
+  - 清空插入：存在表则 TRUNCATE+INSERT，不存在则 CREATE+INSERT。
+  - 删除后重建：无论是否存在均 DROP IF EXISTS 后 CREATE+INSERT。
+- 顺序：BEGIN → 策略处理（可 DROP/TRUNCATE/CREATE）→ 批量 INSERT → COMMIT。失败时 ROLLBACK，若本次新建则回收临时表；错误消息透传 PG 返回的 raw/Position/SQLSTATE，并标注失败批次行号范围。
+- 值写入：按列勾选与目标类型生成 INSERT，空值写 NULL；数值/时间/布尔/UUID/JSONB 均使用 `CAST('value' AS type)` 明确报错位置，始终显式列名避免列顺序差异。
+- 进度：进度条基于采样行数，批次插入时实时更新“已处理 N 行”；取消或异常均提示状态并停止后续批次，可直接修改策略/表名/映射后再次点击导入，无需重新粘贴。
+
+### 重试与重置
+- 导入失败后会保留临时文件、采样结果与字段映射，允许直接再次点击“导入”或调整策略/表名后重试。
+- 底部新增“重置”按钮：清空粘贴区与预览、删除临时文件、恢复默认表名与字段推断。仅在主动重置或关闭窗口时才清理临时文件。
+
+### 粘贴区预览
+- 粘贴区上方新增“粘贴内容预览（前20行）”只读区域，展示标准化对齐后的表头+前 19 行（已按 TSV 解析），与右侧 JTable 预览一致，避免 HTML/TSV 差异。
+
+### 关键类与职责
+- `tools.sqlclient.ui.ExcelPasteImportDialog`：主对话框，负责剪贴板落盘、采样推断、预览渲染、字段设置、建表/插入及进度与取消处理。
+- 复用 `SqlExecutionService` 提交 DDL/DML；`OperationLog` 记录解析通道、最终表名、建表 SQL、批次执行/失败原因。
+- 临时文件管理与大对象引用在导入完成/取消后清理，防止 SwingWorker 持有全量数据。

@@ -10,14 +10,22 @@ import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.db.SqlHistoryRepository;
 import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
+import tools.sqlclient.editor.PersistentNotePersistenceStrategy;
 import tools.sqlclient.exec.AsyncJobStatus;
+import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.ColumnOrderDecider;
+import tools.sqlclient.exec.DatabaseErrorInfo;
+import tools.sqlclient.exec.ErrorDisplayFormatter;
 import tools.sqlclient.exec.SqlExecResult;
+import tools.sqlclient.exec.SqlExecutionException;
 import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
+import tools.sqlclient.pg.PgRoutineService;
+import tools.sqlclient.pg.RoutineInfo;
+import tools.sqlclient.ui.TemporaryNoteWindow;
 import tools.sqlclient.ui.ThemeManager;
 import tools.sqlclient.ui.ThemeOption;
 import tools.sqlclient.ui.QueryResultPanel;
@@ -34,14 +42,19 @@ import tools.sqlclient.ui.LogPanel;
 import javax.swing.*;
 import javax.swing.BorderFactory;
 import javax.swing.border.EmptyBorder;
+import javax.swing.event.InternalFrameAdapter;
+import javax.swing.event.InternalFrameEvent;
 import javax.swing.plaf.basic.BasicInternalFrameUI;
+import javax.swing.plaf.FontUIResource;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -60,6 +73,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 主窗口，符合 Windows 11 扁平化风格，全部中文。
@@ -89,8 +104,11 @@ public class MainFrame extends JFrame {
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private final Map<Long, java.util.List<RunningJobHandle>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
+    private final PgRoutineService pgRoutineService = new PgRoutineService(sqlExecutionService);
     private final ColumnOrderDecider columnOrderDecider;
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
+    private final Map<Long, EditorTabPanel> routineTabIndex = new java.util.HashMap<>();
+    private final Font uiBaseFont = new Font(Font.SANS_SERIF, Font.PLAIN, 13);
     // 笔记图标持久化：noteId -> 图标规格
     private final java.util.Map<Long, NoteIconSpec> noteIconSpecs = new java.util.HashMap<>();
     private final java.util.Random iconRandom = new java.util.Random();
@@ -105,10 +123,8 @@ public class MainFrame extends JFrame {
     private EditorTabPanel activePanel;
     private JButton executeButton;
     private JButton stopButton;
-    private JSpinner defaultPageSizeSpinner;
     private JSplitPane leftSplit;
     private JSplitPane centerRightSplit;
-    private JSplitPane verticalSplit;
     private int sharedDividerLocation = -1;
     private JScrollPane sharedResultsScroll;
     private LogPanel logPanel;
@@ -118,6 +134,16 @@ public class MainFrame extends JFrame {
     private JTabbedPane rightTabbedPane;
     private JPanel leftPanel;
     private JPanel rightPanel;
+    private JPanel statusBar;
+    private JTabbedPane resultTabs;
+    private JTextArea messageArea;
+    private JPanel auxiliaryPanel;
+    private JTabbedPane auxiliaryTabs;
+    private JComponent historyPanel;
+    private JComponent inspectorPanel;
+    private ObjectBrowserDialog objectBrowserDialog;
+    private ObjectBrowserPanel navigationBrowserPanel;
+    private JTree navigationTree;
     private boolean leftVisible = true;
     private boolean rightVisible = false;
     private boolean bottomVisible = true;
@@ -132,6 +158,8 @@ public class MainFrame extends JFrame {
     private boolean debugMode = false;
     private static final String DEBUG_SECRET = "yy181911a";
     private static final String RESTORE_SECRET = "我决定今天请小胖哥吃饭喝咖啡";
+    private static final Pattern LINE_PATTERN = Pattern.compile("LINE\\s+(\\d+)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern POSITION_PATTERN = Pattern.compile("Position:\\s*(\\d+)", Pattern.CASE_INSENSITIVE);
     // 记住上一次备份/恢复使用的目录
     private static final String BACKUP_DIR_STATE_KEY = "last_backup_dir";
     private final ScheduledExecutorService scheduledBackupExecutor = Executors.newSingleThreadScheduledExecutor();
@@ -144,6 +172,7 @@ public class MainFrame extends JFrame {
     private QuickSqlSnippetDialog quickSqlSnippetDialog;
     private ExecutionHistoryDialog executionHistoryDialog;
     private TrashBinDialog trashBinDialog;
+    private int focusCycleIndex;
 
     public MainFrame() {
         // 需求 2：修改主窗体标题
@@ -224,7 +253,7 @@ public class MainFrame extends JFrame {
         buildStatusBar();
         OperationLog.setAppender(line -> logPanel.appendLine(line));
         metadataLabel.setText("元数据: " + metadataService.countCachedObjects());
-        metadataService.refreshMetadataAsync(this::handleMetadataRefreshResult);
+        metadataService.syncMetadataOnStartup(this::handleMetadataRefreshResult);
         installGlobalShortcuts();
         addWindowListener(new java.awt.event.WindowAdapter() {
             @Override
@@ -242,25 +271,26 @@ public class MainFrame extends JFrame {
 
     /**
      * 从 resources 目录加载主窗体图标：
-     * 约定路径：/icons/sql_client.png
-     * 如果资源不存在，则回退为系统默认图标。
+     * 约定路径：/AI.png
+     * 如果资源不存在或读取失败，则回退为系统默认图标并记录 warn。
      */
     private void loadMainWindowIcon() {
         try {
-            // Maven 工程中，resources 下的图标文件会被打成类路径资源
-            java.net.URL url = getClass().getResource("/icons/sql_client.png");
+            URL url = getClass().getResource("/AI.png");
             if (url != null) {
-                Image img = new ImageIcon(url).getImage();
-                setIconImage(img);
-            } else {
-                // 回退：尝试使用系统默认图标
-                Icon uiIcon = UIManager.getIcon("FileView.computerIcon");
-                if (uiIcon instanceof ImageIcon icon) {
-                    setIconImage(icon.getImage());
+                BufferedImage img = javax.imageio.ImageIO.read(url);
+                if (img != null) {
+                    setIconImage(img);
+                    return;
                 }
             }
-        } catch (Exception ignore) {
-            // 图标加载失败不影响主程序运行
+            Icon uiIcon = UIManager.getIcon("FileView.computerIcon");
+            if (uiIcon instanceof ImageIcon icon) {
+                setIconImage(icon.getImage());
+            }
+            log.warn("主窗体图标加载失败或资源缺失: /AI.png");
+        } catch (Exception e) {
+            log.warn("主窗体图标加载异常", e);
         }
     }
 
@@ -765,11 +795,72 @@ public class MainFrame extends JFrame {
         JMenuBar menuBar = new JMenuBar();
         JMenu file = new JMenu("文件");
         JMenu edit = new JMenu("编辑");
-        JMenu preferences = new JMenu("首选项");
+        JMenu run = new JMenu("运行");
         JMenu view = new JMenu("视图");
-        JMenu window = new JMenu("窗口");
         JMenu tools = new JMenu("工具");
         JMenu help = new JMenu("帮助");
+
+        JCheckBoxMenuItem objectBrowserItem = new JCheckBoxMenuItem("显示对象浏览器", leftVisible);
+        objectBrowserItem.addActionListener(e -> toggleLeftPanel());
+        view.add(objectBrowserItem);
+
+        JCheckBoxMenuItem resultsItem = new JCheckBoxMenuItem("显示结果区", bottomVisible);
+        resultsItem.addActionListener(e -> toggleBottomPanel());
+        view.add(resultsItem);
+
+        JCheckBoxMenuItem logsItem = new JCheckBoxMenuItem("显示日志面板", rightVisible);
+        logsItem.addActionListener(e -> {
+            if (logsItem.isSelected()) {
+                focusAuxiliaryPanel(logPanel);
+            } else {
+                hideRightPanel();
+            }
+        });
+        view.add(logsItem);
+
+        JCheckBoxMenuItem historyItem = new JCheckBoxMenuItem("显示历史面板", false);
+        historyItem.addActionListener(e -> {
+            if (historyItem.isSelected()) {
+                focusAuxiliaryPanel(historyPanel);
+            } else {
+                hideRightPanel();
+            }
+        });
+        view.add(historyItem);
+
+        JCheckBoxMenuItem inspectorItem = new JCheckBoxMenuItem("显示设置面板", false);
+        inspectorItem.addActionListener(e -> {
+            if (inspectorItem.isSelected()) {
+                focusAuxiliaryPanel(inspectorPanel);
+            } else {
+                hideRightPanel();
+            }
+        });
+        view.add(inspectorItem);
+        view.addSeparator();
+        JMenuItem focusEditor = new JMenuItem(new AbstractAction("聚焦编辑器") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                focusEditorArea();
+            }
+        });
+        focusEditor.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_L, InputEvent.CTRL_DOWN_MASK));
+        view.add(focusEditor);
+        JMenuItem cycleFocus = new JMenuItem(new AbstractAction("循环焦点") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                focusNextMajorArea();
+            }
+        });
+        cycleFocus.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0));
+        view.add(cycleFocus);
+        view.addSeparator();
+        view.add(new JMenuItem(new AbstractAction("重置布局") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                resetLayout();
+            }
+        }));
 
         file.add(new JMenuItem(new AbstractAction("新建 PostgreSQL 笔记") {
             @Override
@@ -815,6 +906,14 @@ public class MainFrame extends JFrame {
                 openTrashBin();
             }
         }));
+        JMenuItem closeCurrent = new JMenuItem(new AbstractAction("关闭当前标签") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                closeCurrentContainer();
+            }
+        });
+        closeCurrent.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.CTRL_DOWN_MASK));
+        file.add(closeCurrent);
         file.addSeparator();
         file.add(new JMenuItem(new AbstractAction("退出") {
             @Override
@@ -824,6 +923,41 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        JMenuItem runCurrent = new JMenuItem(new AbstractAction("执行当前") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                executeCurrentSql();
+            }
+        });
+        runCurrent.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK));
+        run.add(runCurrent);
+
+        JMenuItem stopCurrent = new JMenuItem(new AbstractAction("停止/取消执行") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                stopIfRunning();
+            }
+        });
+        stopCurrent.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0));
+        run.add(stopCurrent);
+
+        JMenuItem focusEditorRun = new JMenuItem(new AbstractAction("切换 Tab (下一个)") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                navigateEditors(true);
+            }
+        });
+        focusEditorRun.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK));
+        run.add(focusEditorRun);
+        JMenuItem focusEditorRunPrev = new JMenuItem(new AbstractAction("切换 Tab (上一个)") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                navigateEditors(false);
+            }
+        });
+        focusEditorRunPrev.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_TAB, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+        run.add(focusEditorRunPrev);
+
         JMenuItem editorSettings = new JMenuItem(new AbstractAction("SQL 编辑器选项…") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -831,7 +965,7 @@ public class MainFrame extends JFrame {
             }
         });
         editorSettings.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_COMMA, InputEvent.CTRL_DOWN_MASK));
-        preferences.add(editorSettings);
+        edit.add(editorSettings);
 
         tools.add(new JMenuItem(new AbstractAction("刷新元数据") {
             @Override
@@ -845,7 +979,7 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 OperationLog.log("开发者自测：大规模元数据刷新");
-                metadataService.refreshMetadataAsync(result -> {
+                metadataService.refreshMetadataAsync(true, result -> {
                     handleMetadataRefreshResult(result);
                     SwingUtilities.invokeLater(() -> {
                         String msg;
@@ -937,6 +1071,16 @@ public class MainFrame extends JFrame {
             }
         }));
 
+        JMenuItem pasteImport = new JMenuItem(new AbstractAction("粘贴导入") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                ExcelPasteImportDialog dialog = new ExcelPasteImportDialog(MainFrame.this, sqlExecutionService);
+                dialog.setVisible(true);
+            }
+        });
+        pasteImport.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_V, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+        tools.add(pasteImport);
+
         tools.add(new JMenuItem(new AbstractAction("文本解析") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -982,8 +1126,7 @@ public class MainFrame extends JFrame {
         view.add(new JMenuItem(new AbstractAction("对象浏览器") {
             @Override
             public void actionPerformed(ActionEvent e) {
-                ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
-                dialog.setVisible(true);
+                showObjectBrowser();
             }
         }));
 
@@ -1017,7 +1160,7 @@ public class MainFrame extends JFrame {
         view.add(windowModeItem);
         view.add(panelModeItem);
 
-        window.add(new JMenuItem(new AbstractAction("平铺窗口") {
+        view.add(new JMenuItem(new AbstractAction("平铺窗口") {
             @Override
             public void actionPerformed(ActionEvent e) {
                 tileFrames();
@@ -1030,12 +1173,19 @@ public class MainFrame extends JFrame {
                 showUsageGuide();
             }
         }));
+        JMenuItem shortcutHelp = new JMenuItem(new AbstractAction("快捷键列表") {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                showShortcutDialog();
+            }
+        });
+        shortcutHelp.setAccelerator(KeyStroke.getKeyStroke(KeyEvent.VK_SLASH, InputEvent.CTRL_DOWN_MASK | InputEvent.SHIFT_DOWN_MASK));
+        help.add(shortcutHelp);
 
         menuBar.add(file);
         menuBar.add(edit);
-        menuBar.add(preferences);
+        menuBar.add(run);
         menuBar.add(view);
-        menuBar.add(window);
         menuBar.add(tools);
         menuBar.add(help);
         setJMenuBar(menuBar);
@@ -1044,6 +1194,7 @@ public class MainFrame extends JFrame {
     private void buildToolbar() {
         JToolBar toolBar = new JToolBar();
         toolBar.setFloatable(false);
+        toolBar.setBorder(new EmptyBorder(4, 8, 4, 8));
         executeButton = new JButton(IconFactory.createRunIcon(true));
         executeButton.setDisabledIcon(IconFactory.createRunIcon(false));
         executeButton.setToolTipText("执行 (Ctrl+Enter)");
@@ -1057,25 +1208,16 @@ public class MainFrame extends JFrame {
         styleToolbarButton(stopButton);
         toolBar.add(executeButton);
         toolBar.add(stopButton);
-        JButton logButton = new JButton("日志");
-        logButton.setToolTipText("打开日志面板");
-        logButton.addActionListener(e -> focusLogPanel());
-        styleToolbarButton(logButton);
-        JButton layoutButton = new JButton("专注");
-        layoutButton.setToolTipText("编辑器区域最大化/恢复");
-        layoutButton.addActionListener(e -> toggleEditorMaximize());
-        styleToolbarButton(layoutButton);
-        toolBar.addSeparator();
-        toolBar.add(logButton);
-        toolBar.add(layoutButton);
-        toolBar.addSeparator();
-        toolBar.add(new JLabel("默认返回条数:"));
-        defaultPageSizeSpinner = new JSpinner(new SpinnerNumberModel(defaultPageSize, 1, Config.getMaxPageSize(), 10));
-        toolBar.add(defaultPageSizeSpinner);
-        JButton applyPageSizeButton = new JButton("应用");
-        applyPageSizeButton.addActionListener(e -> applyDefaultPageSizeFromUi());
-        styleToolbarButton(applyPageSizeButton);
-        toolBar.add(applyPageSizeButton);
+        JButton newTabButton = new JButton("新建标签");
+        newTabButton.setToolTipText("新建笔记标签");
+        newTabButton.addActionListener(e -> createNote(DatabaseType.POSTGRESQL));
+        styleToolbarButton(newTabButton);
+        toolBar.add(newTabButton);
+        JButton toggleLeftButton = new JButton("切换导航");
+        toggleLeftButton.setToolTipText("显示/隐藏对象浏览器");
+        toggleLeftButton.addActionListener(e -> toggleLeftPanel());
+        styleToolbarButton(toggleLeftButton);
+        toolBar.add(toggleLeftButton);
         add(toolBar, BorderLayout.NORTH);
     }
 
@@ -1083,7 +1225,9 @@ public class MainFrame extends JFrame {
         centerPanel.setMinimumSize(new Dimension(200, 240));
         centerPanel.add(desktopPane, "window");
         centerPanel.add(tabbedPane, "panel");
+        centerPanel.setBorder(new EmptyBorder(4, 8, 4, 8));
         sharedResultsScroll = new JScrollPane(sharedResultView.wrapper);
+        sharedResultsScroll.setBorder(BorderFactory.createEmptyBorder());
         sharedResultsWrapper.add(sharedResultsScroll, BorderLayout.CENTER);
         sharedResultsWrapper.setMinimumSize(new Dimension(100, 180));
         desktopPane.addPropertyChangeListener("selectedFrame", evt -> {
@@ -1095,47 +1239,44 @@ public class MainFrame extends JFrame {
             updateExecutionButtons();
         });
 
-        bottomTabbedPane = new JTabbedPane();
-        bottomTabbedPane.addTab("结果", sharedResultsWrapper);
-        logPanel = new LogPanel();
-        bottomTabbedPane.addTab("日志", logPanel);
-        bottomTabbedPane.addTab("任务", createJobsShortcutPanel());
-        bottomTabbedPane.addTab("历史", createHistoryShortcutPanel());
+        resultTabs = new JTabbedPane();
+        resultTabs.addTab("结果", sharedResultsWrapper);
+        messageArea = new JTextArea();
+        messageArea.setEditable(false);
+        messageArea.setLineWrap(true);
+        messageArea.setWrapStyleWord(true);
+        JScrollPane messageScroll = new JScrollPane(messageArea);
+        resultTabs.addTab("消息", messageScroll);
+        bottomTabbedPane = resultTabs;
         bottomTabbedPane.setMinimumSize(new Dimension(200, 160));
 
-        rightTabbedPane = new JTabbedPane();
-        rightPanel = new JPanel(new BorderLayout());
-        rightPanel.add(rightTabbedPane, BorderLayout.CENTER);
-        rightTabbedPane.addTab("Inspector", createInspectorPlaceholder());
-        rightTabbedPane.setMinimumSize(new Dimension(220, 240));
+        auxiliaryTabs = new JTabbedPane();
+        logPanel = new LogPanel();
+        historyPanel = createHistoryShortcutPanel();
+        inspectorPanel = createInspectorPlaceholder();
+        auxiliaryTabs.addTab("日志", logPanel);
+        auxiliaryTabs.addTab("历史", historyPanel);
+        auxiliaryTabs.addTab("设置", inspectorPanel);
+        auxiliaryPanel = new JPanel(new BorderLayout());
+        auxiliaryPanel.add(auxiliaryTabs, BorderLayout.CENTER);
+        auxiliaryPanel.setPreferredSize(new Dimension(320, 400));
+        auxiliaryPanel.setVisible(false);
 
-        leftPanel = buildNavigatorPanel();
-        centerRightSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, centerPanel, rightPanel);
-        centerRightSplit.setResizeWeight(1.0);
+        leftPanel = buildObjectBrowserPanel();
+        centerRightSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, centerPanel, bottomTabbedPane);
+        centerRightSplit.setResizeWeight(0.72);
         centerRightSplit.setDividerSize(8);
         centerRightSplit.setContinuousLayout(true);
+        centerRightSplit.setBorder(BorderFactory.createEmptyBorder());
 
         leftSplit = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, leftPanel, centerRightSplit);
-        leftSplit.setResizeWeight(0.18);
+        leftSplit.setResizeWeight(0.2);
         leftSplit.setDividerSize(8);
         leftSplit.setContinuousLayout(true);
+        leftSplit.setBorder(BorderFactory.createEmptyBorder());
 
-        verticalSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, leftSplit, bottomTabbedPane);
-        verticalSplit.setResizeWeight(0.78);
-        verticalSplit.setDividerSize(10);
-        verticalSplit.setContinuousLayout(true);
-        verticalSplit.setBorder(BorderFactory.createEmptyBorder());
-        verticalSplit.addPropertyChangeListener(JSplitPane.DIVIDER_LOCATION_PROPERTY, evt -> {
-            if (verticalSplit.getHeight() <= 0) return;
-            int minTop = leftSplit.getMinimumSize() != null ? leftSplit.getMinimumSize().height : 200;
-            int minBottom = bottomTabbedPane.getMinimumSize().height;
-            int location = Math.max(minTop, Math.min(verticalSplit.getDividerLocation(),
-                    verticalSplit.getHeight() - minBottom));
-            sharedDividerLocation = location;
-        });
-
-        dockManager = new DockManager(this, bottomTabbedPane, rightTabbedPane);
-        add(verticalSplit, BorderLayout.CENTER);
+        add(leftSplit, BorderLayout.CENTER);
+        add(auxiliaryPanel, BorderLayout.EAST);
 
         SwingUtilities.invokeLater(this::applyInitialLayoutState);
         centerLayout.show(centerPanel, "window");
@@ -1155,55 +1296,53 @@ public class MainFrame extends JFrame {
         } else {
             showBottomPanel();
         }
-        if (rightVisible || dock == DockPosition.RIGHT) {
-            showRightPanel();
-        } else {
-            hideRightPanel();
-        }
         applyEditorMaximizedState();
         SwingUtilities.invokeLater(() -> {
             int left = layoutState.getLeftDivider(leftSplit.getDividerLocation());
             int right = layoutState.getRightDivider(centerRightSplit.getDividerLocation());
-            int bottom = layoutState.getBottomDivider(verticalSplit.getDividerLocation());
+            int bottom = layoutState.getBottomDivider(centerRightSplit.getDividerLocation());
             if (left > 0) leftSplit.setDividerLocation(left);
             if (right > 0) centerRightSplit.setDividerLocation(right);
-            if (bottom > 0) verticalSplit.setDividerLocation(bottom);
+            if (bottom > 0) centerRightSplit.setDividerLocation(bottom);
         });
     }
 
-    private JPanel buildNavigatorPanel() {
-        JPanel panel = new JPanel(new BorderLayout(4, 4));
-        panel.setBorder(BorderFactory.createTitledBorder("对象/笔记"));
-        JTextField filter = new JTextField();
-        filter.setToolTipText("输入关键字并回车可按标题打开笔记");
-        filter.addActionListener(e -> {
-            String keyword = filter.getText();
-            if (keyword != null && !keyword.isBlank()) {
-                openNoteByTitle(keyword.trim());
-            }
-        });
-        JButton manage = new JButton("管理");
-        manage.addActionListener(e -> openManageDialog());
-        JButton browse = new JButton("浏览器");
-        browse.addActionListener(e -> {
-            ObjectBrowserDialog dialog = new ObjectBrowserDialog(MainFrame.this, metadataService);
-            dialog.setVisible(true);
-        });
-        JPanel headerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
-        headerActions.add(manage);
-        headerActions.add(browse);
-        JPanel header = new JPanel(new BorderLayout(4, 4));
-        header.add(filter, BorderLayout.CENTER);
-        header.add(headerActions, BorderLayout.EAST);
-        panel.add(header, BorderLayout.NORTH);
+    private JPanel buildObjectBrowserPanel() {
+        JPanel panel = new JPanel(new BorderLayout(8, 8));
+        panel.setBorder(new EmptyBorder(8, 8, 8, 8));
+        navigationBrowserPanel = new ObjectBrowserPanel(metadataService, pgRoutineService,
+                new ObjectBrowserPanel.RoutineActionHandler() {
+                    @Override
+                    public void openRoutine(RoutineInfo info, boolean editable) {
+                        openRoutineEditor(info, editable);
+                    }
 
-        JTextArea hint = new JTextArea("使用左上角搜索快速定位笔记或打开对象浏览器。");
-        hint.setEditable(false);
-        hint.setLineWrap(true);
-        hint.setWrapStyleWord(true);
-        hint.setOpaque(false);
-        hint.setFont(hint.getFont().deriveFont(Font.PLAIN, 12f));
-        panel.add(new JScrollPane(hint), BorderLayout.CENTER);
+                    @Override
+                    public void runRoutine(RoutineInfo info) {
+                        runRoutineWithDialog(info);
+                    }
+                });
+        navigationTree = navigationBrowserPanel.getTree();
+
+        JButton openDialog = new JButton("弹出");
+        openDialog.addActionListener(e -> {
+            objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
+                    new ObjectBrowserDialog.RoutineActionHandler() {
+                        @Override
+                        public void openRoutine(RoutineInfo info, boolean editable) {
+                            openRoutineEditor(info, editable);
+                        }
+
+                        @Override
+                        public void runRoutine(RoutineInfo info) {
+                            runRoutineWithDialog(info);
+                        }
+                    });
+            objectBrowserDialog.setVisible(true);
+        });
+        navigationBrowserPanel.setHeaderTrailing(openDialog);
+        panel.add(navigationBrowserPanel, BorderLayout.CENTER);
+
         return panel;
     }
 
@@ -1280,19 +1419,35 @@ public class MainFrame extends JFrame {
     private void showRightPanel() {
         rightVisible = true;
         layoutState.setRightVisible(true);
-        rightPanel.setVisible(true);
-        int divider = layoutState.getRightDivider(lastRightDividerLocation > 0 ? lastRightDividerLocation : (int) (getWidth() * 0.78));
-        SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(divider));
+        if (auxiliaryPanel != null) {
+            auxiliaryPanel.setVisible(true);
+            auxiliaryPanel.revalidate();
+            auxiliaryPanel.repaint();
+        }
     }
 
     private void hideRightPanel() {
-        if (centerRightSplit != null) {
-            lastRightDividerLocation = centerRightSplit.getDividerLocation();
-            SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(centerRightSplit.getWidth()));
-        }
         rightVisible = false;
         layoutState.setRightVisible(false);
-        rightPanel.setVisible(false);
+        if (auxiliaryPanel != null) {
+            auxiliaryPanel.setVisible(false);
+            auxiliaryPanel.revalidate();
+            auxiliaryPanel.repaint();
+        }
+    }
+
+    private void focusAuxiliaryPanel(Component component) {
+        if (auxiliaryPanel == null || auxiliaryTabs == null || component == null) {
+            return;
+        }
+        if (auxiliaryTabs.indexOfComponent(component) >= 0) {
+            auxiliaryPanel.setVisible(true);
+            rightVisible = true;
+            layoutState.setRightVisible(true);
+            auxiliaryTabs.setSelectedComponent(component);
+            auxiliaryPanel.revalidate();
+            auxiliaryPanel.repaint();
+        }
     }
 
     private void toggleBottomPanel() {
@@ -1308,13 +1463,13 @@ public class MainFrame extends JFrame {
         layoutState.setBottomVisible(true);
         bottomTabbedPane.setVisible(true);
         int divider = layoutState.getBottomDivider(lastBottomDividerLocation > 0 ? lastBottomDividerLocation : (int) (getHeight() * 0.72));
-        SwingUtilities.invokeLater(() -> verticalSplit.setDividerLocation(divider));
+        SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(divider));
     }
 
     private void hideBottomPanel() {
-        if (verticalSplit != null) {
-            lastBottomDividerLocation = verticalSplit.getDividerLocation();
-            SwingUtilities.invokeLater(() -> verticalSplit.setDividerLocation(1.0));
+        if (centerRightSplit != null) {
+            lastBottomDividerLocation = centerRightSplit.getDividerLocation();
+            SwingUtilities.invokeLater(() -> centerRightSplit.setDividerLocation(centerRightSplit.getHeight()));
         }
         bottomVisible = false;
         layoutState.setBottomVisible(false);
@@ -1382,8 +1537,8 @@ public class MainFrame extends JFrame {
         if (centerRightSplit != null) {
             layoutState.setRightDivider(centerRightSplit.getDividerLocation());
         }
-        if (verticalSplit != null) {
-            layoutState.setBottomDivider(verticalSplit.getDividerLocation());
+        if (centerRightSplit != null) {
+            layoutState.setBottomDivider(centerRightSplit.getDividerLocation());
         }
         layoutState.saveWindowBounds(getBounds());
         layoutState.setLeftVisible(leftVisible);
@@ -1436,6 +1591,7 @@ public class MainFrame extends JFrame {
         left.add(suggestionStateLabel);
         left.add(metadataLabel);
         status.add(left, BorderLayout.WEST);
+        statusBar = status;
         add(status, BorderLayout.SOUTH);
     }
 
@@ -1475,7 +1631,8 @@ public class MainFrame extends JFrame {
                     resolveStyleForNote(note),
                     this::onPanelFocused,
                     this::openNoteByTitle,
-                    defaultPageSize
+                    defaultPageSize,
+                    new PersistentNotePersistenceStrategy()
             );
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
@@ -1537,7 +1694,7 @@ public class MainFrame extends JFrame {
 
     private void addFrame(EditorTabPanel panel) {
         detachFromParent(panel);
-        JInternalFrame frame = new JInternalFrame(panel.getNote().getTitle(), true, true, true, true);
+        JInternalFrame frame = new JInternalFrame(getPanelDisplayTitle(panel), true, true, true, true);
         // 为子窗体设置持久化的随机绘制图标
         frame.setFrameIcon(getOrCreateNoteIcon(panel.getNote()));
         frame.setSize(600, 400);
@@ -1545,7 +1702,16 @@ public class MainFrame extends JFrame {
                 20 * desktopPane.getAllFrames().length);
         frame.setVisible(true);
         frame.add(panel, BorderLayout.CENTER);
+        frame.setToolTipText(getPanelTooltip(panel));
         installRenameHandler(frame, panel);
+        frame.addInternalFrameListener(new InternalFrameAdapter() {
+            @Override
+            public void internalFrameClosing(InternalFrameEvent e) {
+                unregisterRoutinePanel(panel);
+                panelCache.remove(panel.getNote().getId());
+                persistOpenFrames();
+            }
+        });
         desktopPane.add(frame);
         try {
             frame.setSelected(true);
@@ -1558,10 +1724,11 @@ public class MainFrame extends JFrame {
 
     private void addTab(EditorTabPanel panel) {
         detachFromParent(panel);
-        tabbedPane.addTab(panel.getNote().getTitle(), panel);
+        tabbedPane.addTab(getPanelDisplayTitle(panel), panel);
         int idx = tabbedPane.indexOfComponent(panel);
         // 面板模式下标签使用与子窗体相同的图标
         tabbedPane.setIconAt(idx, getOrCreateNoteIcon(panel.getNote()));
+        tabbedPane.setToolTipTextAt(idx, getPanelTooltip(panel));
         tabbedPane.setSelectedIndex(idx);
         persistOpenFrames();
         onPanelFocused(panel);
@@ -1625,6 +1792,112 @@ public class MainFrame extends JFrame {
         }
     }
 
+    private void closeCurrentContainer() {
+        if (windowMode) {
+            JInternalFrame frame = desktopPane.getSelectedFrame();
+            if (frame != null) {
+                EditorTabPanel panel = extractPanelFromFrame(frame);
+                if (panel != null) {
+                    unregisterRoutinePanel(panel);
+                    panelCache.remove(panel.getNote().getId());
+                }
+                frame.dispose();
+            }
+        } else {
+            int idx = tabbedPane.getSelectedIndex();
+            if (idx >= 0) {
+                Component comp = tabbedPane.getComponentAt(idx);
+                EditorTabPanel panel = extractPanel(comp);
+                if (panel != null) {
+                    unregisterRoutinePanel(panel);
+                    panelCache.remove(panel.getNote().getId());
+                }
+                tabbedPane.removeTabAt(idx);
+            }
+        }
+        persistOpenFrames();
+        syncActivePanelWithSelection();
+        updateExecutionButtons();
+    }
+
+    private void navigateEditors(boolean forward) {
+        if (windowMode) {
+            JInternalFrame[] frames = desktopPane.getAllFrames();
+            if (frames.length == 0) {
+                return;
+            }
+            java.util.List<JInternalFrame> list = java.util.Arrays.asList(frames);
+            JInternalFrame current = desktopPane.getSelectedFrame();
+            int idx = list.indexOf(current);
+            int next = (idx < 0 ? 0 : idx + (forward ? 1 : -1));
+            if (next < 0) next = list.size() - 1;
+            if (next >= list.size()) next = 0;
+            JInternalFrame target = list.get(next);
+            try {
+                target.setIcon(false);
+                target.setSelected(true);
+                target.toFront();
+            } catch (Exception ignored) {
+            }
+        } else {
+            int count = tabbedPane.getTabCount();
+            if (count == 0) return;
+            int idx = tabbedPane.getSelectedIndex();
+            int next = (idx < 0 ? 0 : idx + (forward ? 1 : -1));
+            if (next < 0) next = count - 1;
+            if (next >= count) next = 0;
+            tabbedPane.setSelectedIndex(next);
+        }
+        syncActivePanelWithSelection();
+    }
+
+    private void focusEditorArea() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel != null) {
+            panel.focusEditorArea();
+        }
+    }
+
+    private void focusNextMajorArea() {
+        java.util.List<Runnable> targets = new java.util.ArrayList<>();
+        if (navigationTree != null && leftPanel != null && leftPanel.isShowing()) {
+            targets.add(() -> {
+                showLeftPanel();
+                navigationTree.requestFocusInWindow();
+                if (navigationTree.getRowCount() > 0 && navigationTree.getSelectionCount() == 0) {
+                    navigationTree.setSelectionRow(0);
+                }
+            });
+        }
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel != null) {
+            targets.add(panel::focusEditorArea);
+            targets.add(() -> {
+                showBottomPanel();
+                panel.focusResultArea();
+            });
+        } else {
+            targets.add(this::focusSharedResults);
+        }
+        if (targets.isEmpty()) {
+            return;
+        }
+        focusCycleIndex = (focusCycleIndex + 1) % targets.size();
+        targets.get(focusCycleIndex).run();
+    }
+
+    private void focusSharedResults() {
+        if (sharedResultView == null) {
+            return;
+        }
+        Component comp = sharedResultView.tabs.getSelectedComponent();
+        if (comp instanceof QueryResultPanel qp) {
+            qp.focusTable();
+        } else {
+            sharedResultView.tabs.requestFocusInWindow();
+        }
+    }
+
     private void onPanelFocused(EditorTabPanel panel) {
         if (panel == null) return;
         activePanel = panel;
@@ -1681,7 +1954,7 @@ public class MainFrame extends JFrame {
     }
 
     private void executeCurrentSql() {
-        executeCurrentSql(false);
+        executeCurrentSql(true);
     }
 
     private void executeCurrentSql(boolean blockMode) {
@@ -1751,7 +2024,7 @@ public class MainFrame extends JFrame {
                                     refreshed -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, refreshed, pendingPanel)));
                             SwingUtilities.invokeLater(() -> renderResult(noteId, panel, normalized, pendingPanel));
                         },
-                        ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex.getMessage(), pendingPanel)),
+                        ex -> SwingUtilities.invokeLater(() -> renderError(noteId, panel, sqlStmt, ex, pendingPanel)),
                         status -> SwingUtilities.invokeLater(() -> handleStatusUpdate(handle, status, panel))
                 );
 
@@ -1829,21 +2102,24 @@ public class MainFrame extends JFrame {
         updateExecutionButtons();
     }
 
-    private void renderError(long noteId, EditorTabPanel panel, String sql, String message, QueryResultPanel existingPanel) {
+    private void renderError(long noteId, EditorTabPanel panel, String sql, Exception ex, QueryResultPanel existingPanel) {
+        DatabaseErrorInfo errorInfo = ex instanceof SqlExecutionException se ? se.getErrorInfo() : null;
+        Integer statementIndex = ex instanceof SqlExecutionException se ? se.getStatementIndex() : null;
+        String sqlFragment = ex instanceof SqlExecutionException se ? se.getSqlFragment() : null;
+        String message = ErrorDisplayFormatter.chooseDisplayMessage(errorInfo, null, ex.getMessage(), "FAILED");
+
         if (existingPanel != null) {
-            existingPanel.renderError(message);
+            existingPanel.renderError(errorInfo, message, statementIndex, sqlFragment);
         } else {
-            JPanel error = new JPanel(new BorderLayout());
-            error.setBorder(javax.swing.BorderFactory.createTitledBorder("执行失败"));
-            error.setToolTipText(sql);
-            error.add(new JLabel(message), BorderLayout.CENTER);
+            QueryResultPanel qp = QueryResultPanel.pending(sql);
+            qp.renderError(errorInfo, message, statementIndex, sqlFragment);
             String tabTitle = windowMode ? "错误" + nextResultIndex(noteId)
                     : panel.getNote().getTitle() + "-错误" + nextResultIndex(noteId);
             if (windowMode) {
-                panel.addLocalResultPanel(tabTitle, error, sql);
+                panel.addLocalResultPanel(tabTitle, qp, sql);
             } else {
                 SharedResultView view = ensureSharedView();
-                view.addResultTab(tabTitle, error, sql);
+                view.addResultTab(tabTitle, qp, sql);
                 expandSharedResults();
             }
         }
@@ -1880,7 +2156,10 @@ public class MainFrame extends JFrame {
         SharedResultView() {
             tabs.setBorder(BorderFactory.createEmptyBorder());
             scroll = new JScrollPane(tabs);
-            wrapper.setBorder(BorderFactory.createTitledBorder("结果集"));
+            scroll.setBorder(BorderFactory.createEmptyBorder());
+            wrapper.setBorder(BorderFactory.createCompoundBorder(
+                    BorderFactory.createMatteBorder(1, 0, 0, 0, new Color(228, 231, 236)),
+                    new EmptyBorder(8, 0, 0, 0)));
             wrapper.add(scroll, BorderLayout.CENTER);
         }
 
@@ -1918,19 +2197,28 @@ public class MainFrame extends JFrame {
         OperationLog.log("停止执行: " + panel.getNote().getTitle());
     }
 
-    private void applyDefaultPageSizeFromUi() {
-        Object val = defaultPageSizeSpinner.getValue();
-        int parsed = val instanceof Number ? ((Number) val).intValue() : defaultPageSize;
-        int sanitized = sanitizePageSize(parsed);
-        if (sanitized != parsed) {
-            OperationLog.log("pageSize=" + parsed + " 超出范围，已调整为 " + sanitized);
+    private void stopIfRunning() {
+        if (hasRunningExecution()) {
+            stopCurrentExecution();
         }
-        defaultPageSizeSpinner.setValue(sanitized);
-        defaultPageSize = sanitized;
-        Config.overrideDefaultPageSize(sanitized);
-        appStateRepository.saveDefaultPageSize(sanitized);
-        panelCache.values().forEach(p -> p.updateDefaultPageSize(sanitized));
-        OperationLog.log("默认 pageSize 已更新为 " + sanitized);
+    }
+
+    private boolean hasRunningExecution() {
+        EditorTabPanel panel = getCurrentPanel();
+        if (panel == null) {
+            return false;
+        }
+        long noteId = panel.getNote().getId();
+        java.util.List<RunningJobHandle> list = runningExecutions.get(noteId);
+        if (list == null) {
+            return false;
+        }
+        for (RunningJobHandle handle : list) {
+            if (handle.future != null && !handle.future.isDone()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private int sanitizePageSize(int desired) {
@@ -2127,7 +2415,7 @@ public class MainFrame extends JFrame {
         String defaultId = options.get(0).getId();
         String saved = appStateRepository.loadCurrentThemeName(defaultId);
         currentTheme = themeManager.findById(saved).orElse(options.get(0));
-        themeManager.applyThemeAsync(currentTheme, null);
+        themeManager.applyThemeAsync(currentTheme, this::applyUiDefaults);
     }
 
     private void switchTheme(ThemeOption option) {
@@ -2139,7 +2427,32 @@ public class MainFrame extends JFrame {
         }
         currentTheme = option;
         appStateRepository.saveCurrentThemeName(option.getId());
-        themeManager.applyThemeAsync(option, () -> repaint());
+        themeManager.applyThemeAsync(option, () -> {
+            applyUiDefaults();
+            repaint();
+        });
+    }
+
+    private void applyUiDefaults() {
+        FontUIResource uiFont = new FontUIResource(uiBaseFont);
+        java.util.Enumeration<Object> keys = UIManager.getDefaults().keys();
+        while (keys.hasMoreElements()) {
+            Object key = keys.nextElement();
+            Object value = UIManager.get(key);
+            if (value instanceof Font) {
+                UIManager.put(key, uiFont);
+            }
+        }
+        UIManager.put("defaultFont", uiFont);
+        UIManager.put("Table.rowHeight", 24);
+        UIManager.put("Tree.rowHeight", 22);
+        UIManager.put("Table.selectionBackground", new Color(0xDCE6F5));
+        UIManager.put("Table.selectionForeground", new Color(0x0F1F3A));
+        UIManager.put("Tree.selectionBackground", new Color(0xDCE6F5));
+        UIManager.put("Tree.selectionForeground", new Color(0x0F1F3A));
+        UIManager.put("SplitPane.border", BorderFactory.createEmptyBorder());
+        UIManager.put("ScrollPane.border", BorderFactory.createEmptyBorder());
+        UIManager.put("TabbedPane.contentBorderInsets", new Insets(8, 8, 8, 8));
     }
 
     private EditorTabPanel extractPanel(Component comp) {
@@ -2155,7 +2468,53 @@ public class MainFrame extends JFrame {
         return extractPanel(frame.getContentPane().getComponent(0));
     }
 
+    private String getPanelDisplayTitle(EditorTabPanel panel) {
+        if (panel == null) {
+            return "";
+        }
+        Object custom = panel.getClientProperty("customTitle");
+        if (custom instanceof String title && !title.isBlank()) {
+            return title;
+        }
+        return panel.getNote().getTitle();
+    }
+
+    private String getPanelTooltip(EditorTabPanel panel) {
+        if (panel == null) {
+            return null;
+        }
+        Object tooltip = panel.getClientProperty("customTooltip");
+        if (tooltip instanceof String tip && !tip.isBlank()) {
+            return tip;
+        }
+        return null;
+    }
+
+    private void refreshPanelTitle(EditorTabPanel panel) {
+        if (panel == null) {
+            return;
+        }
+        String displayTitle = getPanelDisplayTitle(panel);
+        String tooltip = getPanelTooltip(panel);
+        for (JInternalFrame frame : desktopPane.getAllFrames()) {
+            EditorTabPanel framePanel = extractPanelFromFrame(frame);
+            if (framePanel == panel) {
+                frame.setTitle(displayTitle);
+                frame.setToolTipText(tooltip);
+                break;
+            }
+        }
+        int idx = tabbedPane.indexOfComponent(panel);
+        if (idx >= 0) {
+            tabbedPane.setTitleAt(idx, displayTitle);
+            tabbedPane.setToolTipTextAt(idx, tooltip);
+        }
+    }
+
     private void updateTabTitle(EditorTabPanel panel, String title) {
+        if (panel != null && panel.getClientProperty("customTitle") != null) {
+            return;
+        }
         int idx = tabbedPane.indexOfComponent(panel);
         if (idx >= 0) {
             tabbedPane.setTitleAt(idx, title);
@@ -2166,11 +2525,15 @@ public class MainFrame extends JFrame {
         long targetId = noteId != null ? noteId : -1L;
         panelCache.values().forEach(p -> {
             if (p.getNote().getId() == targetId) {
-                updateTabTitle(p, title);
+                if (p.getClientProperty("customTitle") == null) {
+                    updateTabTitle(p, title);
+                }
                 for (JInternalFrame frame : desktopPane.getAllFrames()) {
                     EditorTabPanel framePanel = extractPanelFromFrame(frame);
                     if (framePanel == p) {
-                        frame.setTitle(title);
+                        if (p.getClientProperty("customTitle") == null) {
+                            frame.setTitle(title);
+                        }
                         break;
                     }
                 }
@@ -2241,13 +2604,49 @@ public class MainFrame extends JFrame {
                 getExecutionHistoryDialog().toggleVisible();
             }
         });
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_W, InputEvent.CTRL_DOWN_MASK), "close_current_container");
+        actionMap.put("close_current_container", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                closeCurrentContainer();
+            }
+        });
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_L, InputEvent.CTRL_DOWN_MASK), "focus_editor_area");
+        actionMap.put("focus_editor_area", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                focusEditorArea();
+            }
+        });
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "stop_execution_if_running");
+        actionMap.put("stop_execution_if_running", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                stopIfRunning();
+            }
+        });
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_F6, 0), "cycle_focus");
+        actionMap.put("cycle_focus", new AbstractAction() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                focusNextMajorArea();
+            }
+        });
         KeyboardFocusManager.getCurrentKeyboardFocusManager()
                 .addKeyEventDispatcher(e -> {
-                    if (e.getID() == KeyEvent.KEY_PRESSED
-                            && e.isAltDown()
-                            && e.getKeyCode() == KeyEvent.VK_E) {
-                        toggleSuggestionMode();
-                        return true;
+                    if (e.getID() == KeyEvent.KEY_PRESSED) {
+                        if (e.isAltDown() && e.getKeyCode() == KeyEvent.VK_E) {
+                            toggleSuggestionMode();
+                            return true;
+                        }
+                        if (e.isControlDown() && e.getKeyCode() == KeyEvent.VK_TAB) {
+                            navigateEditors(!e.isShiftDown());
+                            return true;
+                        }
+                        if (e.isControlDown() && e.getKeyCode() == KeyEvent.VK_ENTER) {
+                            executeCurrentSql();
+                            return true;
+                        }
                     }
                     return false;
                 });
@@ -2298,6 +2697,292 @@ public class MainFrame extends JFrame {
         panel.insertSqlAtCaret(sql);
     }
 
+    private void showObjectBrowser() {
+        if (objectBrowserDialog == null) {
+            objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
+                    new ObjectBrowserDialog.RoutineActionHandler() {
+                        @Override
+                        public void openRoutine(RoutineInfo info, boolean editable) {
+                            openRoutineEditor(info, editable);
+                        }
+
+                        @Override
+                        public void runRoutine(RoutineInfo info) {
+                            runRoutineWithDialog(info);
+                        }
+                    });
+        }
+        objectBrowserDialog.setVisible(true);
+        objectBrowserDialog.reload();
+    }
+
+    private void showShortcutDialog() {
+        String content = "快捷键列表\n" +
+                "Ctrl+Enter  执行当前 SQL\n" +
+                "Ctrl+W      关闭当前标签\n" +
+                "Ctrl+Tab    切换到下一个标签/窗口\n" +
+                "Ctrl+Shift+Tab 切换到上一个标签/窗口\n" +
+                "Ctrl+L      聚焦到编辑器\n" +
+                "Esc         停止/取消正在执行的任务\n" +
+                "F6          对象树/编辑器/结果区循环焦点\n" +
+                "Alt+W       SQL 片段库\n" +
+                "Alt+Q       执行历史\n" +
+                "Ctrl+,      SQL 编辑器选项";
+        JDialog dialog = new JDialog(this, "Shortcuts", true);
+        JTextArea area = new JTextArea(content);
+        area.setEditable(false);
+        area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+        area.setBorder(new EmptyBorder(12, 12, 12, 12));
+        dialog.setLayout(new BorderLayout());
+        dialog.add(new JScrollPane(area), BorderLayout.CENTER);
+        dialog.setSize(420, 340);
+        dialog.setLocationRelativeTo(this);
+        dialog.setVisible(true);
+    }
+
+    private void refreshObjectBrowserTree() {
+        if (objectBrowserDialog != null && objectBrowserDialog.isVisible()) {
+            SwingUtilities.invokeLater(() -> objectBrowserDialog.reload());
+        }
+        if (navigationBrowserPanel != null) {
+            SwingUtilities.invokeLater(() -> navigationBrowserPanel.reload());
+        }
+    }
+
+    private void unregisterRoutinePanel(EditorTabPanel panel) {
+        if (panel == null) {
+            return;
+        }
+        Object oidObj = panel.getClientProperty("routineOid");
+        if (oidObj instanceof Long oid) {
+            routineTabIndex.remove(oid);
+        }
+    }
+
+    private void openRoutineEditor(RoutineInfo info, boolean editable) {
+        if (info == null) {
+            return;
+        }
+        EditorTabPanel existing = routineTabIndex.get(info.oid());
+        if (existing != null) {
+            if (!existing.isShowing()) {
+                routineTabIndex.remove(info.oid());
+            } else {
+                SwingUtilities.invokeLater(() -> {
+                    selectContainerForPanel(existing);
+                    existing.focusEditorArea();
+                    existing.setReadOnly(!editable);
+                });
+                return;
+            }
+        }
+        showRoutineDdlAndOpen(info, editable, null);
+    }
+
+    private void runRoutineWithDialog(RoutineInfo info) {
+        showRoutineDdlAndOpen(info, false, panel -> {
+            RoutineRunDialog dialog = new RoutineRunDialog(this, info);
+            dialog.setVisible(true);
+            RoutineRunDialog.Result result = dialog.getResult();
+            if (result == null || !result.confirmed() || result.sql() == null || result.sql().isBlank()) {
+                return;
+            }
+            executeRoutineSql(panel, result.sql(), info, null, msg -> locateErrorInEditor(panel, msg));
+        });
+    }
+
+    private void showRoutineDdlAndOpen(RoutineInfo info, boolean editable, java.util.function.Consumer<EditorTabPanel> afterOpen) {
+        if (info == null) {
+            return;
+        }
+        JDialog progress = showProgressDialog("正在获取源码...");
+        pgRoutineService.loadRoutineDdl(info.oid()).whenComplete((ddl, ex) -> SwingUtilities.invokeLater(() -> {
+            if (progress != null) {
+                progress.dispose();
+            }
+            if (ex != null) {
+                JOptionPane.showMessageDialog(this, "获取源码失败: " + ex.getMessage());
+                return;
+            }
+            Note tempNote = createTemporaryNote(info, ddl);
+            TemporaryNoteWindow window = new TemporaryNoteWindow(
+                    this,
+                    noteRepository,
+                    metadataService,
+                    tempNote,
+                    resolveStyleForNote(tempNote),
+                    convertFullWidth,
+                    defaultPageSize,
+                    this::openPermanentNote,
+                    info.displayName());
+            EditorTabPanel panel = window.getEditorPanel();
+            panel.setTextContent(ddl);
+            panel.configureRoutineContext("例程: " + info.displayName(), editable, () -> publishRoutine(panel, info));
+            panel.setReadOnly(!editable);
+            window.setVisible(true);
+            if (afterOpen != null) {
+                afterOpen.accept(panel);
+            }
+            statusLabel.setText("已载入: " + info.displayName());
+        }));
+    }
+
+    private Note createTemporaryNote(RoutineInfo info, String ddl) {
+        long now = System.currentTimeMillis();
+        String title = "临时查看: " + info.displayName();
+        long tempId = -Math.abs(java.util.concurrent.ThreadLocalRandom.current().nextLong(Long.MAX_VALUE));
+        return new Note(tempId, title, ddl == null ? "" : ddl, DatabaseType.POSTGRESQL, now, now,
+                "", false, false, 0, "");
+    }
+
+    void openPermanentNote(Note note) {
+        openNoteInCurrentMode(note);
+    }
+
+    private String buildRoutineNoteTitle(RoutineInfo info) {
+        String base = info.objectName() == null ? ("routine_" + info.oid()) : info.objectName();
+        if (!noteRepository.titleExists(base, null)) {
+            return base;
+        }
+        return base + " #" + info.oid();
+    }
+
+    private void markRoutinePanel(EditorTabPanel panel, RoutineInfo info, boolean editable) {
+        if (panel == null || info == null) {
+            return;
+        }
+        panel.putClientProperty("routineOid", info.oid());
+        panel.putClientProperty("customTitle", info.objectName());
+        String tooltip = info.displayName();
+        if (tooltip != null && !tooltip.isBlank()) {
+            panel.putClientProperty("customTooltip", tooltip);
+        }
+        routineTabIndex.put(info.oid(), panel);
+        refreshPanelTitle(panel);
+        panel.setReadOnly(!editable);
+    }
+
+    private JDialog showProgressDialog(String message) {
+        JDialog dialog = new JDialog(this, "执行中", false);
+        dialog.setLayout(new BorderLayout());
+        dialog.add(new JLabel(message), BorderLayout.NORTH);
+        JProgressBar bar = new JProgressBar();
+        bar.setIndeterminate(true);
+        dialog.add(bar, BorderLayout.CENTER);
+        dialog.setSize(320, 100);
+        dialog.setLocationRelativeTo(this);
+        dialog.setAlwaysOnTop(true);
+        dialog.setVisible(true);
+        return dialog;
+    }
+
+    private void publishRoutine(EditorTabPanel panel, RoutineInfo info) {
+        if (panel == null || info == null) {
+            return;
+        }
+        String ddl = panel.getSqlText();
+        if (ddl == null || ddl.isBlank()) {
+            JOptionPane.showMessageDialog(this, "没有可发布的源码");
+            return;
+        }
+        executeRoutineSql(panel, ddl, info, this::refreshObjectBrowserTree, msg -> locateErrorInEditor(panel, msg));
+    }
+
+    private void executeRoutineSql(EditorTabPanel panel, String sql, RoutineInfo info,
+                                   Runnable onSuccess, java.util.function.Consumer<String> onError) {
+        if (panel == null || sql == null || sql.isBlank()) {
+            JOptionPane.showMessageDialog(this, "SQL 为空，无法执行");
+            return;
+        }
+        long noteId = panel.getNote().getId();
+        if (runningExecutions.getOrDefault(noteId, List.of()).size() > 0) {
+            JOptionPane.showMessageDialog(this, "当前窗口正在执行，请先停止或等待结束");
+            return;
+        }
+
+        if (windowMode) {
+            panel.clearLocalResults();
+        } else {
+            SharedResultView target = ensureSharedView();
+            target.clear();
+            collapseSharedResults();
+        }
+        resultTabCounters.put(noteId, new java.util.concurrent.atomic.AtomicInteger(1));
+        statusLabel.setText("执行中...");
+        panel.setExecutionRunning(true);
+        runningExecutions.putIfAbsent(noteId, new CopyOnWriteArrayList<>());
+        List<RunningJobHandle> execList = runningExecutions.get(noteId);
+
+        QueryResultPanel pendingPanel = addPendingResultPanel(noteId, panel, sql);
+        RunningJobHandle handle = new RunningJobHandle();
+        handle.panel = pendingPanel;
+        handle.sql = sql;
+
+        CompletableFuture<Void> future = sqlExecutionService.execute(
+                sql,
+                panel.getSelectedDbUser(),
+                panel.getPreferredPageSize(),
+                res -> {
+                    SqlExecResult normalized = columnOrderDecider.reorder(res,
+                            refreshed -> SwingUtilities.invokeLater(() -> renderResult(noteId, panel, refreshed, pendingPanel)));
+                    SwingUtilities.invokeLater(() -> {
+                        renderResult(noteId, panel, normalized, pendingPanel);
+                        if (onSuccess != null) {
+                            onSuccess.run();
+                        }
+                    });
+                },
+                ex -> SwingUtilities.invokeLater(() -> {
+                    renderError(noteId, panel, sql, ex, pendingPanel);
+                    if (onError != null) {
+                        onError.accept(ex.getMessage());
+                    }
+                }),
+                status -> SwingUtilities.invokeLater(() -> handleStatusUpdate(handle, status, panel))
+        );
+
+        handle.future = future;
+        execList.add(handle);
+
+        future.whenComplete((vv, ex) -> SwingUtilities.invokeLater(() -> {
+            List<RunningJobHandle> list = runningExecutions.get(noteId);
+            if (list != null) {
+                list.remove(handle);
+                if (list.isEmpty()) {
+                    runningExecutions.remove(noteId);
+                    panel.setExecutionRunning(false);
+                    statusLabel.setText("就绪");
+                }
+            }
+            updateExecutionButtons();
+        }));
+
+        updateExecutionButtons();
+    }
+
+    private void locateErrorInEditor(EditorTabPanel panel, String message) {
+        if (panel == null || message == null || message.isBlank()) {
+            return;
+        }
+        Matcher lineMatcher = LINE_PATTERN.matcher(message);
+        if (lineMatcher.find()) {
+            try {
+                int line = Integer.parseInt(lineMatcher.group(1));
+                panel.highlightLine(line);
+                return;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        Matcher posMatcher = POSITION_PATTERN.matcher(message);
+        if (posMatcher.find()) {
+            try {
+                int pos = Integer.parseInt(posMatcher.group(1));
+                panel.highlightPosition(pos);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+    }
+
     private void handleMetadataRefreshResult(MetadataService.MetadataRefreshResult result) {
         if (result == null) return;
         if (result.success()) {
@@ -2317,6 +3002,7 @@ public class MainFrame extends JFrame {
             if (!hasRunningExecutions()) {
                 statusLabel.setText("元数据已更新");
             }
+            refreshObjectBrowserTree();
         } else {
             String reason = result.message() == null ? "获取失败" : result.message();
             metadataLabel.setText("元数据: 使用本地缓存 (" + reason + ")");

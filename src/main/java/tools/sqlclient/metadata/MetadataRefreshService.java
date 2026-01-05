@@ -149,7 +149,7 @@ class MetadataRefreshService {
                 """
                         SELECT n.nspname AS schema_name, p.proname AS object_name, 'function' AS object_type
                         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-                        WHERE n.nspname='%s' AND (p.prokind='f' OR p.prokind IS NULL AND p.proisagg = FALSE)
+                        WHERE n.nspname='%s' AND (p.prokind IN ('f','w') OR p.prokind IS NULL)
                         ORDER BY n.nspname, p.proname
                         OFFSET %d LIMIT %d
                         """,
@@ -265,6 +265,10 @@ class MetadataRefreshService {
                 ready.setJobId(submit.getJobId());
                 logBatch(label, submit.getJobId(), pageIndex, ready);
                 activeJobId = null;
+                if (!Boolean.TRUE.equals(ready.getSuccess())) {
+                    String err = ready.getErrorMessage() != null ? ready.getErrorMessage() : ready.getMessage();
+                    throw new RuntimeException(err != null ? err : "元数据查询失败");
+                }
                 return ready;
             } catch (OverloadedException oe) {
                 overloadAttempts++;
@@ -289,42 +293,49 @@ class MetadataRefreshService {
                                           String label,
                                           int pageIndex,
                                           long deadlineMs) throws Exception {
-        ResultResponse latest = null;
         int statusPoll = 0;
         while (true) {
+            ensureNotCancelled();
+            AsyncJobStatus status = null;
             try {
-                latest = remoteClient.fetchResult(jobId, true, 1, WINDOW, null, null);
-                boolean ready = Boolean.TRUE.equals(latest.getSuccess()) && (latest.getResultAvailable() == null || latest.getResultAvailable());
-                boolean stillRunning = latest.getStatus() != null && Set.of("RUNNING", "QUEUED", "ACCEPTED", "CANCELLING")
-                        .contains(latest.getStatus().toUpperCase(Locale.ROOT));
-                if (latest.getArchiveError() != null && !latest.getArchiveError().isBlank()) {
-                    throw new RuntimeException("结果归档失败: " + latest.getArchiveError());
+                status = remoteClient.pollStatus(jobId);
+                if (status != null && status.getStatus() != null) {
+                    String up = status.getStatus().toUpperCase(Locale.ROOT);
+                    if (Set.of("SUCCEEDED", "FAILED", "CANCELLED").contains(up)) {
+                        return fetchFinalResult(jobId, label, pageIndex);
+                    }
                 }
-                if (ready && !stillRunning) {
-                    return latest;
-                }
-            } catch (ResultNotReadyException ignored) {
-                // continue polling
-            } catch (ResultExpiredException re) {
-                throw re;
+            } catch (Exception e) {
+                OperationLog.log("[" + jobId + "] 状态轮询失败: " + e.getMessage());
             }
             if (System.currentTimeMillis() > deadlineMs) {
                 String diag = "等待结果超时 label=" + label + " jobId=" + jobId + " page=" + pageIndex
-                        + (latest != null && latest.getQueueDelayMillis() != null ? " queueDelayMillis=" + latest.getQueueDelayMillis() : "");
+                        + (status != null && status.getQueueDelayMillis() != null ? " queueDelayMillis=" + status.getQueueDelayMillis() : "");
                 throw new RuntimeException(diag);
             }
-            if (++statusPoll % 3 == 0) {
-                try {
-                    AsyncJobStatus status = remoteClient.pollStatus(jobId);
-                    if (status != null && status.getStatus() != null) {
-                        OperationLog.log("[" + jobId + "] 状态 " + status.getStatus()
-                                + (status.getProgressPercent() != null ? (" progress=" + status.getProgressPercent()) : "")
-                                + (status.getQueueDelayMillis() != null ? (" queueDelayMillis=" + status.getQueueDelayMillis()) : ""));
-                    }
-                } catch (Exception ignored) {
-                }
+            if (++statusPoll % 3 == 0 && status != null && status.getStatus() != null) {
+                OperationLog.log("[" + jobId + "] 状态 " + status.getStatus()
+                        + (status.getProgressPercent() != null ? (" progress=" + status.getProgressPercent()) : "")
+                        + (status.getQueueDelayMillis() != null ? (" queueDelayMillis=" + status.getQueueDelayMillis()) : ""));
             }
             sleep(jitter());
+        }
+    }
+
+    private ResultResponse fetchFinalResult(String jobId, String label, int pageIndex) {
+        try {
+            ResultResponse resp = remoteClient.fetchResult(jobId, true, 1, WINDOW, null, null);
+            String note = resp.getNote();
+            if (note != null && !note.isBlank()) {
+                OperationLog.log("[meta] label=" + label + " page=" + pageIndex + " note=" + OperationLog.abbreviate(note, 120));
+            }
+            if (resp.getArchiveError() != null && !resp.getArchiveError().isBlank()) {
+                throw new RuntimeException("结果归档失败: " + resp.getArchiveError());
+            }
+            return resp;
+        } catch (Exception e) {
+            OperationLog.log("[" + jobId + "] 获取最终结果失败: " + e.getMessage());
+            throw e;
         }
     }
 

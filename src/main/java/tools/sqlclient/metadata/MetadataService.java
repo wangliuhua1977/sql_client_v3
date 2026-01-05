@@ -1,13 +1,15 @@
+// MetadataService.java
 package tools.sqlclient.metadata;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import tools.sqlclient.db.SQLiteManager;
+import tools.sqlclient.exec.CommandTagParser;
+import tools.sqlclient.exec.ColumnMeta;
 import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
 import tools.sqlclient.exec.ResultNotReadyException;
 import tools.sqlclient.exec.ResultResponse;
-import tools.sqlclient.exec.CommandTagParser;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.util.Config;
 import tools.sqlclient.util.OperationLog;
@@ -17,19 +19,20 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.Instant;
-import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.stream.Collectors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * 管理元数据：差分更新、本地缓存、模糊匹配。
@@ -38,8 +41,10 @@ public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
     private static final String METADATA_DB_USER = "leshan";
+    private static final int OBJECT_PAGE_SIZE = 900;
     private static final int METADATA_BATCH_SIZE = 1000;
     private static final int TRACE_ROW_LIMIT = 200;
+
     private static final Pattern DDL_PATTERN = Pattern.compile(
             "^(?i)(create|drop|alter)\\s+(or\\s+replace\\s+)?(table|view|function|procedure)\\s+(if\\s+not\\s+exists\\s+|if\\s+exists\\s+)?([A-Za-z0-9_\\.\\\"]+)");
 
@@ -48,7 +53,23 @@ public class MetadataService {
     private final ExecutorService networkPool = Executors.newFixedThreadPool(resolveNetworkConcurrency(), r -> new Thread(r, "network-pool"));
     private final MetadataRefreshService refreshService;
     private final Object dbWriteLock = new Object();
-    private final Set<String> inflightColumns = java.util.Collections.synchronizedSet(new HashSet<>());
+    private final Map<String, CompletableFuture<Void>> inflightColumns = new ConcurrentHashMap<>();
+
+    record RemoteSignature(long count, String signature) {}
+
+    record RemoteObject(String schemaName, String objectName) {
+        String key() {
+            return (schemaName == null ? DEFAULT_SCHEMA : schemaName) + "." + objectName;
+        }
+    }
+
+    record MetadataSnapshot(String objectType, long remoteCount, String remoteSignature, String checkedAt) {}
+
+    record ObjectSyncStats(String objectType, int totalObjects, int inserted, int deleted, int batches, boolean skipped) {}
+
+    record DiffResult(int inserted, int deleted, int totalRemote) {}
+
+    record FetchResult(Set<RemoteObject> objects, int batches) {}
 
     public record MetadataRefreshResult(boolean success,
                                         int totalObjects,
@@ -66,23 +87,15 @@ public class MetadataService {
 
     private static int resolveMetadataConcurrency() {
         int configured = readInt("METADATA_REFRESH_CONCURRENCY", 1);
-        if (configured < 1) {
-            configured = 1;
-        }
-        if (configured > 2) {
-            configured = 2;
-        }
+        if (configured < 1) configured = 1;
+        if (configured > 2) configured = 2;
         return configured;
     }
 
     private static int resolveNetworkConcurrency() {
         int configured = readInt("METADATA_NETWORK_CONCURRENCY", resolveMetadataConcurrency());
-        if (configured < 1) {
-            configured = 1;
-        }
-        if (configured > 2) {
-            configured = 2;
-        }
+        if (configured < 1) configured = 1;
+        if (configured > 2) configured = 2;
         return configured;
     }
 
@@ -91,30 +104,30 @@ public class MetadataService {
         if (sys != null && !sys.isBlank()) {
             try {
                 return Integer.parseInt(sys.trim());
-            } catch (NumberFormatException ignored) {
-            }
+            } catch (NumberFormatException ignored) {}
         }
         String raw = Config.getRawProperty(key);
         if (raw != null && !raw.isBlank()) {
             try {
                 return Integer.parseInt(raw.trim());
-            } catch (NumberFormatException ignored) {
-            }
+            } catch (NumberFormatException ignored) {}
         }
         return defaultValue;
     }
 
     public void refreshMetadataAsync(Runnable done) {
-        refreshMetadataAsync(result -> {
-            if (done != null) {
-                done.run();
-            }
+        refreshMetadataAsync(false, result -> {
+            if (done != null) done.run();
         });
     }
 
     public void refreshMetadataAsync(java.util.function.Consumer<MetadataRefreshResult> done) {
+        refreshMetadataAsync(false, done);
+    }
+
+    public void refreshMetadataAsync(boolean forceFullFetch, java.util.function.Consumer<MetadataRefreshResult> done) {
         CompletableFuture
-                .supplyAsync(this::refreshMetadata, metadataPool)
+                .supplyAsync(() -> refreshMetadata(forceFullFetch), metadataPool)
                 .handle((result, ex) -> {
                     if (ex != null) {
                         log.error("刷新元数据失败", ex);
@@ -134,16 +147,31 @@ public class MetadataService {
      */
     public void resetMetadataAsync(Runnable done) {
         resetMetadataAsync(result -> {
-            if (done != null) {
-                done.run();
-            }
+            if (done != null) done.run();
         });
+    }
+
+    public void syncMetadataOnStartup(java.util.function.Consumer<MetadataRefreshResult> done) {
+        CompletableFuture
+                .supplyAsync(() -> refreshMetadata(false), metadataPool)
+                .handle((result, ex) -> {
+                    if (ex != null) {
+                        log.error("启动同步元数据失败", ex);
+                        return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, 0L, ex.getMessage());
+                    }
+                    return result;
+                })
+                .whenComplete((result, ex) -> {
+                    if (done != null) {
+                        SwingUtilities.invokeLater(() -> done.accept(result));
+                    }
+                });
     }
 
     public void resetMetadataAsync(java.util.function.Consumer<MetadataRefreshResult> done) {
         CompletableFuture.supplyAsync(() -> {
             clearLocalMetadata();
-            return refreshMetadata();
+            return refreshMetadata(true);
         }, metadataPool).handle((result, ex) -> {
             if (ex != null) {
                 log.error("重置元数据失败", ex);
@@ -162,19 +190,329 @@ public class MetadataService {
         OperationLog.log("用户请求取消元数据刷新");
     }
 
-    private MetadataRefreshResult refreshMetadata() {
+    private MetadataRefreshResult refreshMetadata(boolean forceFullFetch) {
         long startedAt = System.currentTimeMillis();
         int beforeObjects = countCachedObjects();
         try {
-            MetadataRefreshService.RefreshStats stats = refreshService.refreshAll(DEFAULT_SCHEMA, METADATA_DB_USER, this::handleRefreshProgress);
-            int totalObjects = stats.totalObjects();
-            int changed = Math.max(0, totalObjects - beforeObjects);
-            return new MetadataRefreshResult(true, totalObjects, changed, stats.totalColumns(), stats.batches(), stats.durationMillis(), stats.message());
+            List<ObjectSyncStats> stats = syncAllObjectTypes(forceFullFetch);
+            int totalObjects = countCachedObjects();
+            int changed = stats.stream().mapToInt(s -> s.inserted() + s.deleted()).sum();
+            int batches = stats.stream().mapToInt(ObjectSyncStats::batches).sum();
+            long duration = System.currentTimeMillis() - startedAt;
+            String message = stats.stream()
+                    .map(s -> s.objectType() + (s.skipped() ? "(skip)" : "") + " +" + s.inserted() + " -" + s.deleted())
+                    .collect(Collectors.joining(", "));
+            OperationLog.log(String.format("元数据同步完成 对象=%d 变动=%d 批次=%d 用时=%dms", totalObjects, changed, batches, duration));
+            return new MetadataRefreshResult(true, totalObjects, Math.max(0, totalObjects - beforeObjects), 0, batches, duration, message);
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
             long cost = System.currentTimeMillis() - startedAt;
             return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, cost, e.getMessage());
+        }
+    }
+
+    private List<ObjectSyncStats> syncAllObjectTypes(boolean forceFullFetch) throws Exception {
+        List<ObjectSyncStats> stats = new ArrayList<>();
+        stats.add(syncObjectType("table", forceFullFetch));
+        stats.add(syncObjectType("view", forceFullFetch));
+        stats.add(syncObjectType("function", forceFullFetch));
+        stats.add(syncObjectType("procedure", forceFullFetch));
+        return stats;
+    }
+
+    private ObjectSyncStats syncObjectType(String objectType, boolean forceFullFetch) throws Exception {
+        long startedAt = System.currentTimeMillis();
+        RemoteSignature remoteSignature = fetchRemoteSignature(objectType);
+        MetadataSnapshot snapshot = loadSnapshot(objectType);
+        boolean matched = !forceFullFetch
+                && snapshot != null
+                && snapshot.remoteCount() == remoteSignature.count()
+                && Objects.equals(snapshot.remoteSignature(), remoteSignature.signature());
+        if (matched) {
+            saveSnapshot(objectType, remoteSignature);
+            OperationLog.log(String.format("[meta] %s 远程签名命中，跳过拉取 cnt=%d sig=%s", objectType, remoteSignature.count(), remoteSignature.signature()));
+            return new ObjectSyncStats(objectType, (int) remoteSignature.count(), 0, 0, 0, true);
+        }
+        FetchResult fetchResult = fetchRemoteObjects(objectType);
+        DiffResult diff = diffAndApply(objectType, fetchResult.objects());
+        saveSnapshot(objectType, remoteSignature);
+        long cost = System.currentTimeMillis() - startedAt;
+        OperationLog.log(String.format("[meta] %s cnt=%d sig=%s 插入=%d 删除=%d 批次=%d 用时=%dms",
+                objectType, remoteSignature.count(), remoteSignature.signature(),
+                diff.inserted(), diff.deleted(), fetchResult.batches(), cost));
+        return new ObjectSyncStats(objectType, diff.totalRemote(), diff.inserted(), diff.deleted(), fetchResult.batches(), false);
+    }
+
+    RemoteSignature fetchRemoteSignature(String objectType) throws Exception {
+        // 注意：这里使用 String#formatted，SQL 内的 % 需要写成 %%，否则会被当作格式占位符。
+        String sql;
+        switch (objectType) {
+            case "table" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || c.relname, 0))::text, '0') AS sig
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind IN ('r','p')
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            case "view" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || c.relname, 0))::text, '0') AS sig
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind='v'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            case "function" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || p.proname, 0))::text, '0') AS sig
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='f'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            case "procedure" -> sql = """
+                    SELECT COUNT(*) AS cnt,
+                           COALESCE(SUM(hashtextextended(n.nspname || '.' || p.proname, 0))::text, '0') AS sig
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='p'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    """.formatted(DEFAULT_SCHEMA);
+            default -> throw new IllegalArgumentException("Unsupported objectType: " + objectType);
+        }
+
+        SqlExecResult result = runMetadataSql(sql);
+        List<List<String>> rows = result.getRows();
+        Map<String, Integer> idx = indexColumns(result.getColumns());
+
+        long cnt = 0L;
+        String sig = "0";
+        if (rows != null && !rows.isEmpty()) {
+            List<String> row = rows.get(0);
+            cnt = parseLong(valueAt(row, idx.getOrDefault("cnt", -1)), 0L);
+            String remoteSig = valueAt(row, idx.getOrDefault("sig", -1));
+            if (remoteSig != null && !remoteSig.isBlank()) sig = remoteSig.trim();
+        }
+        return new RemoteSignature(cnt, sig);
+    }
+
+    FetchResult fetchRemoteObjects(String objectType) throws Exception {
+        int offset = 0;
+        int batches = 0;
+        Set<RemoteObject> merged = new LinkedHashSet<>();
+        while (true) {
+            List<RemoteObject> page = fetchRemoteObjectsPaged(objectType, offset);
+            batches++;
+            merged.addAll(page);
+            if (page.size() < OBJECT_PAGE_SIZE) break;
+            offset += OBJECT_PAGE_SIZE;
+        }
+        return new FetchResult(merged, batches);
+    }
+
+    List<RemoteObject> fetchRemoteObjectsPaged(String objectType, int offset) throws Exception {
+        String sql;
+        switch (objectType) {
+            case "table" -> sql = """
+                    SELECT n.nspname AS schema_name, c.relname AS object_name
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind IN ('r','p')
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            case "view" -> sql = """
+                    SELECT n.nspname AS schema_name, c.relname AS object_name
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relkind='v'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            case "function" -> sql = """
+                    SELECT n.nspname AS schema_name, p.proname AS object_name
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='f'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            case "procedure" -> sql = """
+                    SELECT n.nspname AS schema_name, p.proname AS object_name
+                    FROM pg_proc p
+                    JOIN pg_namespace n ON n.oid = p.pronamespace
+                    WHERE p.prokind='p'
+                      AND n.nspname NOT IN ('pg_catalog','information_schema')
+                      AND n.nspname NOT LIKE 'pg_toast%%'
+                      AND n.nspname='%s'
+                    ORDER BY schema_name, object_name
+                    LIMIT %d OFFSET %d
+                    """.formatted(DEFAULT_SCHEMA, OBJECT_PAGE_SIZE, offset);
+            default -> throw new IllegalArgumentException("Unsupported objectType: " + objectType);
+        }
+
+        SqlExecResult result = runMetadataSql(sql);
+        Map<String, Integer> idx = indexColumns(result.getColumns());
+        int schemaIdx = idx.getOrDefault("schema_name", -1);
+        int nameIdx = idx.getOrDefault("object_name", -1);
+
+        List<RemoteObject> list = new ArrayList<>();
+        if (result.getRows() != null) {
+            for (List<String> row : result.getRows()) {
+                String name = valueAt(row, nameIdx);
+                if (name == null || name.isBlank()) continue;
+                String schema = valueAt(row, schemaIdx);
+                list.add(new RemoteObject(schema != null ? schema.trim() : DEFAULT_SCHEMA, name.trim()));
+            }
+        }
+        return list;
+    }
+
+    DiffResult diffAndApply(String objectType, Set<RemoteObject> remoteObjects) throws Exception {
+        Map<String, RemoteObject> remoteMap = new HashMap<>();
+        for (RemoteObject ro : remoteObjects) remoteMap.put(ro.key(), ro);
+
+        synchronized (dbWriteLock) {
+            try (Connection conn = sqliteManager.getConnection()) {
+                boolean auto = conn.getAutoCommit();
+                if (auto) conn.setAutoCommit(false);
+
+                java.sql.Savepoint sp = conn.setSavepoint("obj_diff");
+                try {
+                    Map<String, RemoteObject> localMap = new HashMap<>();
+                    try (PreparedStatement ps = conn.prepareStatement("SELECT schema_name, object_name FROM objects WHERE object_type=?")) {
+                        ps.setString(1, objectType);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            while (rs.next()) {
+                                String schema = rs.getString("schema_name");
+                                String obj = rs.getString("object_name");
+                                if (obj != null) {
+                                    RemoteObject ro = new RemoteObject(schema != null ? schema : DEFAULT_SCHEMA, obj);
+                                    localMap.put(ro.key(), ro);
+                                }
+                            }
+                        }
+                    }
+
+                    Set<String> toInsert = new HashSet<>(remoteMap.keySet());
+                    toInsert.removeAll(localMap.keySet());
+                    Set<String> toDelete = new HashSet<>(localMap.keySet());
+                    toDelete.removeAll(remoteMap.keySet());
+
+                    try (PreparedStatement ins = conn.prepareStatement(
+                            "INSERT OR IGNORE INTO objects(schema_name, object_name, object_type, use_count, last_used_at) VALUES(?,?,?,?,?)");
+                         PreparedStatement delObj = conn.prepareStatement(
+                                 "DELETE FROM objects WHERE schema_name=? AND object_name=? AND object_type=?");
+                         PreparedStatement delCols = conn.prepareStatement(
+                                 "DELETE FROM columns WHERE object_name=?");
+                         PreparedStatement delColSnap = conn.prepareStatement(
+                                 "DELETE FROM columns_snapshot WHERE object_name=?")) {
+
+                        long now = System.currentTimeMillis();
+
+                        for (String key : toInsert) {
+                            RemoteObject ro = remoteMap.get(key);
+                            if (ro == null) continue;
+                            ins.setString(1, ro.schemaName() == null ? DEFAULT_SCHEMA : ro.schemaName());
+                            ins.setString(2, ro.objectName());
+                            ins.setString(3, objectType);
+                            ins.setInt(4, 0);
+                            ins.setLong(5, now);
+                            ins.addBatch();
+                        }
+                        ins.executeBatch();
+
+                        for (String key : toDelete) {
+                            RemoteObject ro = localMap.get(key);
+                            if (ro == null) continue;
+                            String schema = ro.schemaName() == null ? DEFAULT_SCHEMA : ro.schemaName();
+                            delObj.setString(1, schema);
+                            delObj.setString(2, ro.objectName());
+                            delObj.setString(3, objectType);
+                            delObj.addBatch();
+
+                            delCols.setString(1, ro.objectName());
+                            delCols.addBatch();
+
+                            delColSnap.setString(1, ro.objectName());
+                            delColSnap.addBatch();
+                        }
+                        delObj.executeBatch();
+                        delCols.executeBatch();
+                        delColSnap.executeBatch();
+                    }
+
+                    conn.releaseSavepoint(sp);
+                    conn.commit();
+                    if (auto) conn.setAutoCommit(true);
+
+                    return new DiffResult(toInsert.size(), toDelete.size(), remoteObjects.size());
+                } catch (Exception e) {
+                    try {
+                        conn.rollback(sp);
+                    } catch (Exception ignore) {}
+                    throw e;
+                }
+            }
+        }
+    }
+
+    private MetadataSnapshot loadSnapshot(String objectType) {
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT object_type, remote_count, remote_signature, checked_at FROM metadata_snapshot WHERE object_type=?")) {
+            ps.setString(1, objectType);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return new MetadataSnapshot(
+                            rs.getString("object_type"),
+                            rs.getLong("remote_count"),
+                            rs.getString("remote_signature"),
+                            rs.getString("checked_at")
+                    );
+                }
+            }
+        } catch (Exception e) {
+            log.debug("读取元数据快照失败: {}", objectType, e);
+        }
+        return null;
+    }
+
+    private void saveSnapshot(String objectType, RemoteSignature sig) {
+        synchronized (dbWriteLock) {
+            try (Connection conn = sqliteManager.getConnection();
+                 PreparedStatement ps = conn.prepareStatement(
+                         "INSERT INTO metadata_snapshot(object_type, remote_count, remote_signature, checked_at) " +
+                                 "VALUES(?,?,?,?) " +
+                                 "ON CONFLICT(object_type) DO UPDATE SET " +
+                                 "remote_count=excluded.remote_count, remote_signature=excluded.remote_signature, checked_at=excluded.checked_at")) {
+                ps.setString(1, objectType);
+                ps.setLong(2, sig.count());
+                ps.setString(3, sig.signature());
+                ps.setString(4, Instant.now().toString());
+                ps.executeUpdate();
+            } catch (Exception e) {
+                log.warn("更新元数据签名失败: {}", objectType, e);
+            }
         }
     }
 
@@ -185,12 +523,13 @@ public class MetadataService {
             String sql = String.format(sqlTemplate, escapeLiteral(lastName), batchSize);
             SqlExecResult result = runMetadataSql(sql);
             recordTrace("keyset-" + abbreviateTag(sqlTemplate, lastName), sql, result);
+
             List<List<String>> rows = result.getRows();
-            if (rows == null || rows.isEmpty()) {
-                break;
-            }
+            if (rows == null || rows.isEmpty()) break;
+
             Map<String, Integer> idx = indexColumns(result.getColumns());
             int nameIdx = idx.getOrDefault("object_name", -1);
+
             String lastInBatch = lastName;
             for (List<String> row : rows) {
                 String name = valueAt(row, nameIdx);
@@ -199,13 +538,10 @@ public class MetadataService {
                     lastInBatch = name.trim();
                 }
             }
+
             OperationLog.log(String.format("[keyset] 已拉取 %d 条，lastName=%s", names.size(), lastInBatch));
-            if (rows.size() < batchSize) {
-                break;
-            }
-            if (lastInBatch.equals(lastName)) {
-                break;
-            }
+            if (rows.size() < batchSize) break;
+            if (lastInBatch.equals(lastName)) break;
             lastName = lastInBatch;
         }
         return names;
@@ -222,35 +558,40 @@ public class MetadataService {
                 return toSqlExecResult(sql, resp);
             } catch (ResultExpiredException rex) {
                 expiredAttempts++;
-                if (expiredAttempts > 1) {
-                    throw rex;
-                }
+                if (expiredAttempts > 1) throw rex;
                 OperationLog.log("元数据结果过期，自动重试一次: " + rex.getMessage());
             } catch (ResultNotReadyException rnre) {
-                try { Thread.sleep(300); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
             } catch (OverloadedException oe) {
                 overloadAttempts++;
-                if (overloadAttempts > 3) {
-                    throw oe;
+                if (overloadAttempts > 3) throw oe;
+                try {
+                    Thread.sleep(backoff);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
                 }
-                try { Thread.sleep(backoff); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
                 backoff = Math.min(8000, backoff * 2);
             }
         }
     }
 
     private SqlExecResult toSqlExecResult(String sql, ResultResponse resp) {
-        List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
-        List<String> columns = resp.getColumns() != null ? resp.getColumns() : List.of();
+        List<Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
+        List<String> columns = resolveColumns(resp, rowMaps);
+
         List<List<String>> rows = new ArrayList<>();
-        for (java.util.Map<String, String> map : rowMaps) {
+        for (Map<String, String> map : rowMaps) {
             List<String> row = new ArrayList<>();
-            for (String col : columns) {
-                row.add(map.get(col));
-            }
+            for (String col : columns) row.add(map.get(col));
             rows.add(row);
         }
+
         int rowCount = resp.getReturnedRowCount() != null ? resp.getReturnedRowCount() : rowMaps.size();
+
         Integer affectedRows = resp.getRowsAffected();
         if ((affectedRows == null || affectedRows < 0) && resp.getUpdateCount() != null && resp.getUpdateCount() >= 0) {
             affectedRows = resp.getUpdateCount();
@@ -262,6 +603,8 @@ public class MetadataService {
             }
         }
 
+        String message = pickMessage(resp);
+
         return SqlExecResult.builder(sql)
                 .columns(columns)
                 .columnDefs(null)
@@ -269,7 +612,7 @@ public class MetadataService {
                 .rowMaps(rowMaps)
                 .rowCount(rowCount)
                 .success(Boolean.TRUE.equals(resp.getSuccess()))
-                .message(resp.getMessage())
+                .message(message)
                 .jobId(resp.getJobId())
                 .status(resp.getStatus())
                 .rowsAffected(affectedRows)
@@ -282,7 +625,7 @@ public class MetadataService {
                 .pageSize(resp.getPageSize())
                 .hasNext(resp.getHasNext())
                 .truncated(resp.getTruncated())
-                .note(resp.getMessage())
+                .note(resp.getNote())
                 .queuedAt(resp.getQueuedAt())
                 .queueDelayMillis(resp.getQueueDelayMillis())
                 .overloaded(resp.getOverloaded())
@@ -294,12 +637,42 @@ public class MetadataService {
                 .build();
     }
 
+    private List<String> resolveColumns(ResultResponse resp, List<Map<String, String>> rowMaps) {
+        if (resp.getColumnMetas() != null && !resp.getColumnMetas().isEmpty()) {
+            List<String> names = new ArrayList<>();
+            for (var meta : resp.getColumnMetas()) {
+                if (meta != null && meta.getName() != null) {
+                    names.add(meta.getName());
+                }
+            }
+            if (!names.isEmpty()) {
+                return names;
+            }
+        }
+        if (resp.getColumns() != null && !resp.getColumns().isEmpty()) {
+            return resp.getColumns();
+        }
+        if (rowMaps != null && !rowMaps.isEmpty()) {
+            LinkedHashSet<String> keys = new LinkedHashSet<>();
+            for (Map<String, String> map : rowMaps) {
+                if (map != null) {
+                    keys.addAll(map.keySet());
+                }
+            }
+            if (!keys.isEmpty()) {
+                return new ArrayList<>(keys);
+            }
+        }
+        return List.of();
+    }
+
     private void recordTrace(String tag, String sql, SqlExecResult result) {
         try {
             String safeTag = tag.replaceAll("[^A-Za-z0-9_-]", "_");
             Path dir = Paths.get(System.getProperty("user.home"), ".Sql_client_v3", "logs");
             Files.createDirectories(dir);
             Path file = dir.resolve(String.format("metadata-%s-%d.log", safeTag, System.currentTimeMillis()));
+
             StringBuilder sb = new StringBuilder();
             sb.append("sql: ").append(sql).append(System.lineSeparator());
             if (result != null) {
@@ -308,18 +681,18 @@ public class MetadataService {
                         .append(" page: ").append(Optional.ofNullable(result.getPage()).orElse(-1))
                         .append(" pageSize: ").append(Optional.ofNullable(result.getPageSize()).orElse(-1))
                         .append(System.lineSeparator());
+
                 List<List<String>> rows = result.getRows();
                 if (rows != null) {
                     sb.append("rows (up to ").append(TRACE_ROW_LIMIT).append("):").append(System.lineSeparator());
                     int limit = Math.min(rows.size(), TRACE_ROW_LIMIT);
-                    for (int i = 0; i < limit; i++) {
-                        sb.append(String.join("\t", rows.get(i))).append(System.lineSeparator());
-                    }
+                    for (int i = 0; i < limit; i++) sb.append(String.join("\t", rows.get(i))).append(System.lineSeparator());
                     if (rows.size() > TRACE_ROW_LIMIT) {
                         sb.append("<trimmed ").append(rows.size() - TRACE_ROW_LIMIT).append(" rows>").append(System.lineSeparator());
                     }
                 }
             }
+
             Files.writeString(file, sb.toString(), StandardCharsets.UTF_8);
             if (safeTag.endsWith("-0")) {
                 OperationLog.log("元数据请求/响应已写入: " + file.toAbsolutePath());
@@ -337,21 +710,22 @@ public class MetadataService {
         try (PreparedStatement ps = conn.prepareStatement("SELECT object_name FROM objects WHERE object_type=?")) {
             ps.setString(1, type);
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    local.add(rs.getString(1));
-                }
+                while (rs.next()) local.add(rs.getString(1));
             }
         }
+
         int changes = 0;
         try (PreparedStatement ins = conn.prepareStatement("INSERT OR IGNORE INTO objects(schema_name, object_name, object_type) VALUES(?,?,?)");
              PreparedStatement del = conn.prepareStatement("DELETE FROM objects WHERE object_name=? AND object_type=?");
              PreparedStatement dropColumns = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
+
             for (String name : remote) {
                 ins.setString(1, DEFAULT_SCHEMA);
                 ins.setString(2, name);
                 ins.setString(3, type);
                 changes += ins.executeUpdate();
             }
+
             for (String old : local) {
                 if (!remote.contains(old)) {
                     del.setString(1, old);
@@ -372,12 +746,16 @@ public class MetadataService {
             try (Connection conn = sqliteManager.getConnection(); Statement st = conn.createStatement()) {
                 boolean auto = conn.getAutoCommit();
                 if (auto) conn.setAutoCommit(false);
+
                 st.executeUpdate("DELETE FROM columns");
                 st.executeUpdate("DELETE FROM objects");
                 st.executeUpdate("DELETE FROM meta_snapshot");
                 st.executeUpdate("DELETE FROM columns_snapshot");
+                st.executeUpdate("DELETE FROM metadata_snapshot");
+
                 conn.commit();
                 if (auto) conn.setAutoCommit(true);
+
                 OperationLog.log("已清空本地元数据");
             } catch (Exception e) {
                 log.error("清空本地元数据失败", e);
@@ -390,9 +768,7 @@ public class MetadataService {
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM objects")) {
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getInt(1);
-                }
+                if (rs.next()) return rs.getInt(1);
             }
         } catch (Exception e) {
             log.warn("统计本地对象数量失败", e);
@@ -404,9 +780,7 @@ public class MetadataService {
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM columns")) {
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getInt(1);
-                }
+                if (rs.next()) return rs.getInt(1);
             }
         } catch (Exception e) {
             log.warn("统计本地字段数量失败", e);
@@ -414,11 +788,25 @@ public class MetadataService {
         return 0;
     }
 
+    private String pickMessage(ResultResponse resp) {
+        if (resp == null) return null;
+        String error = trimToNull(resp.getErrorMessage());
+        if (error != null) return error;
+        String message = trimToNull(resp.getMessage());
+        if (message != null) return message;
+        return trimToNull(resp.getNote());
+    }
+
+    private String trimToNull(String text) {
+        if (text == null) return null;
+        String trimmed = text.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     public void handleSqlSucceeded(String sql) {
         DdlInfo info = parseDdl(sql);
-        if (info == null) {
-            return;
-        }
+        if (info == null) return;
+
         switch (info.action()) {
             case "create" -> refreshObjectByName(info);
             case "drop" -> removeLocalObject(info);
@@ -428,15 +816,12 @@ public class MetadataService {
                 }
                 refreshObjectByName(info);
             }
-            default -> {
-            }
+            default -> {}
         }
     }
 
     private void refreshObjectByName(DdlInfo info) {
-        if (info == null) {
-            return;
-        }
+        if (info == null) return;
         if (!DEFAULT_SCHEMA.equalsIgnoreCase(info.schema())) {
             OperationLog.log("检测到 schema=" + info.schema() + "，当前仅刷新默认 schema " + DEFAULT_SCHEMA);
         }
@@ -445,18 +830,16 @@ public class MetadataService {
             synchronized (dbWriteLock) {
                 try (Connection conn = sqliteManager.getConnection()) {
                     boolean auto = conn.getAutoCommit();
-                    if (auto) {
-                        conn.setAutoCommit(false);
-                    }
+                    if (auto) conn.setAutoCommit(false);
+
                     if (!names.isEmpty()) {
                         upsertSingleObject(conn, info.type(), names.get(0));
                     } else {
                         deleteObject(conn, info.type(), info.objectName());
                     }
+
                     conn.commit();
-                    if (auto) {
-                        conn.setAutoCommit(true);
-                    }
+                    if (auto) conn.setAutoCommit(true);
                 }
             }
             OperationLog.log("DDL 后已刷新 " + info.type() + " " + info.objectName()
@@ -471,14 +854,12 @@ public class MetadataService {
         synchronized (dbWriteLock) {
             try (Connection conn = sqliteManager.getConnection()) {
                 boolean auto = conn.getAutoCommit();
-                if (auto) {
-                    conn.setAutoCommit(false);
-                }
+                if (auto) conn.setAutoCommit(false);
+
                 deleteObject(conn, info.type(), info.objectName());
+
                 conn.commit();
-                if (auto) {
-                    conn.setAutoCommit(true);
-                }
+                if (auto) conn.setAutoCommit(true);
             } catch (Exception e) {
                 log.warn("删除本地对象失败: {}", info.objectName(), e);
             }
@@ -486,24 +867,10 @@ public class MetadataService {
         OperationLog.log("已删除本地缓存: " + info.type() + " " + info.objectName());
     }
 
-    private void handleRefreshProgress(MetadataRefreshService.Progress progress) {
-        if (progress == null) {
-            return;
-        }
-        String text = String.format("刷新进度[%s] 批次=%d%s 对象=%d 列=%d",
-                progress.phase(),
-                progress.completedBatches(),
-                progress.totalBatches() != null ? ("/" + progress.totalBatches()) : "",
-                progress.objects(),
-                progress.columns());
-        OperationLog.log(text);
-    }
-
     private List<String> fetchNamesByExactType(String type, String objectName) throws Exception {
-        String safeName = sanitizeObjectName(objectName);
-        if (safeName == null) {
-            return List.of();
-        }
+        String safeName = sanitizeIdentifier(objectName);
+        if (safeName == null) return List.of();
+
         String sql;
         switch (type) {
             case "table" -> sql = String.format("""
@@ -538,17 +905,17 @@ public class MetadataService {
                 return List.of();
             }
         }
+
         SqlExecResult result = runMetadataSql(sql);
         recordTrace("single-" + type + "-" + abbreviateTag(objectName, objectName), sql, result);
+
         List<String> names = new ArrayList<>();
         Map<String, Integer> idx = indexColumns(result.getColumns());
         int nameIdx = idx.getOrDefault("object_name", -1);
         if (result.getRows() != null) {
             for (List<String> row : result.getRows()) {
                 String name = valueAt(row, nameIdx);
-                if (name != null && !name.isBlank()) {
-                    names.add(name.trim());
-                }
+                if (name != null && !name.isBlank()) names.add(name.trim());
             }
         }
         return names;
@@ -579,14 +946,74 @@ public class MetadataService {
     }
 
     /**
-     * 在用户选择表名或输入别名时，后台补齐字段元数据，避免列联想时出现空列表。
+     * 按需补齐字段缓存，具备缓存命中与 in-flight 去重能力。
      */
-    /**
-     * 异步补齐字段缓存，可在完成后回调刷新 UI。
-     * @param tableName 目标表/视图
-     * @param onFreshLoaded 当本次确实发起远程抓取且成功完成时的回调（UI 线程）
-     * @return 是否发起了新的抓取
-     */
+    public CompletableFuture<Void> ensureColumnsLoaded(String schema, String tableName) {
+        return ensureColumnsLoaded(schema, tableName, false);
+    }
+
+    public CompletableFuture<Void> ensureColumnsLoaded(String schema, String tableName, boolean forceRefresh) {
+        // 修复：lambda 引用的变量必须 effectively final
+        String tmpSchema = normalizeSchema(schema);
+        String tmpTableName = tableName;
+
+        if (tmpTableName != null && tmpTableName.contains(".")) {
+            String[] parts = tmpTableName.split("\\.", 2);
+            if (parts.length == 2) {
+                tmpSchema = normalizeSchema(parts[0]);
+                tmpTableName = parts[1];
+            }
+        }
+
+        final String normalizedSchema = tmpSchema;
+        final String normalizedTable = normalizeTable(tmpTableName);
+
+        if (normalizedTable == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        if (!forceRefresh && hasColumns(normalizedSchema, normalizedTable)) {
+            OperationLog.log(String.format("[meta] columns cache hit %s.%s", normalizedSchema, normalizedTable));
+            return CompletableFuture.completedFuture(null);
+        }
+
+        final String key = normalizedSchema + "." + normalizedTable + (forceRefresh ? "#force" : "");
+
+        CompletableFuture<Void> existing = inflightColumns.get(key);
+        if (existing != null) {
+            OperationLog.log(String.format("[meta] columns inflight reused %s", key));
+            return existing;
+        }
+
+        // 占位 future，先入 map，再真正跑异步，避免并发下重复 runAsync
+        CompletableFuture<Void> placeholder = new CompletableFuture<>();
+        CompletableFuture<Void> prev = inflightColumns.putIfAbsent(key, placeholder);
+        if (prev != null) {
+            OperationLog.log(String.format("[meta] columns inflight reused %s", key));
+            return prev;
+        }
+
+        OperationLog.log(String.format("[meta] columns cache miss %s.%s, start fetch", normalizedSchema, normalizedTable));
+
+        CompletableFuture.runAsync(() -> {
+            try {
+                int count = updateColumns(normalizedSchema, normalizedTable, forceRefresh);
+                OperationLog.log(String.format("[meta] columns fetched %s.%s count=%d", normalizedSchema, normalizedTable, count));
+                placeholder.complete(null);
+            } catch (Exception e) {
+                OperationLog.log(String.format("[meta] columns fetch failed %s.%s %s", normalizedSchema, normalizedTable, e.getMessage()));
+                placeholder.completeExceptionally(e);
+            }
+        }, networkPool).whenComplete((v, ex) -> inflightColumns.remove(key));
+
+        return placeholder;
+    }
+
+    // 新增：修复 SuggestionEngine 调用缺失的方法签名
+    public boolean ensureColumnsCachedAsync(String tableName) {
+        return ensureColumnsCachedAsync(tableName, false, null);
+    }
+
     public boolean ensureColumnsCachedAsync(String tableName, Runnable onFreshLoaded) {
         return ensureColumnsCachedAsync(tableName, false, onFreshLoaded);
     }
@@ -596,39 +1023,41 @@ public class MetadataService {
     }
 
     public boolean ensureColumnsCachedAsync(String tableName, boolean forceRefresh, Runnable onFreshLoaded) {
-        if (!shouldFetchColumns(tableName, forceRefresh)) return false;
-        String key = tableName + (forceRefresh ? "#force" : "");
-        if (!inflightColumns.add(key)) return false;
-        CompletableFuture.runAsync(() -> updateColumns(tableName, forceRefresh), networkPool)
-                .whenComplete((v, ex) -> {
-                    inflightColumns.remove(key);
-                    if (onFreshLoaded != null) {
-                        SwingUtilities.invokeLater(onFreshLoaded);
-                    }
-                });
-        return true;
+        CompletableFuture<Void> future = ensureColumnsLoaded(DEFAULT_SCHEMA, tableName, forceRefresh);
+        if (future == null) return false;
+        boolean fetching = !future.isDone();
+        if (fetching && onFreshLoaded != null) {
+            future.thenRun(() -> SwingUtilities.invokeLater(onFreshLoaded));
+        }
+        return fetching;
     }
 
-    public boolean ensureColumnsCachedAsync(String tableName) {
-        return ensureColumnsCachedAsync(tableName, false, null);
+    private String normalizeSchema(String schema) {
+        String candidate = (schema == null || schema.isBlank()) ? DEFAULT_SCHEMA : schema.trim();
+        return candidate.isBlank() ? DEFAULT_SCHEMA : candidate;
     }
 
-    private boolean shouldFetchColumns(String tableName, boolean forceRefresh) {
-        if (tableName == null || tableName.isBlank()) return false;
-        if (!isLikelyTableName(tableName)) return false;
-        if (!forceRefresh && hasColumns(tableName)) return false;
-        return true;
+    private String normalizeTable(String tableName) {
+        if (tableName == null) return null;
+        String trimmed = tableName.trim();
+        if (trimmed.contains(".")) {
+            String[] parts = trimmed.split("\\.", 2);
+            if (parts.length == 2 && isLikelyTableName(parts[1])) trimmed = parts[1];
+        }
+        if (!isLikelyTableName(trimmed)) return null;
+        return trimmed;
     }
 
-    private boolean hasColumns(String tableName) {
+    private boolean hasColumns(String schema, String tableName) {
         try (Connection conn = sqliteManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM columns WHERE object_name=?")) {
-            ps.setString(1, tableName);
+             PreparedStatement ps = conn.prepareStatement("SELECT COUNT(1) FROM columns WHERE schema_name=? AND object_name=?")) {
+            ps.setString(1, schema);
+            ps.setString(2, tableName);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next() && rs.getInt(1) > 0;
             }
         } catch (Exception e) {
-            log.warn("检查列缓存失败: {}", tableName, e);
+            log.warn("检查列缓存失败: {}.{}", schema, tableName, e);
             return false;
         }
     }
@@ -641,32 +1070,41 @@ public class MetadataService {
         return trimmed.matches("[A-Za-z0-9_\\.]{2,128}");
     }
 
-    private List<RemoteColumn> fetchColumnsBySql(String objectName) throws Exception {
-        String safeName = sanitizeObjectName(objectName);
-        if (safeName == null) {
-            return List.of();
-        }
-        String sql = String.format("""
-                SELECT table_schema AS schema_name, table_name AS object_name, column_name, data_type, ordinal_position, is_nullable, column_default
-                FROM information_schema.columns
-                WHERE table_schema='%s' AND table_name = '%s'
-                ORDER BY ordinal_position
-                """, DEFAULT_SCHEMA, safeName);
+    private List<RemoteColumn> fetchColumnsBySql(String schema, String objectName) throws Exception {
+        String safeSchema = sanitizeIdentifier(schema);
+        String safeName = sanitizeIdentifier(objectName);
+        if (safeSchema == null || safeName == null) return List.of();
+
+        String sql = """
+                SELECT
+                  n.nspname AS schema_name,
+                  c.relname AS object_name,
+                  a.attname AS column_name,
+                  pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                  a.attnum AS ordinal_position
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('r','p')
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+                  AND n.nspname = '%s'
+                  AND c.relname = '%s'
+                ORDER BY a.attnum;
+                """.formatted(safeSchema, safeName);
+
         SqlExecResult result = runMetadataSql(sql);
         return toColumns(result);
     }
 
-    private String sanitizeObjectName(String objectName) {
-        if (!isLikelyTableName(objectName)) {
-            return null;
-        }
-        return objectName.replace("'", "''");
+    private String sanitizeIdentifier(String name) {
+        if (!isLikelyTableName(name)) return null;
+        return name.replace("'", "''");
     }
 
     private List<RemoteColumn> toColumns(SqlExecResult result) {
-        if (result == null || result.getRows() == null || result.getColumns() == null) {
-            return List.of();
-        }
+        if (result == null || result.getRows() == null || result.getColumns() == null) return List.of();
+
         Map<String, Integer> idx = indexColumns(result.getColumns());
         int schemaIdx = idx.getOrDefault("schema_name", -1);
         int objIdx = idx.getOrDefault("object_name", -1);
@@ -680,13 +1118,23 @@ public class MetadataService {
         for (List<String> row : result.getRows()) {
             String name = valueAt(row, nameIdx);
             if (name == null) continue;
+
             String schema = valueAt(row, schemaIdx);
             String object = valueAt(row, objIdx);
             int ordinal = parseInt(valueAt(row, ordinalIdx), list.size() + 1);
             String dataType = valueAt(row, typeIdx);
             String nullable = valueAt(row, nullableIdx);
             String columnDefault = valueAt(row, defaultIdx);
-            list.add(new RemoteColumn(schema != null ? schema : DEFAULT_SCHEMA, objectNameOrDefault(object), name, dataType, ordinal, nullable, columnDefault));
+
+            list.add(new RemoteColumn(
+                    schema != null ? schema : DEFAULT_SCHEMA,
+                    objectNameOrDefault(object),
+                    name,
+                    dataType,
+                    ordinal,
+                    nullable,
+                    columnDefault
+            ));
         }
         return list;
     }
@@ -701,9 +1149,7 @@ public class MetadataService {
     }
 
     private String valueAt(List<String> row, int idx) {
-        if (row == null || idx < 0 || idx >= row.size()) {
-            return null;
-        }
+        if (row == null || idx < 0 || idx >= row.size()) return null;
         return row.get(idx);
     }
 
@@ -712,11 +1158,18 @@ public class MetadataService {
     }
 
     private int parseInt(String value, int fallback) {
-        if (value == null) {
-            return fallback;
-        }
+        if (value == null) return fallback;
         try {
             return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private long parseLong(String value, long fallback) {
+        if (value == null) return fallback;
+        try {
+            return Long.parseLong(value.trim());
         } catch (NumberFormatException e) {
             return fallback;
         }
@@ -742,20 +1195,16 @@ public class MetadataService {
     }
 
     private DdlInfo parseDdl(String sql) {
-        if (sql == null) {
-            return null;
-        }
+        if (sql == null) return null;
         String normalized = sql.replaceAll("[\\r\\n]+", " ").trim();
         Matcher matcher = DDL_PATTERN.matcher(normalized);
-        if (!matcher.find()) {
-            return null;
-        }
+        if (!matcher.find()) return null;
+
         String action = matcher.group(1).toLowerCase(Locale.ROOT);
         String type = matcher.group(3).toLowerCase(Locale.ROOT);
         String rawName = matcher.group(5);
-        if (rawName == null || rawName.isBlank()) {
-            return null;
-        }
+        if (rawName == null || rawName.isBlank()) return null;
+
         String cleaned = rawName.replace("\"", "").replaceAll(";+", "").trim();
         String schema = DEFAULT_SCHEMA;
         if (cleaned.contains(".")) {
@@ -773,9 +1222,7 @@ public class MetadataService {
     }
 
     private String computeColumnsHash(List<RemoteColumn> columns) {
-        if (columns == null || columns.isEmpty()) {
-            return "";
-        }
+        if (columns == null || columns.isEmpty()) return "";
         List<String> names = columns.stream()
                 .sorted(Comparator.comparingInt(c -> c.ordinal_position))
                 .map(c -> c.column_name)
@@ -784,31 +1231,33 @@ public class MetadataService {
             MessageDigest md = MessageDigest.getInstance("MD5");
             byte[] bytes = md.digest(String.join(",", names).getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
-            for (byte b : bytes) {
-                sb.append(String.format("%02x", b));
-            }
+            for (byte b : bytes) sb.append(String.format("%02x", b));
             return sb.toString();
         } catch (Exception e) {
             return "";
         }
     }
 
-    private void updateColumns(String objectName, boolean forceRefresh) {
+    private int updateColumns(String schema, String objectName, boolean forceRefresh) {
         boolean knownTableOrView = isTableOrView(objectName);
         int attempts = 0;
+
         while (attempts < 3) {
             try {
                 attempts++;
-                List<RemoteColumn> columns = fetchColumnsBySql(objectName);
-                if (columns == null || columns.isEmpty()) return;
+                List<RemoteColumn> columns = fetchColumnsBySql(schema, objectName);
+                if (columns == null || columns.isEmpty()) return 0;
+
                 synchronized (dbWriteLock) {
                     try (Connection conn = sqliteManager.getConnection()) {
                         boolean auto = conn.getAutoCommit();
-                        if (auto) {
-                            conn.setAutoCommit(false);
-                        }
+                        if (auto) conn.setAutoCommit(false);
+
                         java.sql.Savepoint sp = conn.setSavepoint("col_upd");
-                        try (PreparedStatement snapshotPs = conn.prepareStatement("INSERT INTO columns_snapshot(object_name, cols_hash, updated_at) VALUES(?,?,?) ON CONFLICT(object_name) DO UPDATE SET cols_hash=excluded.cols_hash, updated_at=excluded.updated_at")) {
+                        try (PreparedStatement snapshotPs = conn.prepareStatement(
+                                "INSERT INTO columns_snapshot(object_name, cols_hash, updated_at) VALUES(?,?,?) " +
+                                        "ON CONFLICT(object_name) DO UPDATE SET cols_hash=excluded.cols_hash, updated_at=excluded.updated_at")) {
+
                             if (!knownTableOrView) {
                                 try (PreparedStatement up = conn.prepareStatement(
                                         "INSERT OR IGNORE INTO objects(schema_name, object_name, object_type, use_count, last_used_at) VALUES(?,?,?,?,?)")) {
@@ -820,15 +1269,19 @@ public class MetadataService {
                                     up.executeUpdate();
                                 }
                             }
+
                             Map<String, Integer> localCols = new HashMap<>();
-                            try (PreparedStatement ps = conn.prepareStatement("SELECT column_name, sort_no FROM columns WHERE object_name=?")) {
-                                ps.setString(1, objectName);
+                            try (PreparedStatement ps = conn.prepareStatement(
+                                    "SELECT column_name, sort_no FROM columns WHERE schema_name=? AND object_name=?")) {
+                                ps.setString(1, schema);
+                                ps.setString(2, objectName);
                                 try (ResultSet rs = ps.executeQuery()) {
                                     while (rs.next()) {
                                         localCols.put(rs.getString("column_name"), rs.getInt("sort_no"));
                                     }
                                 }
                             }
+
                             boolean changed = forceRefresh || columns.size() != localCols.size();
                             if (!changed) {
                                 for (RemoteColumn col : columns) {
@@ -840,12 +1293,17 @@ public class MetadataService {
                                     }
                                 }
                             }
+
                             if (changed) {
-                                try (PreparedStatement del = conn.prepareStatement("DELETE FROM columns WHERE object_name=?")) {
-                                    del.setString(1, objectName);
+                                try (PreparedStatement del = conn.prepareStatement(
+                                        "DELETE FROM columns WHERE schema_name=? AND object_name=?")) {
+                                    del.setString(1, schema);
+                                    del.setString(2, objectName);
                                     del.executeUpdate();
                                 }
-                                try (PreparedStatement ins = conn.prepareStatement("INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
+
+                                try (PreparedStatement ins = conn.prepareStatement(
+                                        "INSERT INTO columns(schema_name, object_name, column_name, sort_no) VALUES(?,?,?,?)")) {
                                     int i = 0;
                                     for (RemoteColumn col : columns) {
                                         ins.setString(1, col.schema_name);
@@ -856,32 +1314,45 @@ public class MetadataService {
                                     }
                                     ins.executeBatch();
                                 }
+
                                 String colsHash = computeColumnsHash(columns);
                                 snapshotPs.setString(1, objectName);
                                 snapshotPs.setString(2, colsHash);
                                 snapshotPs.setLong(3, System.currentTimeMillis());
                                 snapshotPs.executeUpdate();
                             }
+
                             conn.releaseSavepoint(sp);
                             conn.commit();
                         } catch (Exception ex) {
-                            try { conn.rollback(sp); } catch (Exception ignore) {}
+                            try {
+                                conn.rollback(sp);
+                            } catch (Exception ignore) {}
                             throw ex;
                         } finally {
-                            try { if (auto) conn.setAutoCommit(true); } catch (Exception ignore) {}
+                            try {
+                                if (auto) conn.setAutoCommit(true);
+                            } catch (Exception ignore) {}
                         }
                     }
                 }
-                return;
+
+                return columns.size();
             } catch (Exception e) {
                 if (attempts >= 3) {
                     log.error("更新字段失败: {}", objectName, e);
                     OperationLog.log("更新字段失败: " + objectName + " | " + e.getMessage());
                 } else {
-                    try { Thread.sleep(300L * attempts); } catch (InterruptedException ignored) {}
+                    try {
+                        Thread.sleep(300L * attempts);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
             }
         }
+
+        return 0;
     }
 
     private boolean isTableOrView(String objectName) {
@@ -919,11 +1390,14 @@ public class MetadataService {
     public List<SuggestionItem> suggest(String token, SuggestionContext context, int limit) {
         String likePattern = toLikePattern(token);
         if (likePattern == null) return List.of();
+        int columnLimit = (context.type() == SuggestionType.COLUMN && context.tableHint() != null)
+                ? Integer.MAX_VALUE
+                : limit;
         return switch (context.type()) {
             case TABLE_OR_VIEW -> queryObjects(likePattern, Set.of("table", "view"), limit);
             case FUNCTION -> queryObjects(likePattern, Set.of("function"), limit);
             case PROCEDURE -> queryObjects(likePattern, Set.of("procedure"), limit);
-            case COLUMN -> queryColumns(likePattern, context.tableHint(), context.scopedTables(), limit);
+            case COLUMN -> queryColumns(likePattern, context.tableHint(), context.scopedTables(), columnLimit);
         };
     }
 
@@ -941,16 +1415,14 @@ public class MetadataService {
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             int idx = 1;
-            for (String type : types) {
-                ps.setString(idx++, type);
-            }
+            for (String type : types) ps.setString(idx++, type);
             ps.setString(idx++, likeSql);
             ps.setInt(idx, limit);
+
             try (ResultSet rs = ps.executeQuery()) {
                 List<SuggestionItem> items = new ArrayList<>();
                 while (rs.next()) {
-                    items.add(new SuggestionItem(rs.getString("object_name"), rs.getString("object_type"), null,
-                            rs.getInt("use_count")));
+                    items.add(new SuggestionItem(rs.getString("object_name"), rs.getString("object_type"), null, rs.getInt("use_count")));
                 }
                 return items;
             }
@@ -963,29 +1435,33 @@ public class MetadataService {
     private List<SuggestionItem> queryColumns(String likeSql, String tableHint, List<String> scopedTables, int limit) {
         StringBuilder sql = new StringBuilder("SELECT column_name, object_name, sort_no, use_count FROM columns WHERE lower(column_name) LIKE ?");
         List<String> tables = scopedTables == null ? List.of() : scopedTables.stream().filter(Objects::nonNull).distinct().toList();
+
         if (tableHint != null && !tableHint.isBlank()) {
             sql.append(" AND object_name = ?");
         } else if (!tables.isEmpty()) {
-            sql.append(" AND object_name IN (" + tables.stream().map(t -> "?").collect(Collectors.joining(",")) + ")");
+            sql.append(" AND object_name IN (").append(tables.stream().map(t -> "?").collect(Collectors.joining(","))).append(")");
         }
+
         sql.append(" ORDER BY sort_no ASC, use_count DESC, column_name ASC LIMIT ?");
+
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql.toString())) {
+
             int idx = 1;
             ps.setString(idx++, likeSql);
+
             if (tableHint != null && !tableHint.isBlank()) {
                 ps.setString(idx++, tableHint);
             } else {
-                for (String t : tables) {
-                    ps.setString(idx++, t);
-                }
+                for (String t : tables) ps.setString(idx++, t);
             }
+
             ps.setInt(idx, limit);
+
             try (ResultSet rs = ps.executeQuery()) {
                 List<SuggestionItem> items = new ArrayList<>();
                 while (rs.next()) {
-                    items.add(new SuggestionItem(rs.getString("column_name"), "column", rs.getString("object_name"),
-                            rs.getInt("use_count")));
+                    items.add(new SuggestionItem(rs.getString("column_name"), "column", rs.getString("object_name"), rs.getInt("use_count")));
                 }
                 return items;
             }
@@ -1001,19 +1477,20 @@ public class MetadataService {
     public List<TableEntry> listTables(String keyword) {
         String like = (keyword == null || keyword.isBlank()) ? "%" : toLikePattern(keyword);
         if (like == null) like = "%";
+
         String sql = "SELECT object_name, object_type FROM objects WHERE object_type IN ('table','view')" +
-                ("%".equals(like) ? "" : " AND lower(object_name) LIKE ?") + " ORDER BY object_name";
+                ("%".equals(like) ? "" : " AND lower(object_name) LIKE ?") +
+                " ORDER BY object_name";
+
         try (Connection conn = sqliteManager.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (!"%".equals(like)) {
-                ps.setString(1, like);
-            }
+
+            if (!"%".equals(like)) ps.setString(1, like);
+
             List<TableEntry> list = new ArrayList<>();
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
-                    String name = rs.getString("object_name");
-                    String type = rs.getString("object_type");
-                    list.add(new TableEntry(name, type));
+                    list.add(new TableEntry(rs.getString("object_name"), rs.getString("object_type")));
                 }
             }
             return list;
@@ -1023,15 +1500,51 @@ public class MetadataService {
         }
     }
 
+    public List<TableEntry> listRoutines(String keyword, String type) {
+        String like = (keyword == null || keyword.isBlank()) ? "%" : toLikePattern(keyword);
+        if (like == null) like = "%";
+        List<String> types = new ArrayList<>();
+        if (type == null || type.isBlank()) {
+            types.add("function");
+            types.add("procedure");
+        } else {
+            types.add(type.toLowerCase());
+        }
+
+        String placeholders = types.stream().map(t -> "?").collect(java.util.stream.Collectors.joining(","));
+        String sql = "SELECT object_name, object_type FROM objects WHERE object_type IN (" + placeholders + ")" +
+                ("%".equals(like) ? "" : " AND lower(object_name) LIKE ?") +
+                " ORDER BY object_name";
+
+        try (Connection conn = sqliteManager.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            int idx = 1;
+            for (String t : types) {
+                ps.setString(idx++, t);
+            }
+            if (!"%".equals(like)) ps.setString(idx, like);
+
+            List<TableEntry> list = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    list.add(new TableEntry(rs.getString("object_name"), rs.getString("object_type")));
+                }
+            }
+            return list;
+        } catch (Exception e) {
+            log.error("查询 routine 浏览器数据失败", e);
+            return List.of();
+        }
+    }
+
     public List<String> loadColumnsFromCache(String tableName) {
         try (Connection conn = sqliteManager.getConnection();
-             PreparedStatement ps = conn.prepareStatement("SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no ASC, column_name ASC")) {
+             PreparedStatement ps = conn.prepareStatement(
+                     "SELECT column_name FROM columns WHERE object_name=? ORDER BY sort_no ASC, column_name ASC")) {
             ps.setString(1, tableName);
             try (ResultSet rs = ps.executeQuery()) {
                 List<String> cols = new ArrayList<>();
-                while (rs.next()) {
-                    cols.add(rs.getString(1));
-                }
+                while (rs.next()) cols.add(rs.getString(1));
                 return cols;
             }
         } catch (Exception e) {
@@ -1090,7 +1603,8 @@ public class MetadataService {
         String is_nullable;
         String column_default;
 
-        RemoteColumn(String schema_name, String object_name, String column_name, String data_type, int ordinal_position, String is_nullable, String column_default) {
+        RemoteColumn(String schema_name, String object_name, String column_name, String data_type,
+                     int ordinal_position, String is_nullable, String column_default) {
             this.schema_name = schema_name;
             this.object_name = object_name;
             this.column_name = column_name;

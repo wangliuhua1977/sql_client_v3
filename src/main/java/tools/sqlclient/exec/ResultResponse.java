@@ -1,19 +1,29 @@
 package tools.sqlclient.exec;
 
 import com.google.gson.JsonArray;
+import com.google.gson.annotations.SerializedName;
 
 import java.util.List;
+import java.util.Map;
 
 public class ResultResponse {
     private String jobId;
     private Boolean success;
     private String status;
     private String code;
+    private Long submittedAt;
     private Boolean resultAvailable;
     private Boolean archived;
+    private String archiveStatus;
     private String archiveError;
+    private Long archivedAt;
     private Long expiresAt;
     private Long lastAccessAt;
+    private Long startedAt;
+    private Long finishedAt;
+    private String dbUser;
+    private String label;
+    private String sqlSummary;
     private Boolean overloaded;
     private ThreadPoolSnapshot threadPool;
     private Integer progressPercent;
@@ -21,6 +31,8 @@ public class ResultResponse {
     private Integer rowsAffected;
     private Long queuedAt;
     private Long queueDelayMillis;
+    private Integer offset;
+    private Integer limit;
     private Integer returnedRowCount;
     private Integer actualRowCount;
     private Integer maxVisibleRows;
@@ -34,13 +46,22 @@ public class ResultResponse {
     private Integer pageSize;
     private Boolean hasNext;
     private Boolean truncated;
+    private DatabaseErrorInfo error;
     private String message;
+    private String errorMessage;
+    private Integer position;
+    @SerializedName("Position")
+    private Integer positionUpper;
     private String note;
     private List<String> notices;
     private List<String> warnings;
     private List<String> columns;
+    private List<String> columnExpressions;
+    private List<ColumnMeta> columnMetas;
     private List<java.util.Map<String, String>> rowMaps;
+    private List<Map<String, Object>> resultRows;
     private JsonArray rawRows;
+    private Integer totalRows;
 
     public String getJobId() {
         return jobId;
@@ -58,6 +79,10 @@ public class ResultResponse {
         return code;
     }
 
+    public Long getSubmittedAt() {
+        return submittedAt;
+    }
+
     public Boolean getResultAvailable() {
         return resultAvailable;
     }
@@ -66,8 +91,16 @@ public class ResultResponse {
         return archived;
     }
 
+    public String getArchiveStatus() {
+        return archiveStatus;
+    }
+
     public String getArchiveError() {
         return archiveError;
+    }
+
+    public Long getArchivedAt() {
+        return archivedAt;
     }
 
     public Long getExpiresAt() {
@@ -76,6 +109,26 @@ public class ResultResponse {
 
     public Long getLastAccessAt() {
         return lastAccessAt;
+    }
+
+    public Long getStartedAt() {
+        return startedAt;
+    }
+
+    public Long getFinishedAt() {
+        return finishedAt;
+    }
+
+    public String getDbUser() {
+        return dbUser;
+    }
+
+    public String getLabel() {
+        return label;
+    }
+
+    public String getSqlSummary() {
+        return sqlSummary;
     }
 
     public Boolean getOverloaded() {
@@ -104,6 +157,14 @@ public class ResultResponse {
 
     public Long getQueueDelayMillis() {
         return queueDelayMillis;
+    }
+
+    public Integer getOffset() {
+        return offset;
+    }
+
+    public Integer getLimit() {
+        return limit;
     }
 
     public Integer getReturnedRowCount() {
@@ -162,6 +223,22 @@ public class ResultResponse {
         return message;
     }
 
+    public DatabaseErrorInfo getError() {
+        return error;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public Integer getPosition() {
+        return position;
+    }
+
+    public Integer getPositionUpper() {
+        return positionUpper;
+    }
+
     public String getNote() {
         return note;
     }
@@ -178,12 +255,28 @@ public class ResultResponse {
         return columns;
     }
 
+    public List<String> getColumnExpressions() {
+        return columnExpressions;
+    }
+
+    public List<ColumnMeta> getColumnMetas() {
+        return columnMetas;
+    }
+
     public List<java.util.Map<String, String>> getRowMaps() {
         return rowMaps;
     }
 
+    public List<Map<String, Object>> getResultRows() {
+        return resultRows;
+    }
+
     public JsonArray getRawRows() {
         return rawRows;
+    }
+
+    public Integer getTotalRows() {
+        return totalRows;
     }
 
     public void setJobId(String jobId) {
@@ -202,6 +295,10 @@ public class ResultResponse {
         this.code = code;
     }
 
+    public void setSubmittedAt(Long submittedAt) {
+        this.submittedAt = submittedAt;
+    }
+
     public void setResultAvailable(Boolean resultAvailable) {
         this.resultAvailable = resultAvailable;
     }
@@ -210,8 +307,16 @@ public class ResultResponse {
         this.archived = archived;
     }
 
+    public void setArchiveStatus(String archiveStatus) {
+        this.archiveStatus = archiveStatus;
+    }
+
     public void setArchiveError(String archiveError) {
         this.archiveError = archiveError;
+    }
+
+    public void setArchivedAt(Long archivedAt) {
+        this.archivedAt = archivedAt;
     }
 
     public void setExpiresAt(Long expiresAt) {
@@ -220,6 +325,26 @@ public class ResultResponse {
 
     public void setLastAccessAt(Long lastAccessAt) {
         this.lastAccessAt = lastAccessAt;
+    }
+
+    public void setStartedAt(Long startedAt) {
+        this.startedAt = startedAt;
+    }
+
+    public void setFinishedAt(Long finishedAt) {
+        this.finishedAt = finishedAt;
+    }
+
+    public void setDbUser(String dbUser) {
+        this.dbUser = dbUser;
+    }
+
+    public void setLabel(String label) {
+        this.label = label;
+    }
+
+    public void setSqlSummary(String sqlSummary) {
+        this.sqlSummary = sqlSummary;
     }
 
     public void setOverloaded(Boolean overloaded) {
@@ -248,6 +373,14 @@ public class ResultResponse {
 
     public void setQueueDelayMillis(Long queueDelayMillis) {
         this.queueDelayMillis = queueDelayMillis;
+    }
+
+    public void setOffset(Integer offset) {
+        this.offset = offset;
+    }
+
+    public void setLimit(Integer limit) {
+        this.limit = limit;
     }
 
     public void setReturnedRowCount(Integer returnedRowCount) {
@@ -306,6 +439,22 @@ public class ResultResponse {
         this.message = message;
     }
 
+    public void setError(DatabaseErrorInfo error) {
+        this.error = error;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
+    public void setPosition(Integer position) {
+        this.position = position;
+    }
+
+    public void setPositionUpper(Integer positionUpper) {
+        this.positionUpper = positionUpper;
+    }
+
     public void setNote(String note) {
         this.note = note;
     }
@@ -322,11 +471,27 @@ public class ResultResponse {
         this.columns = columns;
     }
 
+    public void setColumnExpressions(List<String> columnExpressions) {
+        this.columnExpressions = columnExpressions;
+    }
+
+    public void setColumnMetas(List<ColumnMeta> columnMetas) {
+        this.columnMetas = columnMetas;
+    }
+
     public void setRowMaps(List<java.util.Map<String, String>> rowMaps) {
         this.rowMaps = rowMaps;
     }
 
+    public void setResultRows(List<Map<String, Object>> resultRows) {
+        this.resultRows = resultRows;
+    }
+
     public void setRawRows(JsonArray rawRows) {
         this.rawRows = rawRows;
+    }
+
+    public void setTotalRows(Integer totalRows) {
+        this.totalRows = totalRows;
     }
 }

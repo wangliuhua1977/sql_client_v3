@@ -9,13 +9,18 @@ public class AsyncJobStatus {
     private final String status;
     private final Integer progressPercent;
     private final Long elapsedMillis;
+    private final Long submittedAt;
+    private final Long startedAt;
+    private final Long finishedAt;
     private final String label;
     private final String sqlSummary;
+    private final String dbUser;
     private final Integer rowsAffected;
     private final Integer returnedRowCount;
     private final Boolean hasResultSet;
     private final Integer actualRowCount;
     private final String message;
+    private final DatabaseErrorInfo error;
     private final Long queuedAt;
     private final Long queueDelayMillis;
     private final Boolean overloaded;
@@ -26,13 +31,18 @@ public class AsyncJobStatus {
                           String status,
                           Integer progressPercent,
                           Long elapsedMillis,
+                          Long submittedAt,
+                          Long startedAt,
+                          Long finishedAt,
                           String label,
                           String sqlSummary,
+                          String dbUser,
                           Integer rowsAffected,
                           Integer returnedRowCount,
                           Boolean hasResultSet,
                           Integer actualRowCount,
                           String message,
+                          DatabaseErrorInfo error,
                           Long queuedAt,
                           Long queueDelayMillis,
                           Boolean overloaded,
@@ -42,13 +52,18 @@ public class AsyncJobStatus {
         this.status = status;
         this.progressPercent = progressPercent;
         this.elapsedMillis = elapsedMillis;
+        this.submittedAt = submittedAt;
+        this.startedAt = startedAt;
+        this.finishedAt = finishedAt;
         this.label = label;
         this.sqlSummary = sqlSummary;
+        this.dbUser = dbUser;
         this.rowsAffected = rowsAffected;
         this.returnedRowCount = returnedRowCount;
         this.hasResultSet = hasResultSet;
         this.actualRowCount = actualRowCount;
         this.message = message;
+        this.error = error;
         this.queuedAt = queuedAt;
         this.queueDelayMillis = queueDelayMillis;
         this.overloaded = overloaded;
@@ -75,12 +90,28 @@ public class AsyncJobStatus {
         return elapsedMillis;
     }
 
+    public Long getSubmittedAt() {
+        return submittedAt;
+    }
+
+    public Long getStartedAt() {
+        return startedAt;
+    }
+
+    public Long getFinishedAt() {
+        return finishedAt;
+    }
+
     public String getLabel() {
         return label;
     }
 
     public String getSqlSummary() {
         return sqlSummary;
+    }
+
+    public String getDbUser() {
+        return dbUser;
     }
 
     public Integer getRowsAffected() {
@@ -101,6 +132,10 @@ public class AsyncJobStatus {
 
     public String getMessage() {
         return message;
+    }
+
+    public DatabaseErrorInfo getError() {
+        return error;
     }
 
     public Long getQueuedAt() {

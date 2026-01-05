@@ -27,7 +27,9 @@ public class SqlExecResult {
     private final Integer actualRowCount;
     private final Integer maxVisibleRows;
     private final Integer maxTotalRows;
+    private final Integer totalRows;
     private final Boolean hasResultSet;
+    private final DatabaseErrorInfo error;
     private final Integer page;
     private final Integer pageSize;
     private final Boolean hasNext;
@@ -71,6 +73,7 @@ public class SqlExecResult {
                          Integer actualRowCount,
                          Integer maxVisibleRows,
                          Integer maxTotalRows,
+                         Integer totalRows,
                          Boolean hasResultSet,
                          Integer page,
                          Integer pageSize,
@@ -141,6 +144,7 @@ public class SqlExecResult {
                          Integer actualRowCount,
                          Integer maxVisibleRows,
                          Integer maxTotalRows,
+                         Integer totalRows,
                          Boolean hasResultSet,
                          Integer page,
                          Integer pageSize,
@@ -165,6 +169,7 @@ public class SqlExecResult {
                 .actualRowCount(actualRowCount)
                 .maxVisibleRows(maxVisibleRows)
                 .maxTotalRows(maxTotalRows)
+                .totalRows(totalRows)
                 .hasResultSet(hasResultSet)
                 .page(page)
                 .pageSize(pageSize)
@@ -179,7 +184,9 @@ public class SqlExecResult {
         this.columnDefs = defaultList(builder.columnDefs);
         this.rows = defaultList(builder.rows);
         this.rowMaps = defaultList(builder.rowMaps);
-        this.rowsCount = builder.rowsCount != null ? builder.rowsCount : deriveRowCount();
+        this.rowsCount = builder.rowsCount != null
+                ? builder.rowsCount
+                : (builder.totalRows != null ? builder.totalRows : deriveRowCount());
         this.success = builder.success != null ? builder.success : true;
         this.message = builder.message;
         this.jobId = builder.jobId;
@@ -192,7 +199,9 @@ public class SqlExecResult {
         this.actualRowCount = builder.actualRowCount;
         this.maxVisibleRows = builder.maxVisibleRows;
         this.maxTotalRows = builder.maxTotalRows;
+        this.totalRows = builder.totalRows != null ? builder.totalRows : builder.rowsCount;
         this.hasResultSet = builder.hasResultSet != null ? builder.hasResultSet : guessHasResultSet();
+        this.error = builder.error;
         this.page = builder.page;
         this.pageSize = builder.pageSize;
         this.hasNext = builder.hasNext;
@@ -255,7 +264,9 @@ public class SqlExecResult {
         private Integer actualRowCount;
         private Integer maxVisibleRows;
         private Integer maxTotalRows;
+        private Integer totalRows;
         private Boolean hasResultSet;
+        private DatabaseErrorInfo error;
         private Integer page;
         private Integer pageSize;
         private Boolean hasNext;
@@ -364,8 +375,18 @@ public class SqlExecResult {
             return this;
         }
 
+        public Builder totalRows(Integer totalRows) {
+            this.totalRows = totalRows;
+            return this;
+        }
+
         public Builder hasResultSet(Boolean hasResultSet) {
             this.hasResultSet = hasResultSet;
+            return this;
+        }
+
+        public Builder error(DatabaseErrorInfo error) {
+            this.error = error;
             return this;
         }
 
@@ -511,8 +532,16 @@ public class SqlExecResult {
         return maxTotalRows;
     }
 
+    public Integer getTotalRows() {
+        return totalRows;
+    }
+
     public Boolean getHasResultSet() {
         return hasResultSet;
+    }
+
+    public DatabaseErrorInfo getError() {
+        return error;
     }
 
     public Integer getPage() {

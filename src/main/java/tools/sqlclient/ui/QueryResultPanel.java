@@ -2,14 +2,23 @@ package tools.sqlclient.ui;
 
 import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
+import tools.sqlclient.exec.DatabaseErrorInfo;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlTopLevelClassifier;
 
+import tools.sqlclient.ui.table.TableCopySupport;
+
 import javax.swing.*;
-import javax.swing.border.TitledBorder;
+import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.JTableHeader;
 import java.awt.*;
+import java.awt.event.InputEvent;
+import java.awt.event.KeyEvent;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.util.Arrays;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,26 +47,62 @@ public class QueryResultPanel extends JPanel {
     private final JPanel cards = new JPanel(new CardLayout());
     private static final String CARD_TABLE = "table";
     private static final String CARD_INFO = "info";
+    private final Color borderColor = new Color(228, 231, 236);
     private final DefaultTableCellRenderer stripedRenderer = new DefaultTableCellRenderer() {
-        private final Color even = new Color(250, 252, 255);
-        private final Color odd = Color.WHITE;
+        private final Color even = new Color(248, 251, 255);
+        private final Color odd = new Color(244, 247, 252);
+        private final Color selection = new Color(0xDCE6F5);
+        private final Color selectionText = new Color(0x0F1F3A);
 
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
-            Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
-            if (!isSelected) {
-                c.setBackground(row % 2 == 0 ? even : odd);
+            String text = value == null ? "" : value.toString();
+            boolean multiline = text.contains("\n");
+            if (multiline) {
+                JTextArea area = new JTextArea(text);
+                area.setLineWrap(true);
+                area.setWrapStyleWord(true);
+                area.setOpaque(true);
+                area.setBorder(new EmptyBorder(4, 8, 4, 8));
+                area.setFont(table.getFont());
+                if (isSelected) {
+                    area.setBackground(selection);
+                    area.setForeground(selectionText);
+                } else {
+                    area.setBackground(row % 2 == 0 ? even : odd);
+                    area.setForeground(new Color(0x1F2933));
+                }
+                int preferredHeight = Math.max(table.getRowHeight(), area.getPreferredSize().height + 4);
+                if (table.getRowHeight(row) < preferredHeight) {
+                    table.setRowHeight(row, preferredHeight);
+                }
+                return area;
             }
-            return c;
+
+            JLabel label = (JLabel) super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
+            label.setText(text);
+            label.setHorizontalAlignment(SwingConstants.LEFT);
+            label.setBorder(new EmptyBorder(0, 8, 0, 8));
+            if (isSelected) {
+                label.setBackground(selection);
+                label.setForeground(selectionText);
+            } else {
+                label.setBackground(row % 2 == 0 ? even : odd);
+                label.setForeground(new Color(0x1F2933));
+            }
+            return label;
         }
     };
 
     public QueryResultPanel(SqlExecResult result, String titleHint) {
         super(new BorderLayout());
-        setBorder(new TitledBorder("结果集"));
+        setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor),
+                new EmptyBorder(8, 8, 8, 8)));
         setToolTipText(titleHint);
 
         JPanel header = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
+        header.setBorder(new EmptyBorder(0, 0, 4, 0));
         header.add(countLabel);
         header.add(statusLabel);
         header.add(elapsedLabel);
@@ -68,33 +113,42 @@ public class QueryResultPanel extends JPanel {
         add(header, BorderLayout.NORTH);
 
         JPanel messagePanel = new JPanel(new BorderLayout());
-        messagePanel.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+        messagePanel.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, borderColor));
         messagePanel.add(messageLabel, BorderLayout.CENTER);
         add(messagePanel, BorderLayout.SOUTH);
 
         table.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        table.setShowGrid(true);
-        table.setShowHorizontalLines(true);
-        table.setShowVerticalLines(true);
-        table.setGridColor(new Color(180, 186, 198));
-        table.setIntercellSpacing(new Dimension(1, 1));
+        table.setShowGrid(false);
+        table.setIntercellSpacing(new Dimension(0, 0));
         table.setRowHeight(24);
+        table.setSelectionBackground(new Color(0xDCE6F5));
+        table.setSelectionForeground(new Color(0x0F1F3A));
         table.setFillsViewportHeight(true);
-        table.setBorder(BorderFactory.createLineBorder(new Color(180, 186, 198)));
+        table.setBorder(BorderFactory.createLineBorder(borderColor));
+        installCopySupport();
 
-        Color headerBg = new Color(240, 244, 250);
-        table.getTableHeader().setBackground(headerBg);
-        table.getTableHeader().setOpaque(true);
-        table.getTableHeader().setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(180, 186, 198)));
+        JTableHeader tableHeader = table.getTableHeader();
+        Color headerBg = new Color(245, 247, 250);
+        tableHeader.setBackground(headerBg);
+        tableHeader.setFont(tableHeader.getFont().deriveFont(Font.BOLD));
+        tableHeader.setOpaque(true);
+        tableHeader.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, borderColor));
 
         JScrollPane scrollPane = new JScrollPane(table);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
         scrollPane.getViewport().setBackground(Color.WHITE);
+        scrollPane.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor));
 
         infoTable.setFillsViewportHeight(true);
         infoTable.setRowHeight(24);
+        infoTable.setShowGrid(false);
+        infoTable.setIntercellSpacing(new Dimension(0, 0));
+        infoTable.setSelectionBackground(new Color(0xDCE6F5));
+        infoTable.setSelectionForeground(new Color(0x0F1F3A));
+        infoTable.setDefaultRenderer(Object.class, stripedRenderer);
         JScrollPane infoScroll = new JScrollPane(infoTable);
         infoScroll.getViewport().setBackground(Color.WHITE);
+        infoScroll.setBorder(BorderFactory.createMatteBorder(1, 1, 1, 1, borderColor));
 
         cards.add(scrollPane, CARD_TABLE);
         cards.add(infoScroll, CARD_INFO);
@@ -102,6 +156,9 @@ public class QueryResultPanel extends JPanel {
 
         render(result);
     }
+
+
+
 
     public static QueryResultPanel pending(String sqlText) {
         List<String> cols = List.of("消息");
@@ -129,10 +186,15 @@ public class QueryResultPanel extends JPanel {
         if (status.getMessage() != null) {
             messageLabel.setText(status.getMessage());
         }
+        setBusy(!isTerminalStatus(status.getStatus()));
     }
 
     public void render(SqlExecResult result) {
         if (result == null) {
+            return;
+        }
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> render(result));
             return;
         }
         setJobStatus(result.getJobId(), result.getStatus(), result.getProgressPercent(),
@@ -143,7 +205,14 @@ public class QueryResultPanel extends JPanel {
         } else if (result.getNote() != null && !result.getNote().isBlank()) {
             messageLabel.setText(result.getNote());
         }
-        countLabel.setText("记录数 " + result.getRowsCount() + " 条");
+        if (Boolean.TRUE.equals(result.getTruncated())) {
+            String suffix = "结果已截断(" + (result.getMaxVisibleRows() != null ? result.getMaxVisibleRows() : "1000") + ")";
+            if (messageLabel.getText() != null && !messageLabel.getText().isBlank()) {
+                messageLabel.setText(messageLabel.getText() + " | " + suffix);
+            } else {
+                messageLabel.setText(suffix);
+            }
+        }
         boolean renderTable = shouldRenderResultSet(result);
         if (renderTable) {
             List<ColumnDef> defs = resolveColumns(result);
@@ -159,10 +228,24 @@ public class QueryResultPanel extends JPanel {
             renderInfo(result);
             switchCard(CARD_INFO);
         }
+        int count = result.getTotalRows() != null ? result.getTotalRows() : result.getRowsCount();
+        if (count <= 0) {
+            countLabel.setText("返回 0 条记录");
+        } else {
+            countLabel.setText("记录数 " + count + " 条");
+        }
+        setBusy(!isTerminalStatus(result.getStatus()));
     }
 
     public void fitColumns() {
         resizeColumns();
+    }
+
+    public void focusTable() {
+        table.requestFocusInWindow();
+        if (table.getRowCount() > 0 && table.getSelectedRowCount() == 0) {
+            table.setRowSelectionInterval(0, 0);
+        }
     }
 
     public void resetColumns() {
@@ -178,20 +261,68 @@ public class QueryResultPanel extends JPanel {
         return model.getColumnCount();
     }
 
-    public void renderError(String message) {
-        List<ColumnDef> defs = List.of(new ColumnDef("error#1", "错误", "错误"));
-        List<List<String>> rows = List.of(List.of(message));
+    public void renderError(DatabaseErrorInfo errorInfo, String message, Integer statementIndex, String sqlFragment) {
+        String displayMessage = (message == null || message.isBlank()) ? "执行失败" : message;
+        List<ColumnDef> defs = List.of(
+                new ColumnDef("field", "字段", "字段"),
+                new ColumnDef("value", "内容", "内容")
+        );
+        List<List<String>> rows = new ArrayList<>();
+        if (statementIndex != null) {
+            rows.add(List.of("语句序号", "第 " + statementIndex + " 条"));
+        }
+        if (sqlFragment != null && !sqlFragment.isBlank()) {
+            rows.add(List.of("SQL 片段", abbreviate(sqlFragment)));
+        }
+        rows.add(List.of("raw", displayMessage));
+        if (errorInfo != null) {
+            addIfPresent(rows, "message", errorInfo.getMessage());
+            addIfPresent(rows, "sqlState", errorInfo.getSqlState());
+            addIfPresent(rows, "position", errorInfo.getPosition());
+            addIfPresent(rows, "detail", errorInfo.getDetail());
+            addIfPresent(rows, "hint", errorInfo.getHint());
+            addIfPresent(rows, "where", errorInfo.getWhere());
+            addIfPresent(rows, "schema", errorInfo.getSchema());
+            addIfPresent(rows, "table", errorInfo.getTable());
+            addIfPresent(rows, "column", errorInfo.getColumn());
+            addIfPresent(rows, "datatype", errorInfo.getDatatype());
+            addIfPresent(rows, "constraint", errorInfo.getConstraint());
+            addIfPresent(rows, "file", errorInfo.getFile());
+            addIfPresent(rows, "line", errorInfo.getLine());
+            addIfPresent(rows, "routine", errorInfo.getRoutine());
+        }
         model.setData(defs, rows);
         applyColumnIdentifiers(defs);
-        messageLabel.setText(message);
+        messageLabel.setText(displayMessage);
         setJobStatus(null, "FAILED", 100, null);
         applyStripedRenderer();
         table.revalidate();
         table.repaint();
         resizeColumns();
+        setBusy(false);
+    }
+
+    private void addIfPresent(List<List<String>> rows, String field, Object value) {
+        if (value == null) {
+            return;
+        }
+        String text = String.valueOf(value);
+        if (text.isBlank()) {
+            return;
+        }
+        rows.add(List.of(field, text));
+    }
+
+    private String abbreviate(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.strip();
+        return trimmed.length() > 200 ? trimmed.substring(0, 200) + "..." : trimmed;
     }
 
     private void applyStripedRenderer() {
+        table.setDefaultRenderer(Object.class, stripedRenderer);
         for (int i = 0; i < table.getColumnModel().getColumnCount(); i++) {
             table.getColumnModel().getColumn(i).setCellRenderer(stripedRenderer);
         }
@@ -304,5 +435,135 @@ public class QueryResultPanel extends JPanel {
             seq++;
         }
         return defs;
+    }
+
+    public void setBusy(boolean busy) {
+        SwingUtilities.invokeLater(() -> {
+            progressBar.setVisible(busy);
+            progressBar.setIndeterminate(busy);
+            if (!busy) {
+                progressBar.setValue(0);
+                progressBar.setString("-");
+            }
+        });
+    }
+
+    private boolean isTerminalStatus(String status) {
+        if (status == null) {
+            return true;
+        }
+        return switch (status.toUpperCase()) {
+            case "SUCCEEDED", "FAILED", "CANCELLED", "FINISHED", "COMPLETED", "ERROR" -> true;
+            default -> false;
+        };
+    }
+
+    private void installCopySupport() {
+        table.setCellSelectionEnabled(true);
+        table.setRowSelectionAllowed(true);
+        table.setColumnSelectionAllowed(true);
+        table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        table.getColumnModel().getSelectionModel().setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+
+        InputMap inputMap = table.getInputMap(JComponent.WHEN_FOCUSED);
+        ActionMap actionMap = table.getActionMap();
+        inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_C, InputEvent.CTRL_DOWN_MASK), "copy-cells");
+        actionMap.put("copy-cells", new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                copySelectedCells();
+            }
+        });
+
+        JPopupMenu popupMenu = new JPopupMenu();
+        JMenuItem copyCellsItem = new JMenuItem("复制选中单元格");
+        JMenuItem copyColumnsItem = new JMenuItem("复制选中列内容");
+        JMenuItem copyColumnNamesItem = new JMenuItem("复制选中列名（逗号分隔）");
+
+        copyCellsItem.addActionListener(e -> copySelectedCells());
+        copyColumnsItem.addActionListener(e -> copySelectedColumns());
+        copyColumnNamesItem.addActionListener(e -> copySelectedColumnNames());
+
+        popupMenu.add(copyCellsItem);
+        popupMenu.add(copyColumnsItem);
+        popupMenu.add(copyColumnNamesItem);
+
+        table.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                maybeShowMenu(e);
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent e) {
+                maybeShowMenu(e);
+            }
+
+            private void maybeShowMenu(MouseEvent e) {
+                if (e.isPopupTrigger()) {
+                    ensureLeadSelection(e);
+                    boolean hasData = table.getRowCount() > 0 && table.getColumnCount() > 0;
+                    boolean hasCellSelection = hasData && table.getSelectedRowCount() > 0 && table.getSelectedColumnCount() > 0;
+                    boolean hasColumns = hasData && !resolveTargetColumns().isEmpty();
+                    copyCellsItem.setEnabled(hasCellSelection);
+                    copyColumnsItem.setEnabled(hasColumns);
+                    copyColumnNamesItem.setEnabled(hasColumns);
+                    popupMenu.show(table, e.getX(), e.getY());
+                }
+            }
+
+            private void ensureLeadSelection(MouseEvent e) {
+                int row = table.rowAtPoint(e.getPoint());
+                int col = table.columnAtPoint(e.getPoint());
+                if (row >= 0 && col >= 0 && !table.isCellSelected(row, col)) {
+                    table.changeSelection(row, col, false, false);
+                }
+            }
+        });
+
+        table.setComponentPopupMenu(popupMenu);
+    }
+
+    private void copySelectedCells() {
+        String text = TableCopySupport.buildCellSelectionTsv(table);
+        if (!text.isEmpty()) {
+            TableCopySupport.copyToClipboard(text);
+        }
+    }
+
+
+    private void copySelectedColumns() {
+        java.util.List<Integer> cols = resolveTargetColumns();
+        if (cols.isEmpty()) {
+            return;
+        }
+        String text = TableCopySupport.buildSelectedColumnValuesTsv(table, cols);
+        TableCopySupport.copyToClipboard(text);
+    }
+
+    private void copySelectedColumnNames() {
+        java.util.List<Integer> cols = resolveTargetColumns();
+        if (cols.isEmpty()) {
+            return;
+        }
+        String text = TableCopySupport.buildSelectedColumnNamesCsv(table, cols);
+        if (!text.isEmpty()) {
+            TableCopySupport.copyToClipboard(text);
+        }
+    }
+
+    private java.util.List<Integer> resolveTargetColumns() {
+        int[] selected = table.getSelectedColumns();
+        if (selected != null && selected.length > 0) {
+            return Arrays.stream(selected).sorted().boxed().toList();
+        }
+        int lead = table.getSelectedColumn();
+        if (lead < 0) {
+            lead = table.getColumnModel().getSelectionModel().getLeadSelectionIndex();
+        }
+        if (lead >= 0) {
+            return java.util.List.of(lead);
+        }
+        return java.util.List.of();
     }
 }
