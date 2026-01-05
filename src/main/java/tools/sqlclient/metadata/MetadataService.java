@@ -598,7 +598,9 @@ public class MetadataService {
         }
         if ((affectedRows == null || affectedRows < 0) && resp.getCommandTag() != null) {
             OptionalInt parsed = CommandTagParser.parseAffectedRows(resp.getCommandTag());
-            if (parsed.isPresent()) affectedRows = parsed.getAsInt();
+            if (parsed.isPresent()) {
+                affectedRows = parsed.getAsInt();
+            }
         }
 
         String message = pickMessage(resp);
