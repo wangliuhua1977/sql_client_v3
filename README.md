@@ -587,13 +587,25 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 - 表头规范化：去空白、转小写、非 `[a-z0-9_]` 替换为 `_`，数字开头前缀 `c_`，常见保留字前缀 `c_`，重名追加 `_2/_3...`。
 
 ### 类型推断规则
-- 采样命中率≥98% 时优先判定：boolean → integer → bigint → numeric(p,s)（p/s 基于最大精度/小数位，p>38 自动降级文本）→ date → timestamp → uuid；JSONB 需 ≥95% 行以 `{`/`[` 开头。
-- 其余使用 `varchar(255/500)` 或 `text` 兜底。用户可在字段表中手动覆盖目标类型。
+- 采样命中率≥98% 时优先判定：boolean → integer(int4) → bigint(int8) → numeric（不带精度）→ date → timestamp → uuid；JSONB 需 ≥95% 行以 `{`/`[` 开头。
+- 其余使用 `varchar` 或 `text` 兜底；字段表仅允许选择上述无精度类型。若用户输入了 `numeric(10,2)` / `varchar(255)` 等，会自动规范化为无精度版本并在状态栏提示一次。
 
-### 导入执行与错误定位
-- 顺序：BEGIN → CREATE TABLE → 批量 INSERT → COMMIT。失败时 ROLLBACK，若表已创建则自动 DROP；错误消息透传 PG 返回的 raw/Position/SQLSTATE，并标注失败批次行号范围。
-- 值写入：按列勾选与目标类型生成 INSERT，空值写 NULL；数值/时间/布尔/UUID/JSONB 均使用 `CAST('value' AS type)` 明确报错位置。
-- 进度：进度条基于采样行数，批次插入时实时更新“已处理 N 行”；取消或异常均提示状态并停止后续批次。
+### 导入策略与执行
+- 导入策略下拉：自动适配（默认）、直接追加、清空插入、删除后重建。
+  - 自动适配：存在表时先拉取 information_schema.columns 判断列名与类型可否兼容（numeric/int4/int8 一组、varchar/text 一组、date/timestamp 允许互转），兼容则 TRUNCATE 再插入，否则 DROP+CREATE。
+  - 直接追加：仅 INSERT；若目标表不存在会降级为删除后重建并提示。
+  - 清空插入：存在表则 TRUNCATE+INSERT，不存在则 CREATE+INSERT。
+  - 删除后重建：无论是否存在均 DROP IF EXISTS 后 CREATE+INSERT。
+- 顺序：BEGIN → 策略处理（可 DROP/TRUNCATE/CREATE）→ 批量 INSERT → COMMIT。失败时 ROLLBACK，若本次新建则回收临时表；错误消息透传 PG 返回的 raw/Position/SQLSTATE，并标注失败批次行号范围。
+- 值写入：按列勾选与目标类型生成 INSERT，空值写 NULL；数值/时间/布尔/UUID/JSONB 均使用 `CAST('value' AS type)` 明确报错位置，始终显式列名避免列顺序差异。
+- 进度：进度条基于采样行数，批次插入时实时更新“已处理 N 行”；取消或异常均提示状态并停止后续批次，可直接修改策略/表名/映射后再次点击导入，无需重新粘贴。
+
+### 重试与重置
+- 导入失败后会保留临时文件、采样结果与字段映射，允许直接再次点击“导入”或调整策略/表名后重试。
+- 底部新增“重置”按钮：清空粘贴区与预览、删除临时文件、恢复默认表名与字段推断。仅在主动重置或关闭窗口时才清理临时文件。
+
+### 粘贴区预览
+- 粘贴区上方新增“粘贴内容预览（前20行）”只读区域，展示标准化对齐后的表头+前 19 行（已按 TSV 解析），与右侧 JTable 预览一致，避免 HTML/TSV 差异。
 
 ### 关键类与职责
 - `tools.sqlclient.ui.ExcelPasteImportDialog`：主对话框，负责剪贴板落盘、采样推断、预览渲染、字段设置、建表/插入及进度与取消处理。
