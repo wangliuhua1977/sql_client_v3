@@ -26,10 +26,12 @@ import javax.swing.SwingWorker;
 import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableColumn;
+import javax.swing.table.TableCellRenderer;
 import javax.swing.text.html.HTML;
 import javax.swing.text.html.HTMLEditorKit;
 import javax.swing.text.html.parser.ParserDelegator;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
@@ -55,6 +57,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -69,6 +72,9 @@ import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.exec.SqlExecutionException;
 import tools.sqlclient.exec.SqlExecutionService;
 import tools.sqlclient.util.OperationLog;
+
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 
 /**
  * 支持粘贴 Excel/TSV 内容并导入 PostgreSQL 的对话框。
@@ -85,7 +91,20 @@ public class ExcelPasteImportDialog extends JDialog {
     private final JTextArea pasteArea = new JTextArea();
     private final JTextArea pastePreviewArea = new JTextArea();
     private final JTable previewTable = new JTable();
-    private final JTable fieldTable = new JTable();
+    private final JTable fieldTable = new JTable() {
+        @Override
+        public java.awt.Component prepareRenderer(TableCellRenderer renderer, int row, int column) {
+            java.awt.Component c = super.prepareRenderer(renderer, row, column);
+            if (!isRowSelected(row)) {
+                if (invalidRows.contains(row)) {
+                    c.setBackground(new Color(255, 235, 235));
+                } else {
+                    c.setBackground(Color.WHITE);
+                }
+            }
+            return c;
+        }
+    };
     private final JLabel statusLabel = new JLabel("请粘贴包含表头的数据");
     private final JLabel progressText = new JLabel("等待粘贴");
     private final JProgressBar progressBar = new JProgressBar();
@@ -96,12 +115,16 @@ public class ExcelPasteImportDialog extends JDialog {
     private final JPanel fieldPanel = new JPanel(new BorderLayout());
     private final AtomicBoolean parsing = new AtomicBoolean(false);
     private final AtomicBoolean importing = new AtomicBoolean(false);
+    private final Set<Integer> invalidRows = new HashSet<>();
+    private final JButton importBtn = new JButton("导入");
     private Path tempFile;
     private List<ColumnMeta> columns = new ArrayList<>();
     private SwingWorker<?, ?> currentWorker;
+    private SwingWorker<?, ?> fullInferenceWorker;
     private int sampledTotalRows;
     private SampleResult lastSample;
     private boolean typeNormalizedNotified;
+    private boolean fullInferenceFinished;
 
     public ExcelPasteImportDialog(JFrame owner, SqlExecutionService service) {
         super(owner, "粘贴导入", true);
@@ -168,7 +191,7 @@ public class ExcelPasteImportDialog extends JDialog {
 
         fieldPanel.setVisible(false);
         fieldPanel.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
-        fieldTable.setModel(new DefaultTableModel(new Object[][]{}, new String[]{"导入", "源列", "目标字段名", "目标类型"}) {
+        fieldTable.setModel(new DefaultTableModel(new Object[][]{}, new String[]{"导入", "源列", "目标字段名", "目标类型", "来源"}) {
             @Override
             public Class<?> getColumnClass(int columnIndex) {
                 return switch (columnIndex) {
@@ -179,7 +202,7 @@ public class ExcelPasteImportDialog extends JDialog {
 
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column != 1;
+                return column != 1 && column != 4;
             }
         });
         fieldTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
@@ -207,9 +230,9 @@ public class ExcelPasteImportDialog extends JDialog {
 
         JPanel bottom = new JPanel(new BorderLayout());
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 8));
-        javax.swing.JButton importBtn = new javax.swing.JButton("导入");
         javax.swing.JButton cancelBtn = new javax.swing.JButton("取消");
         javax.swing.JButton resetBtn = new javax.swing.JButton("重置");
+        importBtn.setEnabled(false);
         buttons.add(importBtn);
         buttons.add(resetBtn);
         buttons.add(cancelBtn);
@@ -388,7 +411,7 @@ public class ExcelPasteImportDialog extends JDialog {
             if (header == null) {
                 throw new IOException("数据为空");
             }
-            List<ColumnMeta> metas = buildColumns(header, stats);
+            List<ColumnMeta> metas = buildColumns(header, stats, TypeSource.SAMPLE);
             return new SampleResult(preview, metas, totalRows, maxCols);
         }
     }
@@ -398,16 +421,118 @@ public class ExcelPasteImportDialog extends JDialog {
         this.lastSample = result;
         this.sampledTotalRows = result.totalRows();
         this.typeNormalizedNotified = false;
-        statusLabel.setText("Rows=" + result.totalRows() + " Cols=" + result.maxCols());
-        progressText.setText("已完成采样，推断字段类型");
+        this.fullInferenceFinished = false;
+        statusLabel.setText("Rows=" + result.totalRows() + " Cols=" + result.maxCols() + " | 类型推断中...");
+        progressText.setText("已完成采样，启动全量推断...");
         applyPreview(result.preview());
         applyPastePreview(result.preview());
         applyColumns(result.columns());
         suggestTableName();
-        progressBar.setIndeterminate(false);
+        progressBar.setIndeterminate(true);
         progressBar.setMinimum(0);
         progressBar.setMaximum(Math.max(1, sampledTotalRows));
         progressBar.setValue(0);
+        startFullInference();
+    }
+
+    private void startFullInference() {
+        if (tempFile == null || !Files.exists(tempFile)) {
+            return;
+        }
+        if (fullInferenceWorker != null && !fullInferenceWorker.isDone()) {
+            fullInferenceWorker.cancel(true);
+        }
+        progressText.setText("类型推断中（全量）...");
+        SwingWorker<List<ColumnMeta>, Void> worker = new SwingWorker<>() {
+            @Override
+            protected List<ColumnMeta> doInBackground() throws Exception {
+                return inferAllRows(tempFile);
+            }
+
+            @Override
+            protected void done() {
+                progressBar.setIndeterminate(false);
+                try {
+                    List<ColumnMeta> inferred = get();
+                    applyFullInference(inferred);
+                    progressBar.setValue(progressBar.getMaximum());
+                } catch (Exception e) {
+                    progressText.setText("全量推断失败: " + e.getMessage());
+                    OperationLog.log("全量推断失败: " + e.getMessage());
+                }
+            }
+        };
+        fullInferenceWorker = worker;
+        currentWorker = worker;
+        worker.execute();
+    }
+
+    private List<ColumnMeta> inferAllRows(Path file) throws IOException {
+        List<ColumnStats> stats = new ArrayList<>();
+        List<String> header = null;
+        Set<String> usedNames = new HashSet<>();
+        try (BufferedReader reader = Files.newBufferedReader(file, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split("\t", -1);
+                if (header == null) {
+                    header = normalizeHeader(parts);
+                    usedNames.addAll(header);
+                    stats = initStats(header.size());
+                    continue;
+                }
+                if (parts.length > header.size()) {
+                    for (int i = header.size(); i < parts.length; i++) {
+                        String newName = normalizeColumnName("col_" + (i + 1), usedNames);
+                        usedNames.add(newName);
+                        header.add(newName);
+                        stats.add(new ColumnStats());
+                    }
+                }
+                for (int i = 0; i < header.size(); i++) {
+                    String v = i < parts.length ? parts[i] : "";
+                    stats.get(i).accept(v);
+                }
+            }
+        }
+        if (header == null) {
+            throw new IOException("数据为空");
+        }
+        return buildColumns(header, stats, TypeSource.FULL);
+    }
+
+    private void applyFullInference(List<ColumnMeta> inferred) {
+        List<ColumnMeta> merged = new ArrayList<>();
+        int size = Math.max(columns.size(), inferred.size());
+        for (int i = 0; i < size; i++) {
+            ColumnMeta existing = i < columns.size() ? columns.get(i) : null;
+            ColumnMeta newest = i < inferred.size() ? inferred.get(i) : null;
+            if (existing == null && newest != null) {
+                merged.add(newest);
+                continue;
+            }
+            if (existing == null) {
+                continue;
+            }
+            String targetName = existing.nameOverridden() ? existing.targetName() : Objects.requireNonNullElse(newest, existing).targetName();
+            boolean nameOverridden = existing.nameOverridden();
+            boolean typeOverridden = existing.typeOverridden();
+            boolean enabled = existing.enabled();
+            String type = typeOverridden || newest == null ? existing.inferredType() : newest.inferredType();
+            TypeSource source = typeOverridden ? TypeSource.USER : newest == null ? existing.typeSource() : newest.typeSource();
+            merged.add(new ColumnMeta(existing.sourceName(), targetName, type, existing.index(), nameOverridden, typeOverridden, source, enabled));
+        }
+        if (merged.isEmpty()) {
+            merged = inferred;
+        }
+        applyColumns(merged);
+        if (lastSample != null) {
+            applyPreview(lastSample.preview());
+            applyPastePreview(lastSample.preview());
+        }
+        fullInferenceFinished = true;
+        statusLabel.setText("Rows=" + sampledTotalRows + " Cols=" + merged.size() + " | 类型推断完成（全量）");
+        progressText.setText("类型推断完成（全量）");
     }
 
     private void applyPreview(List<List<String>> data) {
@@ -417,7 +542,7 @@ public class ExcelPasteImportDialog extends JDialog {
         }
         List<String> header = new ArrayList<>();
         for (ColumnMeta col : columns) {
-            header.add(col.sourceName() + " (" + col.inferredType() + ")");
+            header.add(col.sourceName() + " (" + col.inferredType() + "/" + statusText(col) + ")");
         }
         DefaultTableModel model = new DefaultTableModel(header.toArray(), 0);
         for (int i = 1; i < data.size(); i++) {
@@ -452,7 +577,8 @@ public class ExcelPasteImportDialog extends JDialog {
     }
 
     private void applyColumns(List<ColumnMeta> cols) {
-        DefaultTableModel model = new DefaultTableModel(new Object[][]{}, new String[]{"导入", "源列", "目标字段名", "目标类型"}) {
+        this.columns = new ArrayList<>(cols);
+        DefaultTableModel model = new DefaultTableModel(new Object[][]{}, new String[]{"导入", "源列", "目标字段名", "目标类型", "来源"}) {
             @Override
             public Class<?> getColumnClass(int columnIndex) {
                 return switch (columnIndex) {
@@ -463,21 +589,39 @@ public class ExcelPasteImportDialog extends JDialog {
 
             @Override
             public boolean isCellEditable(int row, int column) {
-                return column != 1;
+                return column != 1 && column != 4;
             }
         };
-        for (ColumnMeta c : cols) {
-            model.addRow(new Object[]{Boolean.TRUE, c.sourceName(), c.targetName(), normalizeType(c.inferredType())});
+        for (ColumnMeta c : this.columns) {
+            model.addRow(new Object[]{c.enabled(), c.sourceName(), c.targetName(), normalizeType(c.inferredType()), statusText(c)});
         }
         model.addTableModelListener(e -> {
-            if (e.getType() == javax.swing.event.TableModelEvent.UPDATE && e.getColumn() == 3) {
+            if (e.getType() == javax.swing.event.TableModelEvent.UPDATE) {
                 int row = e.getFirstRow();
-                String raw = Objects.toString(model.getValueAt(row, 3), "text");
-                String normalized = normalizeType(raw);
-                if (!normalized.equals(raw)) {
+                if (row < 0 || row >= columns.size()) {
+                    return;
+                }
+                ColumnMeta existing = columns.get(row);
+                Boolean enabled = Boolean.TRUE.equals(model.getValueAt(row, 0));
+                String targetName = Objects.toString(model.getValueAt(row, 2), existing.targetName());
+                String rawType = Objects.toString(model.getValueAt(row, 3), existing.inferredType());
+                String normalized = normalizeType(rawType);
+                if (!normalized.equals(rawType)) {
                     model.setValueAt(normalized, row, 3);
                     notifyTypeNormalized();
                 }
+                boolean nameChanged = !Objects.equals(existing.targetName(), targetName);
+                boolean typeChanged = !Objects.equals(normalizeType(existing.inferredType()), normalized);
+                ColumnMeta updated = existing.withEnabled(enabled);
+                if (nameChanged) {
+                    updated = updated.withTargetName(targetName);
+                }
+                if (typeChanged) {
+                    updated = updated.withType(normalized, TypeSource.USER, true);
+                }
+                columns.set(row, updated);
+                model.setValueAt(statusText(updated), row, 4);
+                validateFieldTable();
             }
         });
         fieldTable.setModel(model);
@@ -485,6 +629,56 @@ public class ExcelPasteImportDialog extends JDialog {
         importCol.setCellEditor(new DefaultCellEditor(new JCheckBox()));
         TableColumn typeCol = fieldTable.getColumnModel().getColumn(3);
         typeCol.setCellEditor(new DefaultCellEditor(new javax.swing.JComboBox<>(allowedTypes())));
+        validateFieldTable();
+    }
+
+    private String statusText(ColumnMeta c) {
+        if (c.nameOverridden() || c.typeOverridden()) {
+            return TypeSource.USER.label();
+        }
+        return c.typeSource().label();
+    }
+
+    private void validateFieldTable() {
+        invalidRows.clear();
+        Set<String> names = new HashSet<>();
+        Set<String> duplicates = new HashSet<>();
+        for (int i = 0; i < columns.size(); i++) {
+            ColumnMeta c = columns.get(i);
+            if (!c.enabled()) {
+                continue;
+            }
+            String target = Objects.toString(c.targetName(), "").trim();
+            if (target.isEmpty() || !isValidIdentifier(target)) {
+                invalidRows.add(i);
+                continue;
+            }
+            String lowered = target.toLowerCase(Locale.ROOT);
+            if (!names.add(lowered)) {
+                duplicates.add(lowered);
+            }
+        }
+        if (!duplicates.isEmpty()) {
+            for (int i = 0; i < columns.size(); i++) {
+                ColumnMeta c = columns.get(i);
+                if (c.enabled() && duplicates.contains(c.targetName().toLowerCase(Locale.ROOT))) {
+                    invalidRows.add(i);
+                }
+            }
+        }
+        fieldTable.repaint();
+        boolean hasEnabled = columns.stream().anyMatch(ColumnMeta::enabled);
+        boolean valid = invalidRows.isEmpty() && hasEnabled;
+        importBtn.setEnabled(valid);
+        if (!valid) {
+            statusLabel.setText("字段校验未通过（空/非法/重复）");
+        } else if (fullInferenceFinished) {
+            statusLabel.setText("Rows=" + sampledTotalRows + " Cols=" + columns.size() + " | 类型推断完成（全量）");
+        }
+    }
+
+    private boolean isValidIdentifier(String name) {
+        return name != null && name.matches("[a-zA-Z_][a-zA-Z0-9_]*");
     }
 
     private List<ColumnStats> initStats(int size) {
@@ -536,12 +730,12 @@ public class ExcelPasteImportDialog extends JDialog {
         return reserved.contains(name);
     }
 
-    private List<ColumnMeta> buildColumns(List<String> header, List<ColumnStats> stats) {
+    private List<ColumnMeta> buildColumns(List<String> header, List<ColumnStats> stats, TypeSource typeSource) {
         List<ColumnMeta> metas = new ArrayList<>();
         for (int i = 0; i < header.size(); i++) {
             ColumnStats s = stats.get(i);
             String type = s.inferType();
-            metas.add(new ColumnMeta(header.get(i), header.get(i), type, i));
+            metas.add(ColumnMeta.auto(header.get(i), header.get(i), type, i, typeSource));
         }
         return metas;
     }
@@ -605,6 +799,11 @@ public class ExcelPasteImportDialog extends JDialog {
         progressBar.setMinimum(0);
         progressBar.setMaximum(Math.max(1, sampledTotalRows));
         progressText.setText("准备导入...");
+        if (!importBtn.isEnabled()) {
+            JOptionPane.showMessageDialog(this, "字段校验未通过，请修正目标字段名/类型", "校验失败", JOptionPane.WARNING_MESSAGE);
+            importing.set(false);
+            return;
+        }
         List<ColumnMeta> selected = collectColumnsFromTable();
         if (selected.isEmpty()) {
             JOptionPane.showMessageDialog(this, "请选择至少一列导入", "无列", JOptionPane.WARNING_MESSAGE);
@@ -859,18 +1058,9 @@ public class ExcelPasteImportDialog extends JDialog {
 
     private List<ColumnMeta> collectColumnsFromTable() {
         List<ColumnMeta> list = new ArrayList<>();
-        DefaultTableModel model = (DefaultTableModel) fieldTable.getModel();
-        for (int i = 0; i < model.getRowCount(); i++) {
-            Boolean enabled = (Boolean) model.getValueAt(i, 0);
-            String source = Objects.toString(model.getValueAt(i, 1), "");
-            String target = Objects.toString(model.getValueAt(i, 2), source);
-            String type = normalizeType(Objects.toString(model.getValueAt(i, 3), "text"));
-            if (Boolean.TRUE.equals(enabled)) {
-                int originalIndex = i;
-                if (i < columns.size()) {
-                    originalIndex = columns.get(i).index;
-                }
-                list.add(new ColumnMeta(source, target, type, originalIndex));
+        for (ColumnMeta column : columns) {
+            if (column.enabled()) {
+                list.add(column);
             }
         }
         return list;
@@ -905,8 +1095,11 @@ public class ExcelPasteImportDialog extends JDialog {
         progressBar.setValue(0);
         progressText.setText("已重置，等待粘贴");
         tableNameField.setText("tmp_wlh_import_1");
-        fieldTable.setModel(new DefaultTableModel(new Object[][]{}, new String[]{"导入", "源列", "目标字段名", "目标类型"}));
+        fieldTable.setModel(new DefaultTableModel(new Object[][]{}, new String[]{"导入", "源列", "目标字段名", "目标类型", "来源"}));
         typeNormalizedNotified = false;
+        invalidRows.clear();
+        importBtn.setEnabled(false);
+        fullInferenceFinished = false;
     }
 
     private String[] allowedTypes() {
@@ -1023,9 +1216,43 @@ public class ExcelPasteImportDialog extends JDialog {
         return false;
     }
 
-    private record ColumnMeta(String sourceName, String targetName, String inferredType, int index) {
-        ColumnMeta(String sourceName, String targetName, String inferredType) {
-            this(sourceName, targetName, inferredType, -1);
+    private record ColumnMeta(String sourceName, String targetName, String inferredType, int index, boolean nameOverridden,
+                              boolean typeOverridden, TypeSource typeSource, boolean enabled) {
+        ColumnMeta(String sourceName, String targetName, String inferredType, int index) {
+            this(sourceName, targetName, inferredType, index, false, false, TypeSource.SAMPLE, true);
+        }
+
+        static ColumnMeta auto(String sourceName, String targetName, String inferredType, int index, TypeSource source) {
+            return new ColumnMeta(sourceName, targetName, inferredType, index, false, false, source, true);
+        }
+
+        ColumnMeta withTargetName(String newName) {
+            return new ColumnMeta(sourceName, newName, inferredType, index, true, typeOverridden, typeSource, enabled);
+        }
+
+        ColumnMeta withType(String newType, TypeSource source, boolean overridden) {
+            return new ColumnMeta(sourceName, targetName, newType, index, nameOverridden, overridden, source, enabled);
+        }
+
+        ColumnMeta withEnabled(boolean enabled) {
+            return new ColumnMeta(sourceName, targetName, inferredType, index, nameOverridden, typeOverridden, typeSource,
+                enabled);
+        }
+    }
+
+    private enum TypeSource {
+        SAMPLE("auto(采样)"),
+        FULL("auto(全量)"),
+        USER("user");
+
+        private final String label;
+
+        TypeSource(String label) {
+            this.label = label;
+        }
+
+        String label() {
+            return label;
         }
     }
 
@@ -1036,15 +1263,11 @@ public class ExcelPasteImportDialog extends JDialog {
     }
 
     private static class ColumnStats {
+        private final Set<DataCandidate> candidates = EnumSet.of(
+            DataCandidate.BOOLEAN, DataCandidate.INTEGER, DataCandidate.BIGINT, DataCandidate.NUMERIC,
+            DataCandidate.DATE, DataCandidate.TIMESTAMP, DataCandidate.UUID, DataCandidate.JSONB,
+            DataCandidate.VARCHAR, DataCandidate.TEXT);
         private int nonEmpty = 0;
-        private boolean boolCandidate = true;
-        private boolean intCandidate = true;
-        private boolean bigintCandidate = true;
-        private boolean numericCandidate = true;
-        private boolean dateCandidate = true;
-        private boolean tsCandidate = true;
-        private boolean uuidCandidate = true;
-        private boolean jsonCandidate = true;
         private int maxLen = 0;
         private int jsonOk = 0;
 
@@ -1055,31 +1278,33 @@ public class ExcelPasteImportDialog extends JDialog {
             String v = raw.trim();
             nonEmpty++;
             maxLen = Math.max(maxLen, v.length());
-            if (boolCandidate) {
-                boolCandidate = isBoolean(v);
+            if (candidates.contains(DataCandidate.BOOLEAN) && !isBoolean(v)) {
+                candidates.remove(DataCandidate.BOOLEAN);
             }
-            if (intCandidate) {
-                intCandidate = isInt(v);
+            if (candidates.contains(DataCandidate.INTEGER) && !isInt(v)) {
+                candidates.remove(DataCandidate.INTEGER);
             }
-            if (bigintCandidate) {
-                bigintCandidate = isBigInt(v);
+            if (candidates.contains(DataCandidate.BIGINT) && !isBigInt(v)) {
+                candidates.remove(DataCandidate.BIGINT);
             }
-            if (numericCandidate) {
-                numericCandidate = isNumeric(v);
+            if (candidates.contains(DataCandidate.NUMERIC) && !isNumeric(v)) {
+                candidates.remove(DataCandidate.NUMERIC);
             }
-            if (dateCandidate) {
-                dateCandidate = isDate(v);
+            if (candidates.contains(DataCandidate.DATE) && !isDate(v)) {
+                candidates.remove(DataCandidate.DATE);
             }
-            if (tsCandidate) {
-                tsCandidate = isTimestamp(v);
+            if (candidates.contains(DataCandidate.TIMESTAMP) && !isTimestamp(v)) {
+                candidates.remove(DataCandidate.TIMESTAMP);
             }
-            if (uuidCandidate) {
-                uuidCandidate = isUuid(v);
+            if (candidates.contains(DataCandidate.UUID) && !isUuid(v)) {
+                candidates.remove(DataCandidate.UUID);
             }
-            if (jsonCandidate) {
-                boolean ok = isJson(v);
-                jsonCandidate = ok || jsonOk * 100 / Math.max(1, nonEmpty) >= 95;
-                if (ok) jsonOk++;
+            if (candidates.contains(DataCandidate.JSONB)) {
+                if (isJson(v)) {
+                    jsonOk++;
+                } else {
+                    candidates.remove(DataCandidate.JSONB);
+                }
             }
         }
 
@@ -1087,21 +1312,14 @@ public class ExcelPasteImportDialog extends JDialog {
             if (nonEmpty == 0) {
                 return "text";
             }
-            double ratioBool = boolCandidate ? 1.0 : 0.0;
-            double ratioInt = intCandidate ? 1.0 : 0.0;
-            double ratioBigInt = bigintCandidate ? 1.0 : 0.0;
-            double ratioDate = dateCandidate ? 1.0 : 0.0;
-            double ratioTs = tsCandidate ? 1.0 : 0.0;
-            double ratioUuid = uuidCandidate ? 1.0 : 0.0;
-            double ratioJson = nonEmpty == 0 ? 0 : (jsonOk * 1.0 / nonEmpty);
-            if (ratioBool >= 0.98) return "boolean";
-            if (ratioInt >= 0.98) return "integer";
-            if (ratioBigInt >= 0.98) return "bigint";
-            if (numericCandidate) return "numeric";
-            if (ratioDate >= 0.98) return "date";
-            if (ratioTs >= 0.98) return "timestamp";
-            if (ratioUuid >= 0.98) return "uuid";
-            if (ratioJson >= 0.95) return "jsonb";
+            if (candidates.contains(DataCandidate.BOOLEAN)) return "boolean";
+            if (candidates.contains(DataCandidate.INTEGER)) return "integer";
+            if (candidates.contains(DataCandidate.BIGINT)) return "bigint";
+            if (candidates.contains(DataCandidate.NUMERIC)) return "numeric";
+            if (candidates.contains(DataCandidate.DATE)) return "date";
+            if (candidates.contains(DataCandidate.TIMESTAMP)) return "timestamp";
+            if (candidates.contains(DataCandidate.UUID)) return "uuid";
+            if (candidates.contains(DataCandidate.JSONB) && jsonOk * 100 >= nonEmpty * 95) return "jsonb";
             return fallbackVarchar();
         }
 
@@ -1175,14 +1393,17 @@ public class ExcelPasteImportDialog extends JDialog {
         }
 
         private boolean isJson(String v) {
-            String trimmed = v.trim();
-            if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) {
+            try {
+                JsonParser.parseString(v);
+                return true;
+            } catch (JsonParseException | IllegalStateException e) {
                 return false;
             }
-            // 粗略校验
-            int len = trimmed.length();
-            return len >= 2;
         }
+    }
+
+    private enum DataCandidate {
+        BOOLEAN, INTEGER, BIGINT, NUMERIC, DATE, TIMESTAMP, UUID, JSONB, VARCHAR, TEXT
     }
 
     private static class ClipboardPayload {
