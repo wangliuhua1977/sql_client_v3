@@ -581,7 +581,7 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 ### 大批量处理策略
 - 剪贴板内容上限 20MB，HTML 通道单独限制 5MB；超限直接报错拒绝，避免一次性持有超大字符串导致 OOM。
 - 粘贴后立即将内容落盘为 UTF-8 TSV 临时文件（`java.io.tmpdir`，导入完成后删除），不保留全量二维列表；仅预览前 20 行在内存中。
-- 类型推断最多采样前 5000 行，仅保存统计信息（长度/命中次数），不缓存原值。
+- 类型推断仅对前 5000 行做快速采样以渲染 UI，随后后台以 BufferedReader 流式全量扫描临时文件淘汰候选类型，仅保存计数/最大长度，不缓存原值。
 - 导入流式读取临时文件，跳过表头；批量 INSERT 默认 200 行，并基于 SQL 长度上限 512KB 自动提前 flush，避免单条语句过大。
 - 支持取消：对话框“取消”会中断后台 SwingWorker，终止后回滚事务并清理临时文件。
 
@@ -591,7 +591,9 @@ $cancel = Invoke-RestMethod -Method Post -Uri "$baseUrl/jobs/cancel" -Headers $h
 - 表头规范化：去空白、转小写、非 `[a-z0-9_]` 替换为 `_`，数字开头前缀 `c_`，常见保留字前缀 `c_`，重名追加 `_2/_3...`。
 
 ### 类型推断规则
-- 采样命中率≥98% 时优先判定：boolean → integer(int4) → bigint(int8) → numeric（不带精度）→ date → timestamp → uuid；JSONB 需 ≥95% 行以 `{`/`[` 开头。
+- 采样阶段与全量阶段均使用候选淘汰法：每列初始候选 boolean/int/bigint/numeric/date/timestamp/uuid/jsonb/varchar/text，遇到不匹配的值立即移除候选，记录非空计数与最大长度。
+- 全量扫描完成后按优先级选择最终类型：boolean > integer > bigint > numeric > date > timestamp > uuid > jsonb（需 ≥95% 非空值可解析 JSON）> varchar(<=255) > text。JSON 校验使用 Gson 解析，失败即淘汰。
+- 字段表新增来源列：auto(采样)/auto(全量)/user。用户改动目标字段名/类型即锁定（user），后续全量推断不会覆盖。目标名为空/非法（非 `[a-zA-Z_][a-zA-Z0-9_]*`）或重复时行内标红且禁用“导入”。
 - 其余使用 `varchar` 或 `text` 兜底；字段表仅允许选择上述无精度类型。若用户输入了 `numeric(10,2)` / `varchar(255)` 等，会自动规范化为无精度版本并在状态栏提示一次。
 
 ### 导入策略与执行
