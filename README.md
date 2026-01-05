@@ -156,6 +156,10 @@
 
 ## 前端开发技术文档：元数据获取与列顺序
 
+### 可空数值与 OptionalInt 转换规范
+- OptionalInt 转 Integer 时使用显式 `isPresent()` + `getAsInt()` 判断，例如：`OptionalInt parsed = ...; if (parsed.isPresent()) { return parsed.getAsInt(); }`，否则返回 null；禁止使用 `orElse(null)` 等向 primitive 传入 null 的写法。
+- 禁止将 null 直接传给 primitive 参数或依赖自动拆箱；所有可能为空的数值一律使用包装类型或显式默认值（如三元表达式或 `Objects.requireNonNullElse`）处理。
+
 ### SqlExecResult 构建规范与非查询结果展示
 - 统一通过 `SqlExecResult.builder(sql)` 构建结果对象，业务代码禁止直接 `new SqlExecResult(...)`。旧构造器仅用于类内部或兼容调用，字段新增/删减时只需调整 Builder 默认值。
 - Builder 默认提供空列表与安全兜底：columns/rows/rowMaps/notices/warnings 为空时自动替换为 `List.of()`，`rowsCount` 默认为行数或 rowMaps 大小，`success` 默认为 `true`，`hasResultSet` 自动从列/行是否为空推断（可显式覆盖）。

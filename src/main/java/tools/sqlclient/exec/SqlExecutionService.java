@@ -11,6 +11,7 @@ import tools.sqlclient.util.ThreadPools;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.function.Consumer;
@@ -621,8 +622,11 @@ public class SqlExecutionService {
         if (candidate != null) {
             return candidate;
         }
-        java.util.OptionalInt parsed = CommandTagParser.parseAffectedRows(commandTag);
-        return parsed.isPresent() ? parsed.getAsInt() : null;
+        OptionalInt parsed = CommandTagParser.parseAffectedRows(commandTag);
+        if (parsed.isPresent()) {
+            return parsed.getAsInt();
+        }
+        return null;
     }
 
 
