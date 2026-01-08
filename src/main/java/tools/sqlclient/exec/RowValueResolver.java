@@ -39,7 +39,7 @@ public final class RowValueResolver {
         return null;
     }
 
-    public static Object resolveValue(List<String> columns, Object row, int columnIndex) {
+    public static Object resolveValueByName(List<String> columns, Object row, int columnIndex) {
         if (row == null || columns == null || columnIndex < 0 || columnIndex >= columns.size()) {
             return null;
         }

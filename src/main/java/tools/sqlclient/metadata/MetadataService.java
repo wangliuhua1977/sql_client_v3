@@ -588,7 +588,7 @@ public class MetadataService {
         for (Map<String, String> map : rowMaps) {
             List<String> row = new ArrayList<>();
             for (int i = 0; i < columns.size(); i++) {
-                Object value = RowValueResolver.resolveValue(columns, map, i);
+                Object value = RowValueResolver.resolveValueByName(columns, map, i);
                 row.add(value != null ? value.toString() : null);
             }
             rows.add(row);

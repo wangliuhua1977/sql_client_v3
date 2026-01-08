@@ -692,7 +692,7 @@ public class SqlExecutionService {
         for (java.util.Map<String, String> map : rowMaps) {
             List<String> row = new ArrayList<>();
             for (int i = 0; i < targetColumns.size(); i++) {
-                Object value = RowValueResolver.resolveValue(targetColumns, map, i);
+                Object value = RowValueResolver.resolveValueByName(targetColumns, map, i);
                 row.add(value != null ? value.toString() : null);
             }
             rows.add(row);

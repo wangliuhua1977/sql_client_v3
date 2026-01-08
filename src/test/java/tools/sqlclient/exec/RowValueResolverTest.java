@@ -52,7 +52,7 @@ class RowValueResolverTest {
         List<String> columns = List.of("a", "b");
         List<String> row = List.of("v1", "v2");
 
-        Object value = RowValueResolver.resolveValue(columns, row, 1);
+        Object value = RowValueResolver.resolveValueByName(columns, row, 1);
 
         assertEquals("v2", value);
     }
@@ -62,6 +62,6 @@ class RowValueResolverTest {
         List<String> columns = List.of("only_col");
         Map<String, String> row = Map.of();
 
-        assertNull(RowValueResolver.resolveValue(columns, row, 0));
+        assertNull(RowValueResolver.resolveValueByName(columns, row, 0));
     }
 }
