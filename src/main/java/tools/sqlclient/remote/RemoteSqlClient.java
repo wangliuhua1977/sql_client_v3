@@ -345,12 +345,21 @@ public class RemoteSqlClient {
             JsonObject col = el.getAsJsonObject();
             ColumnMeta meta = new ColumnMeta();
             meta.setName(readString(col, "name"));
+            String label = readString(col, "label");
+            meta.setDisplayLabel(label != null ? label : readString(col, "displayLabel"));
+            meta.setDataKey(readString(col, "dataKey"));
             meta.setType(readString(col, "type"));
             meta.setPosition(readInt(col, "position") != null ? readInt(col, "position") : idx);
             meta.setJdbcType(readInt(col, "jdbcType"));
             meta.setPrecision(readInt(col, "precision"));
             meta.setScale(readInt(col, "scale"));
             meta.setNullable(readInt(col, "nullable"));
+            if (meta.getDataKey() == null && meta.getName() != null) {
+                meta.setDataKey(meta.getName());
+            }
+            if (meta.getDisplayLabel() == null && meta.getName() != null) {
+                meta.setDisplayLabel(meta.getName());
+            }
             metas.add(meta);
         }
         metas.sort((a, b) -> {
@@ -467,7 +476,6 @@ public class RemoteSqlClient {
             return rows;
         }
         int colCount = columns == null ? 0 : columns.size();
-        List<String> fallbackRaw = rawColumns == null ? List.of() : rawColumns;
         for (JsonElement el : rowsJson) {
             if (el == null || el.isJsonNull()) {
                 continue;
@@ -475,23 +483,8 @@ public class RemoteSqlClient {
             if (el.isJsonObject()) {
                 JsonObject obj = el.getAsJsonObject();
                 java.util.Map<String, String> row = new java.util.LinkedHashMap<>();
-                if (columns != null && obj.entrySet().size() == colCount) {
-                    int idx = 0;
-                    for (String col : columns) {
-                        String rawKey = idx < fallbackRaw.size() ? fallbackRaw.get(idx) : col;
-                        String value = null;
-                        if (rawKey != null && obj.has(rawKey)) {
-                            value = stringify(obj.get(rawKey));
-                        } else if (obj.has(col)) {
-                            value = stringify(obj.get(col));
-                        }
-                        row.put(col, value);
-                        idx++;
-                    }
-                } else {
-                    for (Map.Entry<String, JsonElement> entry : obj.entrySet()) {
-                        row.put(entry.getKey(), stringify(entry.getValue()));
-                    }
+                for (Map.Entry<String, JsonElement> entry : obj.entrySet()) {
+                    row.put(entry.getKey(), stringify(entry.getValue()));
                 }
                 rows.add(row);
             } else if (el.isJsonArray()) {

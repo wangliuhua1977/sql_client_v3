@@ -38,12 +38,14 @@ public class ColumnLayoutBuilder {
                     List<String> expanded = resolveStarColumns(item, projection, safeProvided, safeRows, consumed, remainingExplicit);
                     for (String col : expanded) {
                         String display = Objects.requireNonNullElse(col, "");
-                        defs.add(new ColumnDef(buildId(display, seq++), display, display));
+                        defs.add(new ColumnDef(buildId(display, seq++), display, col));
                     }
                     consumed += expanded.size();
                 } else {
                     String display = item.alias() != null ? item.alias() : item.displayLabel();
-                    String sourceKey = item.alias() != null ? item.alias() : item.displayLabel();
+                    String sourceKey = (consumed < safeProvided.size() && safeProvided.get(consumed) != null)
+                            ? safeProvided.get(consumed)
+                            : display;
                     defs.add(new ColumnDef(buildId(display, seq++), Objects.requireNonNullElse(display, ""), sourceKey));
                     consumed++;
                 }
@@ -70,8 +72,9 @@ public class ColumnLayoutBuilder {
         }
         for (Map<String, String> map : rowMaps) {
             List<String> row = new ArrayList<>(defs.size());
-            for (ColumnDef def : defs) {
-                row.add(map != null ? map.get(def.getSourceKey()) : null);
+            for (int i = 0; i < defs.size(); i++) {
+                Object value = RowValueResolver.resolveValue(defs, map, i);
+                row.add(value != null ? value.toString() : null);
             }
             rows.add(row);
         }
