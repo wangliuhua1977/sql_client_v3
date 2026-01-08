@@ -5,6 +5,8 @@ package tools.sqlclient.exec;
  */
 public class ColumnMeta {
     private String name;
+    private String displayLabel;
+    private String dataKey;
     private String type;
     private Integer position;
     private Integer jdbcType;
@@ -18,6 +20,22 @@ public class ColumnMeta {
 
     public void setName(String name) {
         this.name = name;
+    }
+
+    public String getDisplayLabel() {
+        return displayLabel;
+    }
+
+    public void setDisplayLabel(String displayLabel) {
+        this.displayLabel = displayLabel;
+    }
+
+    public String getDataKey() {
+        return dataKey;
+    }
+
+    public void setDataKey(String dataKey) {
+        this.dataKey = dataKey;
     }
 
     public String getType() {

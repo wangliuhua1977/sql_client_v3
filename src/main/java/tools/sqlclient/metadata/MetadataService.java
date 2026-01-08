@@ -10,6 +10,7 @@ import tools.sqlclient.exec.OverloadedException;
 import tools.sqlclient.exec.ResultExpiredException;
 import tools.sqlclient.exec.ResultNotReadyException;
 import tools.sqlclient.exec.ResultResponse;
+import tools.sqlclient.exec.RowValueResolver;
 import tools.sqlclient.exec.SqlExecResult;
 import tools.sqlclient.util.Config;
 import tools.sqlclient.util.OperationLog;
@@ -586,7 +587,10 @@ public class MetadataService {
         List<List<String>> rows = new ArrayList<>();
         for (Map<String, String> map : rowMaps) {
             List<String> row = new ArrayList<>();
-            for (String col : columns) row.add(map.get(col));
+            for (int i = 0; i < columns.size(); i++) {
+                Object value = RowValueResolver.resolveValue(columns, map, i);
+                row.add(value != null ? value.toString() : null);
+            }
             rows.add(row);
         }
 
