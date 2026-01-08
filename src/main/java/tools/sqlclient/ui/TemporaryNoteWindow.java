@@ -37,7 +37,15 @@ public class TemporaryNoteWindow extends JFrame {
         this.temporaryNote = temporaryNote;
         this.permanentNoteOpener = permanentNoteOpener;
         setLayout(new BorderLayout(8, 8));
-        setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+        setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
+        addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override
+            public void windowClosing(java.awt.event.WindowEvent e) {
+                if (confirmTemporaryClose()) {
+                    dispose();
+                }
+            }
+        });
 
         editorPanel = new EditorTabPanel(
                 noteRepository,
@@ -70,25 +78,33 @@ public class TemporaryNoteWindow extends JFrame {
     }
 
     private void saveAsPermanent() {
-        String suggestion = buildSuggestedTitle();
-        String title = JOptionPane.showInputDialog(this, "保存为永久笔记", suggestion);
-        if (title == null) {
-            return;
-        }
-        title = title.trim();
-        if (title.isEmpty()) {
-            JOptionPane.showMessageDialog(this, "标题不能为空");
-            return;
-        }
-        try {
-            Note created = noteRepository.create(title, temporaryNote.getDatabaseType());
-            noteRepository.updateContent(created, editorPanel.getSqlText());
-            if (permanentNoteOpener != null) {
-                permanentNoteOpener.accept(created);
+        while (true) {
+            String suggestion = buildSuggestedTitle();
+            String title = JOptionPane.showInputDialog(this, "保存为正式笔记", suggestion);
+            if (title == null) {
+                return;
             }
-            dispose();
-        } catch (Exception ex) {
-            JOptionPane.showMessageDialog(this, "保存失败: " + ex.getMessage());
+            title = title.trim();
+            if (title.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "标题不能为空");
+                continue;
+            }
+            if (noteRepository.titleExists(title, null)) {
+                JOptionPane.showMessageDialog(this, "标题已存在，请重新输入");
+                continue;
+            }
+            try {
+                Note created = noteRepository.create(title, temporaryNote.getDatabaseType());
+                noteRepository.updateContent(created, editorPanel.getSqlText());
+                if (permanentNoteOpener != null) {
+                    permanentNoteOpener.accept(created);
+                }
+                dispose();
+                return;
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, "保存失败: " + ex.getMessage());
+                return;
+            }
         }
     }
 
@@ -96,5 +112,30 @@ public class TemporaryNoteWindow extends JFrame {
         String base = temporaryNote.getTitle();
         String ts = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
         return base + "_" + ts;
+    }
+
+    private boolean confirmTemporaryClose() {
+        if (editorPanel == null || !editorPanel.isDirty()) {
+            return true;
+        }
+        Object[] options = {"保存为正式笔记", "不保存", "取消"};
+        int choice = JOptionPane.showOptionDialog(
+                this,
+                "临时笔记内容已修改，是否保存为正式笔记？",
+                "关闭临时笔记",
+                JOptionPane.DEFAULT_OPTION,
+                JOptionPane.WARNING_MESSAGE,
+                null,
+                options,
+                options[0]
+        );
+        if (choice == 0) {
+            saveAsPermanent();
+            return false;
+        }
+        if (choice == 1) {
+            return true;
+        }
+        return false;
     }
 }

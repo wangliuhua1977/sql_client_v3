@@ -446,6 +446,39 @@
 - AES 解密失败：检查 Key/IV 与 UTF-8，参考 `AesCbcTest` 或下方 PowerShell 脚本生成密文。
 - pageSize/limit >1000：客户端自动裁剪并在 `ResultResponse.note` 与日志中提示裁剪值。
 
+### 前端开发技术文档：临时笔记 / 正式笔记与滚轮滚动
+#### 状态字段与生命周期
+- 状态字段：`Note.temporary` 标记临时笔记；`EditorTabPanel` 维护 `dirty` 与 `initialContent`，用于判断是否需要关闭提示。
+- 临时笔记：
+  - 新建笔记与存储过程/函数查看均创建 `Note.temporary=true` 的临时笔记（`MainFrame#createTemporaryNote`、`TemporaryNoteWindow`）。
+  - 持久化策略切换为 `TemporaryNotePersistenceStrategy`，自动保存与链接持久化关闭，内容只保留在内存中。
+  - 标题显示追加 “(临时)” 标记（`MainFrame#getPanelDisplayTitle`）。
+- 正式笔记：
+  - 通过 `NoteRepository.create` 写入 SQLite，并启用 `PersistentNotePersistenceStrategy` 自动保存与链接持久化。
+  - 保存后 `Note.temporary=false`，后续保存/关闭与正式笔记一致。
+
+#### 关键流程（文字流程图）
+1) **新建笔记**
+   - 用户触发“新建笔记” → `MainFrame#createNote` → `createTemporaryNote` 创建临时 Note → `EditorTabPanel` 使用临时持久化策略 → 打开标签/窗口。
+2) **读取存储过程/函数**
+   - `MainFrame#showRoutineDdlAndOpen` 获取 DDL → `TemporaryNoteWindow` 展示临时笔记 → 需要另存为正式笔记才会写入仓库。
+3) **保存为正式笔记**
+   - 用户点击“保存当前”或关闭临时标签 → `MainFrame#saveTemporaryPanel` 弹出命名对话框 → `NoteRepository.create` + `updateContent` → `EditorTabPanel#replaceNote` 切换到正式持久化策略。
+
+#### 关闭弹窗规则
+- 临时笔记关闭：
+  - `dirty=false`（内容未改动或与初始一致）→ 直接关闭，无弹窗。
+  - `dirty=true` → 弹出三按钮对话框（保存为正式笔记 / 不保存 / 取消）。
+- 保存失败：弹窗提示失败原因，临时状态与内容保持不变。
+- 关闭取消：选择“取消”则保持窗口/标签打开，不触发任何保存或清理。
+- 临时缓存清理：当前实现不写入磁盘临时缓存，关闭时无额外清理动作。
+- 选择“不保存”时：临时笔记不写入正式索引，直接释放内存状态。
+
+#### 滚轮事件路由（SQL 编辑区）
+- 监听点：`EditorWheelScrollSupport.install` 在编辑器组件上挂载 `MouseWheelListener`。
+- 路由策略：事件触发时用 `SwingUtilities.getAncestorOfClass(JScrollPane.class, source)` 查找最近滚动容器，优先驱动垂直滚动条并 `consume()`，确保“鼠标悬停即可滚动”。
+- 不使用全局监听：避免误抢其他区域（结果表格、树等）的滚轮滚动事件。
+
 ### PowerShell 最小验证清单（HTTPS POST）
 ```powershell
 # 1) 准备 AES 密文（保持 UTF-8）

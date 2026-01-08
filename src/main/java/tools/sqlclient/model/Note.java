@@ -5,6 +5,7 @@ public class Note {
     private String title;
     private String content;
     private DatabaseType databaseType;
+    private boolean temporary;
     private long createdAt;
     private long updatedAt;
     private String tags;
@@ -20,6 +21,7 @@ public class Note {
         this.title = title;
         this.content = content;
         this.databaseType = databaseType;
+        this.temporary = false;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
         this.tags = tags == null ? "" : tags;
@@ -55,6 +57,14 @@ public class Note {
 
     public void setDatabaseType(DatabaseType databaseType) {
         this.databaseType = databaseType;
+    }
+
+    public boolean isTemporary() {
+        return temporary;
+    }
+
+    public void setTemporary(boolean temporary) {
+        this.temporary = temporary;
     }
 
     public long getUpdatedAt() {
