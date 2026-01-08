@@ -130,9 +130,6 @@ public final class RowValueResolver {
     }
 
     private static boolean isOrderedMap(Map<String, ?> map) {
-        if (map instanceof java.util.SequencedMap) {
-            return true;
-        }
         if (map instanceof java.util.LinkedHashMap) {
             return true;
         }
