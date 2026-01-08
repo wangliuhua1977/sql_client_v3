@@ -154,6 +154,33 @@
 - 若响应 `success:false` 或 HTTP 非 200，客户端会在结果面板展示错误提示且不中断 UI。
 - Token 错误或网络异常时，日志与状态栏会提示失败原因；SQL 本身失败会在结果面板呈现后端返回的 errorMessage。
 
+## 前端开发技术文档：结果集列对齐与渲染
+### displayLabel 与 dataKey 的分工
+- `displayLabel`：用于 JTable 表头展示（来自 SQL 投影/别名/服务端 label），不参与取值对齐。
+- `dataKey`：用于从结果行中取值的真实 key（来自服务端 columns/columnMetas 或 raw rows 的实际 key）。
+- `ColumnDef` 内部使用 `displayName` 作为显示名，`sourceKey` 作为 dataKey；两者可不同以避免无别名表达式错位。
+
+### 行值对齐策略（数组/对象 + fallback）
+- **行是数组/列表**：按列索引直接取 `row[i]`。
+- **行是对象/Map**：优先用 `dataKey` 取值；取不到时再尝试 `displayLabel`（大小写不敏感）。
+- **fallback 顺序**：
+  1. `dataKey` 精确匹配；
+  2. `dataKey` 大小写不敏感匹配（记录 debug）；
+  3. `displayLabel` 精确/大小写不敏感匹配（记录 debug）；
+  4. 若 Map 为有序且 `row.size == columnCount`，按插入顺序取第 i 个值（记录 debug）；
+  5. 若只有 1 列且 Map 只有 1 个值，取唯一值（记录 debug）。
+- 所有 fallback 仅在无法命中 key 时触发，并且 debug 日志为一次性输出，避免刷屏。
+
+### SQL 示例（无别名表达式也可稳定显示）
+- SQL1（无别名）：`select sum(amount)/100 from tmp_wlh_mbhs1`
+  - 显示列头为 `sum(amount)/100`，单元格正常展示数值（例如 `272681.8`）。
+- SQL2（显式别名）：`select sum(amount)/100 as amount from tmp_wlh_mbhs1`
+  - 显示列头为 `amount`，单元格展示与 SQL1 一致。
+
+### 测试用例与运行方式
+- 新增单测：`src/test/java/tools/sqlclient/exec/RowValueResolverTest.java`
+- 运行命令：`mvn -q -DskipTests=false test`
+
 ## 前端开发技术文档：元数据获取与列顺序
 
 ### 可空数值与 OptionalInt 转换规范
