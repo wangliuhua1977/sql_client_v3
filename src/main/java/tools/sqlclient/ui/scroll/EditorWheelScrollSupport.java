@@ -42,13 +42,21 @@ public final class EditorWheelScrollSupport {
 
         WeakReference<JScrollPane> scrollRef = new WeakReference<>(scrollPane);
         MouseWheelListener listener = e -> {
-            Component focusOwner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getFocusOwner();
-            // Only react when the current focus is inside the editor (including child components)
-            if (focusOwner == null || (!focusOwner.equals(editor) && !SwingUtilities.isDescendingFrom(focusOwner, editor))) {
+            if (e.isShiftDown()) {
                 return;
             }
 
-            JScrollPane sp = scrollRef.get();
+            Component source = e.getComponent();
+            JScrollPane sp = null;
+            if (source != null) {
+                Component ancestor = SwingUtilities.getAncestorOfClass(JScrollPane.class, source);
+                if (ancestor instanceof JScrollPane pane) {
+                    sp = pane;
+                }
+            }
+            if (sp == null) {
+                sp = scrollRef.get();
+            }
             if (sp == null) {
                 return;
             }
@@ -89,4 +97,3 @@ public final class EditorWheelScrollSupport {
         return value;
     }
 }
-

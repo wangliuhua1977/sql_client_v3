@@ -39,7 +39,7 @@ import java.util.regex.Pattern;
  * 单个 SQL 标签面板，包含自动保存与联想逻辑。
  */
 public class EditorTabPanel extends JPanel {
-    private final DatabaseType databaseType;
+    private DatabaseType databaseType;
     private final RSyntaxTextArea textArea;
     private final AutoSaveService autoSaveService;
     private final SuggestionEngine suggestionEngine;
@@ -50,10 +50,10 @@ public class EditorTabPanel extends JPanel {
     private final JComboBox<String> dbUserSelector = new JComboBox<>(new String[]{"leshan", "leshan_app"});
     private final JComboBox<String> pageSizeSelector = new JComboBox<>(new String[]{"200", "500", "1000"});
     private int defaultPageSize;
-    private final Consumer<String> titleUpdater;
+    private Consumer<String> titleUpdater;
     private final NoteRepository noteRepository;
-    private final Note note;
-    private final NotePersistenceStrategy persistenceStrategy;
+    private Note note;
+    private NotePersistenceStrategy persistenceStrategy;
     private final Consumer<String> linkOpener;
     private final FullWidthFilter fullWidthFilter;
     private final JPanel resultWrapper = new JPanel(new BorderLayout());
@@ -76,6 +76,9 @@ public class EditorTabPanel extends JPanel {
     private List<EditorStyle> styleOptions = new ArrayList<>();
     private Consumer<EditorStyle> styleSelectionHandler;
     private Runnable resetStyleHandler;
+    private boolean dirty;
+    private String initialContent;
+    private boolean initializingContent;
 
     public EditorTabPanel(NoteRepository noteRepository, MetadataService metadataService,
                           java.util.function.Consumer<String> autosaveCallback,
@@ -131,7 +134,12 @@ public class EditorTabPanel extends JPanel {
             }
         });
         installFocusHooks();
+        initializingContent = true;
         this.textArea.setText(note.getContent());
+        this.initialContent = textArea.getText();
+        this.dirty = false;
+        initializingContent = false;
+        installDirtyTracker();
         installExecuteShortcut();
         applyStyle(style);
         initLayout();
@@ -158,6 +166,36 @@ public class EditorTabPanel extends JPanel {
                 if (executeHandler != null) {
                     executeHandler.run();
                 }
+            }
+        });
+    }
+
+    private void installDirtyTracker() {
+        if (textArea.getDocument() == null) {
+            return;
+        }
+        textArea.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override
+            public void insertUpdate(javax.swing.event.DocumentEvent e) {
+                updateDirtyState();
+            }
+
+            @Override
+            public void removeUpdate(javax.swing.event.DocumentEvent e) {
+                updateDirtyState();
+            }
+
+            @Override
+            public void changedUpdate(javax.swing.event.DocumentEvent e) {
+                updateDirtyState();
+            }
+
+            private void updateDirtyState() {
+                if (initializingContent) {
+                    return;
+                }
+                String current = textArea.getText();
+                dirty = initialContent == null ? current != null && !current.isEmpty() : !initialContent.equals(current);
             }
         });
     }
@@ -577,6 +615,7 @@ public class EditorTabPanel extends JPanel {
             String time = LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"));
             lastSaveLabel.setText("自动保存: " + time);
             autoSaveService.onSaved(time);
+            markClean();
             updateTitle();
             if (persistenceStrategy.shouldPersistLinks()) {
                 persistLinksAsync();
@@ -614,6 +653,36 @@ public class EditorTabPanel extends JPanel {
         } catch (IllegalArgumentException ex) {
             JOptionPane.showMessageDialog(this, ex.getMessage());
         }
+    }
+
+    public boolean isDirty() {
+        return dirty;
+    }
+
+    public void markClean() {
+        initialContent = textArea.getText();
+        dirty = false;
+    }
+
+    public boolean isTemporary() {
+        return note != null && note.isTemporary();
+    }
+
+    public void replaceNote(Note newNote, NotePersistenceStrategy strategy, Consumer<String> newTitleUpdater) {
+        if (newNote == null) {
+            return;
+        }
+        this.note = newNote;
+        this.databaseType = newNote.getDatabaseType();
+        this.persistenceStrategy = strategy == null ? new PersistentNotePersistenceStrategy() : strategy;
+        if (newTitleUpdater != null) {
+            this.titleUpdater = newTitleUpdater;
+        }
+        lastSaveLabel.setText(this.persistenceStrategy.initialAutoSaveLabel());
+        if (this.persistenceStrategy.shouldAutoSave()) {
+            autoSaveService.startAutoSave(this::autoSave);
+        }
+        markClean();
     }
 
     public void setFullWidthConversionEnabled(boolean enabled) {
@@ -794,8 +863,12 @@ public class EditorTabPanel extends JPanel {
 
     public void setTextContent(String text) {
         SwingUtilities.invokeLater(() -> {
+            initializingContent = true;
             textArea.setText(text == null ? "" : text);
             textArea.setCaretPosition(0);
+            initialContent = textArea.getText();
+            dirty = false;
+            initializingContent = false;
         });
     }
 

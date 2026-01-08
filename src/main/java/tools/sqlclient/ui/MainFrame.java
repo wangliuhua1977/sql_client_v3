@@ -10,7 +10,9 @@ import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.db.SqlHistoryRepository;
 import tools.sqlclient.db.SqlSnippetRepository;
 import tools.sqlclient.editor.EditorTabPanel;
+import tools.sqlclient.editor.NotePersistenceStrategy;
 import tools.sqlclient.editor.PersistentNotePersistenceStrategy;
+import tools.sqlclient.editor.TemporaryNotePersistenceStrategy;
 import tools.sqlclient.exec.AsyncJobStatus;
 import tools.sqlclient.exec.ColumnDef;
 import tools.sqlclient.exec.ColumnOrderDecider;
@@ -331,7 +333,9 @@ public class MainFrame extends JFrame {
             java.nio.file.Path path = java.nio.file.Path.of("note_icons.conf");
             java.util.List<String> out = new java.util.ArrayList<>();
             for (java.util.Map.Entry<Long, NoteIconSpec> e : noteIconSpecs.entrySet()) {
-                out.add(e.getKey() + "|" + e.getValue().toConfigString());
+                if (e.getKey() != null && e.getKey() > 0) {
+                    out.add(e.getKey() + "|" + e.getValue().toConfigString());
+                }
             }
             java.nio.file.Files.write(path, out, java.nio.charset.StandardCharsets.UTF_8);
         } catch (Exception ignore) {
@@ -349,7 +353,9 @@ public class MainFrame extends JFrame {
         if (spec == null) {
             spec = NoteIconSpec.random(iconRandom);
             noteIconSpecs.put(id, spec);
-            persistNoteIcons();
+            if (!note.isTemporary()) {
+                persistNoteIcons();
+            }
         }
         return spec.toIcon();
     }
@@ -363,7 +369,9 @@ public class MainFrame extends JFrame {
         long id = note.getId();
         NoteIconSpec spec = NoteIconSpec.random(iconRandom);
         noteIconSpecs.put(id, spec);
-        persistNoteIcons();
+        if (!note.isTemporary()) {
+            persistNoteIcons();
+        }
         Icon icon = spec.toIcon();
         // 刷新所有已打开的窗口 & 标签
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
@@ -885,7 +893,13 @@ public class MainFrame extends JFrame {
             @Override
             public void actionPerformed(ActionEvent e) {
                 EditorTabPanel panel = getCurrentPanel();
-                if (panel != null) panel.saveNow();
+                if (panel != null) {
+                    if (panel.isTemporary()) {
+                        saveTemporaryPanel(panel);
+                    } else {
+                        panel.saveNow();
+                    }
+                }
             }
         }));
         file.add(new JMenuItem(new AbstractAction("保存全部") {
@@ -1611,8 +1625,8 @@ public class MainFrame extends JFrame {
                 JOptionPane.showMessageDialog(this, "标题已存在，请重新输入");
                 continue;
             }
-            Note note = noteRepository.create(title, type);
-            OperationLog.log("新建笔记: " + title + " [" + type + "]");
+            Note note = createTemporaryNote(type, title, "");
+            OperationLog.log("新建临时笔记: " + title + " [" + type + "]");
             openNoteInCurrentMode(note);
             break;
         }
@@ -1620,6 +1634,9 @@ public class MainFrame extends JFrame {
 
     private EditorTabPanel getOrCreatePanel(Note note) {
         return panelCache.computeIfAbsent(note.getId(), id -> {
+            NotePersistenceStrategy strategy = note.isTemporary()
+                    ? new TemporaryNotePersistenceStrategy()
+                    : new PersistentNotePersistenceStrategy();
             EditorTabPanel p = new EditorTabPanel(
                     noteRepository,
                     metadataService,
@@ -1632,7 +1649,7 @@ public class MainFrame extends JFrame {
                     this::onPanelFocused,
                     this::openNoteByTitle,
                     defaultPageSize,
-                    new PersistentNotePersistenceStrategy()
+                    strategy
             );
             p.setExecuteHandler(() -> executeCurrentSql(true));
             p.setSuggestionEnabled(suggestionEnabled);
@@ -1697,6 +1714,7 @@ public class MainFrame extends JFrame {
         JInternalFrame frame = new JInternalFrame(getPanelDisplayTitle(panel), true, true, true, true);
         // 为子窗体设置持久化的随机绘制图标
         frame.setFrameIcon(getOrCreateNoteIcon(panel.getNote()));
+        frame.setDefaultCloseOperation(WindowConstants.DO_NOTHING_ON_CLOSE);
         frame.setSize(600, 400);
         frame.setLocation(20 * desktopPane.getAllFrames().length,
                 20 * desktopPane.getAllFrames().length);
@@ -1707,9 +1725,13 @@ public class MainFrame extends JFrame {
         frame.addInternalFrameListener(new InternalFrameAdapter() {
             @Override
             public void internalFrameClosing(InternalFrameEvent e) {
+                if (!confirmTemporaryClose(panel)) {
+                    return;
+                }
                 unregisterRoutinePanel(panel);
                 panelCache.remove(panel.getNote().getId());
                 persistOpenFrames();
+                frame.dispose();
             }
         });
         desktopPane.add(frame);
@@ -1798,6 +1820,9 @@ public class MainFrame extends JFrame {
             if (frame != null) {
                 EditorTabPanel panel = extractPanelFromFrame(frame);
                 if (panel != null) {
+                    if (!confirmTemporaryClose(panel)) {
+                        return;
+                    }
                     unregisterRoutinePanel(panel);
                     panelCache.remove(panel.getNote().getId());
                 }
@@ -1809,6 +1834,9 @@ public class MainFrame extends JFrame {
                 Component comp = tabbedPane.getComponentAt(idx);
                 EditorTabPanel panel = extractPanel(comp);
                 if (panel != null) {
+                    if (!confirmTemporaryClose(panel)) {
+                        return;
+                    }
                     unregisterRoutinePanel(panel);
                     panelCache.remove(panel.getNote().getId());
                 }
@@ -1818,6 +1846,99 @@ public class MainFrame extends JFrame {
         persistOpenFrames();
         syncActivePanelWithSelection();
         updateExecutionButtons();
+    }
+
+    private boolean confirmTemporaryClose(EditorTabPanel panel) {
+        if (panel == null || !panel.isTemporary()) {
+            return true;
+        }
+        if (!panel.isDirty()) {
+            return true;
+        }
+        Object[] options = {"保存为正式笔记", "不保存", "取消"};
+        int choice = JOptionPane.showOptionDialog(
+                this,
+                "临时笔记内容已修改，是否保存为正式笔记？",
+                "关闭临时笔记",
+                JOptionPane.DEFAULT_OPTION,
+                JOptionPane.WARNING_MESSAGE,
+                null,
+                options,
+                options[0]
+        );
+        if (choice == 0) {
+            return saveTemporaryPanel(panel);
+        }
+        if (choice == 1) {
+            return true;
+        }
+        return false;
+    }
+
+    private boolean saveTemporaryPanel(EditorTabPanel panel) {
+        if (panel == null) {
+            return false;
+        }
+        while (true) {
+            String suggestion = panel.getNote().getTitle();
+            String title = JOptionPane.showInputDialog(this, "保存为正式笔记", suggestion);
+            if (title == null) {
+                return false;
+            }
+            title = title.trim();
+            if (title.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "标题不能为空");
+                continue;
+            }
+            if (noteRepository.titleExists(title, null)) {
+                JOptionPane.showMessageDialog(this, "标题已存在，请重新输入");
+                continue;
+            }
+            try {
+                Note created = noteRepository.create(title, panel.getNote().getDatabaseType());
+                noteRepository.updateContent(created, panel.getSqlText());
+                try {
+                    LinkResolver.resolveAndPersistLinks(noteRepository, created, panel.getSqlText());
+                } catch (Exception ex) {
+                    OperationLog.log("解析/持久化链接失败: " + ex.getMessage());
+                }
+                convertTemporaryPanel(panel, created);
+                return true;
+            } catch (Exception ex) {
+                JOptionPane.showMessageDialog(this, "保存失败: " + ex.getMessage());
+                return false;
+            }
+        }
+    }
+
+    private void convertTemporaryPanel(EditorTabPanel panel, Note created) {
+        long oldId = panel.getNote().getId();
+        created.setTemporary(false);
+        panel.replaceNote(created, new PersistentNotePersistenceStrategy(),
+                newTitle -> updateTitleForPanel(newTitle, created.getId()));
+        panelCache.remove(oldId);
+        panelCache.put(created.getId(), panel);
+        if (runningExecutions.containsKey(oldId)) {
+            runningExecutions.put(created.getId(), runningExecutions.remove(oldId));
+        }
+        if (resultTabCounters.containsKey(oldId)) {
+            resultTabCounters.put(created.getId(), resultTabCounters.remove(oldId));
+        }
+        Icon icon = getOrCreateNoteIcon(created);
+        for (JInternalFrame frame : desktopPane.getAllFrames()) {
+            EditorTabPanel framePanel = extractPanelFromFrame(frame);
+            if (framePanel == panel) {
+                frame.setFrameIcon(icon);
+                frame.setTitle(getPanelDisplayTitle(panel));
+                break;
+            }
+        }
+        int idx = tabbedPane.indexOfComponent(panel);
+        if (idx >= 0) {
+            tabbedPane.setIconAt(idx, icon);
+        }
+        refreshPanelTitle(panel);
+        persistOpenFrames();
     }
 
     private void navigateEditors(boolean forward) {
@@ -1940,14 +2061,22 @@ public class MainFrame extends JFrame {
         for (JInternalFrame frame : desktopPane.getAllFrames()) {
             EditorTabPanel panel = extractPanelFromFrame(frame);
             if (panel != null) {
-                panel.saveNow();
+                if (panel.isTemporary()) {
+                    saveTemporaryPanel(panel);
+                } else {
+                    panel.saveNow();
+                }
             }
         }
         for (int i = 0; i < tabbedPane.getTabCount(); i++) {
             Component comp = tabbedPane.getComponentAt(i);
             EditorTabPanel panel = extractPanel(comp);
             if (panel != null) {
-                panel.saveNow();
+                if (panel.isTemporary()) {
+                    saveTemporaryPanel(panel);
+                } else {
+                    panel.saveNow();
+                }
             }
         }
         persistOpenFrames();
@@ -2474,9 +2603,9 @@ public class MainFrame extends JFrame {
         }
         Object custom = panel.getClientProperty("customTitle");
         if (custom instanceof String title && !title.isBlank()) {
-            return title;
+            return appendTemporaryMark(title, panel);
         }
-        return panel.getNote().getTitle();
+        return appendTemporaryMark(panel.getNote().getTitle(), panel);
     }
 
     private String getPanelTooltip(EditorTabPanel panel) {
@@ -2517,7 +2646,7 @@ public class MainFrame extends JFrame {
         }
         int idx = tabbedPane.indexOfComponent(panel);
         if (idx >= 0) {
-            tabbedPane.setTitleAt(idx, title);
+            tabbedPane.setTitleAt(idx, appendTemporaryMark(title, panel));
         }
     }
 
@@ -2532,7 +2661,7 @@ public class MainFrame extends JFrame {
                     EditorTabPanel framePanel = extractPanelFromFrame(frame);
                     if (framePanel == p) {
                         if (p.getClientProperty("customTitle") == null) {
-                            frame.setTitle(title);
+                            frame.setTitle(appendTemporaryMark(title, p));
                         }
                         break;
                     }
@@ -2540,6 +2669,13 @@ public class MainFrame extends JFrame {
             }
         });
         persistOpenFrames();
+    }
+
+    private String appendTemporaryMark(String title, EditorTabPanel panel) {
+        if (panel != null && panel.isTemporary()) {
+            return title + " (临时)";
+        }
+        return title;
     }
 
     private void persistOpenFrames() {
@@ -2828,11 +2964,17 @@ public class MainFrame extends JFrame {
     }
 
     private Note createTemporaryNote(RoutineInfo info, String ddl) {
-        long now = System.currentTimeMillis();
         String title = "临时查看: " + info.displayName();
+        return createTemporaryNote(DatabaseType.POSTGRESQL, title, ddl == null ? "" : ddl);
+    }
+
+    private Note createTemporaryNote(DatabaseType type, String title, String content) {
+        long now = System.currentTimeMillis();
         long tempId = -Math.abs(java.util.concurrent.ThreadLocalRandom.current().nextLong(Long.MAX_VALUE));
-        return new Note(tempId, title, ddl == null ? "" : ddl, DatabaseType.POSTGRESQL, now, now,
+        Note note = new Note(tempId, title, content == null ? "" : content, type, now, now,
                 "", false, false, 0, "");
+        note.setTemporary(true);
+        return note;
     }
 
     void openPermanentNote(Note note) {
