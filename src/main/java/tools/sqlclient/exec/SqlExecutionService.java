@@ -580,9 +580,12 @@ public class SqlExecutionService {
         List<ColumnDef> defs = new ArrayList<>();
         List<String> safe = columns == null ? List.of() : columns;
         int seq = 1;
-        for (String col : safe) {
-            String display = col == null ? "" : col;
-            defs.add(new ColumnDef(display + "#" + seq, display, display));
+        for (int i = 0; i < safe.size(); i++) {
+            String col = safe.get(i);
+            ColumnMeta meta = (metas != null && i < metas.size()) ? metas.get(i) : null;
+            String display = meta != null && meta.getDisplayLabel() != null ? meta.getDisplayLabel() : (col == null ? "" : col);
+            String dataKey = meta != null && meta.getDataKey() != null ? meta.getDataKey() : col;
+            defs.add(new ColumnDef(display + "#" + seq, display, dataKey));
             seq++;
         }
         return defs;
@@ -688,8 +691,9 @@ public class SqlExecutionService {
         List<String> targetColumns = columns == null ? List.of() : columns;
         for (java.util.Map<String, String> map : rowMaps) {
             List<String> row = new ArrayList<>();
-            for (String col : targetColumns) {
-                row.add(map != null ? map.get(col) : null);
+            for (int i = 0; i < targetColumns.size(); i++) {
+                Object value = RowValueResolver.resolveValue(targetColumns, map, i);
+                row.add(value != null ? value.toString() : null);
             }
             rows.add(row);
         }
