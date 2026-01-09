@@ -3002,7 +3002,7 @@ public class MainFrame extends JFrame {
     }
 
     private JDialog showProgressDialog(Window owner, String message) {
-        JDialog dialog = new JDialog(owner, "执行中", false);
+        JDialog dialog = new JDialog(owner, "执行中", Dialog.ModalityType.MODELESS);
         dialog.setLayout(new BorderLayout());
         dialog.add(new JLabel(message), BorderLayout.NORTH);
         JProgressBar bar = new JProgressBar();
