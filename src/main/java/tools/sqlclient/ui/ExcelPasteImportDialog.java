@@ -57,6 +57,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -216,6 +217,10 @@ public class ExcelPasteImportDialog extends JDialog {
 
         JPanel fieldHeader = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 4));
         fieldToggle.addActionListener(e -> fieldPanel.setVisible(fieldToggle.isSelected()));
+        JButton moveUpBtn = new JButton("上移");
+        moveUpBtn.addActionListener(e -> moveSelectedRow(-1));
+        JButton moveDownBtn = new JButton("下移");
+        moveDownBtn.addActionListener(e -> moveSelectedRow(1));
         JButton resetInferenceBtn = new JButton(new javax.swing.AbstractAction("重置推断") {
             @Override
             public void actionPerformed(ActionEvent e) {
@@ -223,6 +228,8 @@ public class ExcelPasteImportDialog extends JDialog {
             }
         });
         fieldHeader.add(fieldToggle);
+        fieldHeader.add(moveUpBtn);
+        fieldHeader.add(moveDownBtn);
         fieldHeader.add(resetInferenceBtn);
         JPanel fieldWrapper = new JPanel(new BorderLayout());
         fieldWrapper.add(fieldHeader, BorderLayout.NORTH);
@@ -635,6 +642,26 @@ public class ExcelPasteImportDialog extends JDialog {
         TableColumn typeCol = fieldTable.getColumnModel().getColumn(3);
         typeCol.setCellEditor(new DefaultCellEditor(new javax.swing.JComboBox<>(allowedTypes())));
         validateFieldTable();
+    }
+
+    private void moveSelectedRow(int delta) {
+        int row = fieldTable.getSelectedRow();
+        if (row < 0) {
+            return;
+        }
+        int target = row + delta;
+        if (target < 0 || target >= columns.size()) {
+            return;
+        }
+        if (fieldTable.isEditing()) {
+            fieldTable.getCellEditor().stopCellEditing();
+        }
+        Collections.swap(columns, row, target);
+        applyColumns(columns);
+        if (fieldTable.getRowCount() > target) {
+            fieldTable.setRowSelectionInterval(target, target);
+            fieldTable.scrollRectToVisible(fieldTable.getCellRect(target, 0, true));
+        }
     }
 
     private String statusText(ColumnMeta c) {
@@ -1318,9 +1345,9 @@ public class ExcelPasteImportDialog extends JDialog {
                 return "text";
             }
             if (candidates.contains(DataCandidate.BOOLEAN)) return "boolean";
+            if (candidates.contains(DataCandidate.NUMERIC)) return "numeric";
             if (candidates.contains(DataCandidate.INTEGER)) return "integer";
             if (candidates.contains(DataCandidate.BIGINT)) return "bigint";
-            if (candidates.contains(DataCandidate.NUMERIC)) return "numeric";
             if (candidates.contains(DataCandidate.DATE)) return "date";
             if (candidates.contains(DataCandidate.TIMESTAMP)) return "timestamp";
             if (candidates.contains(DataCandidate.UUID)) return "uuid";
