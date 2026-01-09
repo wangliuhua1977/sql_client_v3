@@ -9,7 +9,6 @@ import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 
 import javax.swing.JFrame;
-import javax.swing.SwingUtilities;
 import java.awt.GraphicsEnvironment;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -19,49 +18,43 @@ import static org.mockito.Mockito.mock;
 class RoutineSourceDialogFactoryTest {
 
     @Test
-    void openOwnedDialogRequiresOwner() throws Exception {
-        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless(), "Headless environment skips Swing window test.");
-
-        RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(
-                mock(NoteRepository.class),
-                mock(MetadataService.class),
-                note -> {
-                });
-        Note note = new Note(1L, "temp", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
-        EditorStyle style = new EditorStyle("default", 12, "#FFFFFF", "#000000", "#CCCCCC", "#000000",
-                "#000000", "#000000", "#000000", "#000000", "#000000", "#000000", "#000000",
-                "#000000", "#000000", "#FFFFFF", "#000000");
-
-        SwingUtilities.invokeAndWait(() -> assertThrows(IllegalStateException.class, () ->
-                factory.openOwnedDialog(null, note, style, true, 200, "test")));
+    void openOwnedDialogBindsOwner() {
+        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
+        NoteRepository noteRepository = mock(NoteRepository.class);
+        MetadataService metadataService = mock(MetadataService.class);
+        RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(noteRepository, metadataService, note -> {
+        });
+        Note note = new Note(-1L, "临时查看: test", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
+        EditorStyle style = new EditorStyle("default", 13,
+                "#FFFFFF", "#000000", "#D0E7FF", "#000000",
+                "#005CC5", "#22863A", "#6A737D", "#005CC5",
+                "#6F42C1", "#6F42C1", "#E36209", "#24292E",
+                "#032F62", "#FFFBCC", "#005CC5");
+        JFrame owner = new JFrame("Main");
+        TemporaryNoteWindow window = factory.openOwnedDialog(owner, note, style, false, 200, "leshan.test()");
+        try {
+            assertSame(owner, window.getOwner());
+        } finally {
+            window.dispose();
+            owner.dispose();
+        }
     }
 
     @Test
-    void openOwnedDialogBindsOwner() throws Exception {
-        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless(), "Headless environment skips Swing window test.");
+    void openOwnedDialogRejectsNullOwner() {
+        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
+        NoteRepository noteRepository = mock(NoteRepository.class);
+        MetadataService metadataService = mock(MetadataService.class);
+        RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(noteRepository, metadataService, note -> {
+        });
+        Note note = new Note(-1L, "临时查看: test", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
+        EditorStyle style = new EditorStyle("default", 13,
+                "#FFFFFF", "#000000", "#D0E7FF", "#000000",
+                "#005CC5", "#22863A", "#6A737D", "#005CC5",
+                "#6F42C1", "#6F42C1", "#E36209", "#24292E",
+                "#032F62", "#FFFBCC", "#005CC5");
 
-        RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(
-                mock(NoteRepository.class),
-                mock(MetadataService.class),
-                note -> {
-                });
-        Note note = new Note(1L, "temp", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
-        EditorStyle style = new EditorStyle("default", 12, "#FFFFFF", "#000000", "#CCCCCC", "#000000",
-                "#000000", "#000000", "#000000", "#000000", "#000000", "#000000", "#000000",
-                "#000000", "#000000", "#FFFFFF", "#000000");
-
-        JFrame frame = new JFrame("owner");
-        try {
-            SwingUtilities.invokeAndWait(() -> {
-                TemporaryNoteWindow window = factory.openOwnedDialog(frame, note, style, true, 200, "test");
-                try {
-                    assertSame(frame, window.getOwner());
-                } finally {
-                    window.dispose();
-                }
-            });
-        } finally {
-            frame.dispose();
-        }
+        assertThrows(IllegalStateException.class,
+                () -> factory.openOwnedDialog(null, note, style, false, 200, "leshan.test()"));
     }
 }
