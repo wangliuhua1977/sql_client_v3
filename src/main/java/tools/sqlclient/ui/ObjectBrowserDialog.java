@@ -14,9 +14,9 @@ public class ObjectBrowserDialog extends JDialog {
     private final ObjectBrowserPanel panel;
 
     public interface RoutineActionHandler {
-        void openRoutine(RoutineInfo info, boolean editable);
+        void openRoutine(Component source, RoutineInfo info, boolean editable);
 
-        void runRoutine(RoutineInfo info);
+        void runRoutine(Component source, RoutineInfo info);
     }
 
     public ObjectBrowserDialog(JFrame owner, MetadataService metadataService,
@@ -28,13 +28,13 @@ public class ObjectBrowserDialog extends JDialog {
         setLayout(new BorderLayout());
         panel = new ObjectBrowserPanel(metadataService, routineService, new ObjectBrowserPanel.RoutineActionHandler() {
             @Override
-            public void openRoutine(RoutineInfo info, boolean editable) {
-                routineHandler.openRoutine(info, editable);
+            public void openRoutine(Component source, RoutineInfo info, boolean editable) {
+                routineHandler.openRoutine(source, info, editable);
             }
 
             @Override
-            public void runRoutine(RoutineInfo info) {
-                routineHandler.runRoutine(info);
+            public void runRoutine(Component source, RoutineInfo info) {
+                routineHandler.runRoutine(source, info);
             }
         });
         add(panel, BorderLayout.CENTER);
@@ -44,4 +44,3 @@ public class ObjectBrowserDialog extends JDialog {
         panel.reload();
     }
 }
-

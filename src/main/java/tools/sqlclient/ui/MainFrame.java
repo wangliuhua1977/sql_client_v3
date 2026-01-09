@@ -1334,13 +1334,13 @@ public class MainFrame extends JFrame {
         navigationBrowserPanel = new ObjectBrowserPanel(metadataService, pgRoutineService,
                 new ObjectBrowserPanel.RoutineActionHandler() {
                     @Override
-                    public void openRoutine(RoutineInfo info, boolean editable) {
-                        openRoutineEditor(info, editable);
+                    public void openRoutine(Component source, RoutineInfo info, boolean editable) {
+                        openRoutineEditor(info, editable, source);
                     }
 
                     @Override
-                    public void runRoutine(RoutineInfo info) {
-                        runRoutineWithDialog(info);
+                    public void runRoutine(Component source, RoutineInfo info) {
+                        runRoutineWithDialog(info, source);
                     }
                 });
         navigationTree = navigationBrowserPanel.getTree();
@@ -1350,13 +1350,13 @@ public class MainFrame extends JFrame {
             objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
                     new ObjectBrowserDialog.RoutineActionHandler() {
                         @Override
-                        public void openRoutine(RoutineInfo info, boolean editable) {
-                            openRoutineEditor(info, editable);
+                        public void openRoutine(Component source, RoutineInfo info, boolean editable) {
+                            openRoutineEditor(info, editable, source);
                         }
 
                         @Override
-                        public void runRoutine(RoutineInfo info) {
-                            runRoutineWithDialog(info);
+                        public void runRoutine(Component source, RoutineInfo info) {
+                            runRoutineWithDialog(info, source);
                         }
                     });
             objectBrowserDialog.setVisible(true);
@@ -2832,13 +2832,13 @@ public class MainFrame extends JFrame {
             objectBrowserDialog = new ObjectBrowserDialog(MainFrame.this, metadataService, pgRoutineService,
                     new ObjectBrowserDialog.RoutineActionHandler() {
                         @Override
-                        public void openRoutine(RoutineInfo info, boolean editable) {
-                            openRoutineEditor(info, editable);
+                        public void openRoutine(Component source, RoutineInfo info, boolean editable) {
+                            openRoutineEditor(info, editable, source);
                         }
 
                         @Override
-                        public void runRoutine(RoutineInfo info) {
-                            runRoutineWithDialog(info);
+                        public void runRoutine(Component source, RoutineInfo info) {
+                            runRoutineWithDialog(info, source);
                         }
                     });
         }
@@ -2889,7 +2889,7 @@ public class MainFrame extends JFrame {
         }
     }
 
-    private void openRoutineEditor(RoutineInfo info, boolean editable) {
+    private void openRoutineEditor(RoutineInfo info, boolean editable, Component ownerSource) {
         if (info == null) {
             return;
         }
@@ -2906,12 +2906,13 @@ public class MainFrame extends JFrame {
                 return;
             }
         }
-        showRoutineDdlAndOpen(info, editable, null);
+        showRoutineDdlAndOpen(info, editable, ownerSource, null);
     }
 
-    private void runRoutineWithDialog(RoutineInfo info) {
-        showRoutineDdlAndOpen(info, false, panel -> {
-            RoutineRunDialog dialog = new RoutineRunDialog(this, info);
+    private void runRoutineWithDialog(RoutineInfo info, Component ownerSource) {
+        showRoutineDdlAndOpen(info, false, ownerSource, panel -> {
+            Window owner = resolveOwnerWindow(ownerSource);
+            RoutineRunDialog dialog = new RoutineRunDialog(owner instanceof Frame ? (Frame) owner : this, info);
             dialog.setVisible(true);
             RoutineRunDialog.Result result = dialog.getResult();
             if (result == null || !result.confirmed() || result.sql() == null || result.sql().isBlank()) {
@@ -2921,11 +2922,13 @@ public class MainFrame extends JFrame {
         });
     }
 
-    private void showRoutineDdlAndOpen(RoutineInfo info, boolean editable, java.util.function.Consumer<EditorTabPanel> afterOpen) {
+    private void showRoutineDdlAndOpen(RoutineInfo info, boolean editable, Component ownerSource,
+                                       java.util.function.Consumer<EditorTabPanel> afterOpen) {
         if (info == null) {
             return;
         }
-        JDialog progress = showProgressDialog("正在获取源码...");
+        Window owner = resolveOwnerWindow(ownerSource);
+        JDialog progress = showProgressDialog(owner, "正在获取源码...");
         pgRoutineService.loadRoutineDdl(info.oid()).whenComplete((ddl, ex) -> SwingUtilities.invokeLater(() -> {
             if (progress != null) {
                 progress.dispose();
@@ -2936,7 +2939,7 @@ public class MainFrame extends JFrame {
             }
             Note tempNote = createTemporaryNote(info, ddl);
             TemporaryNoteWindow window = new TemporaryNoteWindow(
-                    this,
+                    owner,
                     noteRepository,
                     metadataService,
                     tempNote,
@@ -2998,18 +3001,22 @@ public class MainFrame extends JFrame {
         panel.setReadOnly(!editable);
     }
 
-    private JDialog showProgressDialog(String message) {
-        JDialog dialog = new JDialog(this, "执行中", false);
+    private JDialog showProgressDialog(Window owner, String message) {
+        JDialog dialog = new JDialog(owner, "执行中", Dialog.ModalityType.MODELESS);
         dialog.setLayout(new BorderLayout());
         dialog.add(new JLabel(message), BorderLayout.NORTH);
         JProgressBar bar = new JProgressBar();
         bar.setIndeterminate(true);
         dialog.add(bar, BorderLayout.CENTER);
         dialog.setSize(320, 100);
-        dialog.setLocationRelativeTo(this);
+        dialog.setLocationRelativeTo(owner);
         dialog.setAlwaysOnTop(true);
         dialog.setVisible(true);
         return dialog;
+    }
+
+    private Window resolveOwnerWindow(Component source) {
+        return WindowOwnerResolver.resolve(source, this);
     }
 
     private void publishRoutine(EditorTabPanel panel, RoutineInfo info) {
