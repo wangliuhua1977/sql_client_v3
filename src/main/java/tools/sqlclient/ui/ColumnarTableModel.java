@@ -11,11 +11,27 @@ import java.util.List;
  */
 public class ColumnarTableModel extends AbstractTableModel {
     private List<ColumnDef> columns = List.of();
-    private List<List<String>> rows = List.of();
+    private List<Object[]> rows = List.of();
 
     public void setData(List<ColumnDef> columns, List<List<String>> rows) {
         this.columns = columns == null ? List.of() : new ArrayList<>(columns);
-        this.rows = rows == null ? List.of() : new ArrayList<>(rows);
+        if (rows == null) {
+            this.rows = List.of();
+        } else {
+            List<Object[]> converted = new ArrayList<>(rows.size());
+            int columnCount = this.columns.size();
+            for (List<String> row : rows) {
+                Object[] values = new Object[columnCount];
+                if (row != null) {
+                    int limit = Math.min(row.size(), columnCount);
+                    for (int i = 0; i < limit; i++) {
+                        values[i] = row.get(i);
+                    }
+                }
+                converted.add(values);
+            }
+            this.rows = converted;
+        }
         fireTableStructureChanged();
     }
 
@@ -46,10 +62,33 @@ public class ColumnarTableModel extends AbstractTableModel {
         if (rowIndex < 0 || rowIndex >= rows.size()) {
             return null;
         }
-        List<String> row = rows.get(rowIndex);
-        if (row == null || columnIndex < 0 || columnIndex >= row.size()) {
+        Object[] row = rows.get(rowIndex);
+        if (row == null || columnIndex < 0 || columnIndex >= row.length) {
             return null;
         }
-        return row.get(columnIndex);
+        return row[columnIndex];
+    }
+
+    @Override
+    public boolean isCellEditable(int rowIndex, int columnIndex) {
+        return columnIndex >= 0 && columnIndex < getColumnCount();
+    }
+
+    @Override
+    public void setValueAt(Object aValue, int rowIndex, int columnIndex) {
+        if (rowIndex < 0 || rowIndex >= rows.size()) {
+            return;
+        }
+        Object[] row = rows.get(rowIndex);
+        if (row == null || columnIndex < 0 || columnIndex >= row.length) {
+            return;
+        }
+        row[columnIndex] = aValue;
+        fireTableCellUpdated(rowIndex, columnIndex);
+    }
+
+    @Override
+    public Class<?> getColumnClass(int columnIndex) {
+        return Object.class;
     }
 }

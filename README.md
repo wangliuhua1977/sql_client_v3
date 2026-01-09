@@ -64,7 +64,7 @@
 
 ## 临时笔记窗口（过程/函数查看）
 - 触发场景：对象树中双击函数/存储过程节点、右键选择“打开源码（只读）/查看定义/Show DDL”等入口，或任何读取例程定义的动作，都会打开“临时查看：<schema.object()>”独立窗口。
-- 默认行为：窗口内的编辑器允许查看与临时修改源码，但不自动保存、不写入笔记数据库、不记录最近笔记；关闭窗口直接丢弃更改，不弹保存确认。
+- 默认行为：窗口内的编辑器允许查看与临时修改源码，但不自动保存、不写入笔记数据库、不记录最近笔记；关闭窗口时若内容已修改，会提示“保存为正式笔记 / 不保存 / 取消”。
 - 保存为永久笔记：工具栏提供“保存为永久笔记…”按钮，点击后输入目标标题并确认，才会创建正式笔记并写入内容（可在主窗口继续编辑）。未点击前不会产生任何文件或数据库记录。
 
 ### 窗口与焦点
@@ -115,6 +115,21 @@
 - 实现方式：封装工具类 `tools.sqlclient.ui.swing.ScrollBarWheelSupport#enableWheelOnVerticalScrollBar(JScrollPane)`，在 SQL 编辑器的 `RTextScrollPane` 上安装 `MouseWheelListener`，仅监听垂直 `JScrollBar`，不改动编辑器本体的原生滚轮行为。
 - 方向与步进：使用 `MouseWheelEvent#getUnitsToScroll()` 与滚动条 `getUnitIncrement`（回退 `getBlockIncrement`）计算步进，向下滚动（值大于 0）使滚动条 value 增大、内容下移，向上滚动相反；结果值在 `minimum` 与 `maximum - visibleAmount` 之间夹紧。
 - 绑定与线程：通过滚动条 `clientProperty` 标记避免重复绑定，初始化时若不在 EDT 会使用 `SwingUtilities.invokeLater` 派发安装，确保监听注册与 UI 更新在事件派发线程完成。
+
+## 前端开发技术文档：子窗体策略、结果集可编辑机制与完整内容编辑器
+### 子窗体策略（临时查看窗口）
+- 临时查看函数/存储过程源码的窗口统一使用 **owned JDialog**（modeless），owner 来自触发动作所在主窗体（`SwingUtilities.getWindowAncestor` 或当前活动窗口），确保不在任务栏单独出现、与主窗体最小化/激活同步。
+- 关闭链路：`setDefaultCloseOperation(DO_NOTHING_ON_CLOSE)` → `WindowListener` 拦截关闭 → 触发“保存为正式笔记/不保存/取消”的统一提示；仅在确认后 `dispose()`，避免绕过临时笔记保存提示。
+- 资源释放：窗口在 `dispose()` 中移除窗口监听与按钮监听，避免临时窗口频繁打开时的监听器残留。
+
+### 结果集可编辑机制（仅前端）
+- 结果集表格 `ColumnarTableModel` 允许直接编辑：`isCellEditable` 对结果列返回 `true`，`setValueAt` 仅更新模型内存并 `fireTableCellUpdated`，**不触发任何 SQL/网络调用**。
+- 数据结构采用 `List<Object[]>` 行数组以支持重复列名与稳定索引；编辑仅影响当前结果面板的可见数据，不回写数据库。
+
+### 完整内容编辑器（双击单元格）
+- 双击结果集单元格会打开“完整内容编辑器”对话框：`JTextArea + JScrollPane`，标题包含行号/列名；“确定”写回模型，“取消”不修改。
+- 弹窗为 owned dialog（owner=主窗体），默认大小约 800×600，支持 **Esc=取消**、**Ctrl+Enter=确定**，并提供“自动换行”开关。
+- NULL/类型策略：`null` 单元格以空字符串展示与编辑；编辑后以字符串写回表格显示，不做类型解析或数据库回写，避免误解析或权限风险。
 
 ## 问题根因与修复说明
 - **失败链路**：元数据刷新在拉取表/视图/字段时直接调用 `/waf/api/jobs/result`，SQL 只做 `LIMIT 1000` 的 keyset 分页，未在客户端裁剪 pageSize 或使用 SQL 级 OFFSET 分页；当 schema 超过 1000 行时，后端窗口被截断并返回 `RESULT_NOT_READY` / HTTP 410 `RESULT_EXPIRED`，旧逻辑在 60s 超时时抛出异常，刷新失败且 staging 未写回。代码可见 `MetadataRefreshService#waitUntilReady` 的轮询与超时逻辑。
