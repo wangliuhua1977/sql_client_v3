@@ -8,7 +8,12 @@ import tools.sqlclient.metadata.MetadataService.SuggestionType;
 
 import javax.swing.*;
 import javax.swing.border.LineBorder;
+import javax.swing.event.CaretEvent;
+import javax.swing.event.CaretListener;
 import java.awt.*;
+import java.awt.event.AWTEventListener;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -39,6 +44,14 @@ public class SuggestionEngine {
     private boolean showTableHintForColumns = true;
     private SuggestionContext lastContext;
     private volatile boolean enabled = true;
+    private volatile boolean suppressCaretDismiss;
+    private volatile long suppressCaretDismissUntil;
+    private int lastCaretPosition = -1;
+    private AWTEventListener globalMouseListener;
+    private static final long CARET_SUPPRESS_WINDOW_MS = 80;
+    private static final boolean POPUP_DEBUG = "true".equalsIgnoreCase(Config.getRawProperty("suggestion.popup.debug"));
+    private String lastHideReason;
+    private Boolean popupVisibilityOverride;
 
     public SuggestionEngine(MetadataService metadataService, RSyntaxTextArea textArea) {
         this.metadataService = metadataService;
@@ -71,17 +84,37 @@ public class SuggestionEngine {
                 }
             }
         });
+        installDismissListeners();
     }
 
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
         if (!enabled) {
-            popup.setVisible(false);
+            hidePopup("disabled");
         }
     }
 
     public void closePopup() {
-        popup.setVisible(false);
+        hidePopup("closePopup");
+    }
+
+    public void hidePopup(String reason) {
+        if (!SwingUtilities.isEventDispatchThread()) {
+            SwingUtilities.invokeLater(() -> hidePopup(reason));
+            return;
+        }
+        boolean wasVisible = isPopupVisible();
+        if (!wasVisible && globalMouseListener == null) {
+            return;
+        }
+        if (wasVisible) {
+            setPopupVisible(false);
+            lastHideReason = reason;
+            if (POPUP_DEBUG && OperationLog.isReady()) {
+                OperationLog.log("联想窗口已关闭: " + reason);
+            }
+        }
+        unregisterGlobalMouseListener();
     }
 
     public KeyAdapter createKeyListener() {
@@ -89,10 +122,10 @@ public class SuggestionEngine {
             @Override
             public void keyPressed(KeyEvent e) {
                 if (!enabled) {
-                    popup.setVisible(false);
+                    hidePopup("disabled");
                     return;
                 }
-                if (popup.isVisible()) {
+                if (isPopupVisible()) {
                     if (e.getKeyCode() == KeyEvent.VK_DOWN) {
                         int next = Math.min(list.getSelectedIndex() + 1, list.getModel().getSize() - 1);
                         list.setSelectedIndex(next);
@@ -110,7 +143,7 @@ public class SuggestionEngine {
                         e.consume();
                         return;
                     } else if (e.getKeyCode() == KeyEvent.VK_ESCAPE) {
-                        popup.setVisible(false);
+                        hidePopup("escape");
                         e.consume();
                         return;
                     }
@@ -120,12 +153,12 @@ public class SuggestionEngine {
             @Override
             public void keyReleased(KeyEvent e) {
                 if (!enabled) {
-                    popup.setVisible(false);
+                    hidePopup("disabled");
                     return;
                 }
 
                 // 弹窗打开时，用上下键只移动选中项，不触发重新检索
-                if (popup.isVisible()
+                if (isPopupVisible()
                         && (e.getKeyCode() == KeyEvent.VK_UP || e.getKeyCode() == KeyEvent.VK_DOWN)) {
                     e.consume();
                     return;
@@ -133,7 +166,7 @@ public class SuggestionEngine {
 
                 // 分号：结束语句并关闭联想
                 if (e.getKeyChar() == ';') {
-                    popup.setVisible(false);
+                    hidePopup("statementEnd");
                     return;
                 }
 
@@ -149,13 +182,13 @@ public class SuggestionEngine {
                 SuggestionContext ctx = analyzeContext();
 
                 // 如果这次没分析出来，但弹窗已开且是在输入过滤字符，就沿用上一次上下文
-                if (ctx == null && popup.isVisible() && filterKey && lastContext != null) {
+                if (ctx == null && isPopupVisible() && filterKey && lastContext != null) {
                     ctx = lastContext;
                 }
 
                 // 仍然没有上下文，说明光标不在 from/join 后等位置，直接关掉弹窗
                 if (ctx == null) {
-                    popup.setVisible(false);
+                    hidePopup("contextMissing");
                     return;
                 }
 
@@ -235,7 +268,7 @@ public class SuggestionEngine {
 
     private void showSuggestions(String token, SuggestionContext context, boolean skipFetch) {
         if (!enabled) {
-            popup.setVisible(false);
+            hidePopup("disabled");
             return;
         }
         boolean refreshing = false;
@@ -252,7 +285,7 @@ public class SuggestionEngine {
                 list.setSelectedIndex(0);
                 showPopup();
             } else {
-                popup.setVisible(false);
+                hidePopup("emptyItems");
             }
             return;
         }
@@ -269,7 +302,7 @@ public class SuggestionEngine {
                 list.setSelectedIndex(0);
                 showPopup();
             } else {
-                popup.setVisible(false);
+                hidePopup("emptyItems");
             }
             return;
         }
@@ -285,12 +318,19 @@ public class SuggestionEngine {
 
     private void showPopup() {
         try {
+            if (popupVisibilityOverride != null) {
+                popupVisibilityOverride = true;
+                return;
+            }
             Rectangle2D view = textArea.modelToView2D(textArea.getCaretPosition());
             if (view != null) {
                 popup.showAt(textArea, view.getBounds());
             }
+            if (isPopupVisible()) {
+                registerGlobalMouseListener();
+            }
         } catch (Exception ignored) {
-            popup.setVisible(false);
+            hidePopup("showFailed");
         }
     }
 
@@ -299,7 +339,7 @@ public class SuggestionEngine {
         if (item == null || "loading".equals(item.type()) || "hint".equals(item.type())) return;
         if ("all_columns".equals(item.type())) {
             if (lastContext == null || lastContext.tableHint() == null) {
-                popup.setVisible(false);
+                hidePopup("missingTableHint");
                 return;
             }
             java.util.List<String> cols = metadataService.loadColumnsFromCache(lastContext.tableHint());
@@ -311,7 +351,7 @@ public class SuggestionEngine {
                     ? lastContext.alias().trim() + "." : "";
             String joined = String.join(", ", cols.stream().map(c -> prefix + c).toList());
             insertText(joined);
-            popup.setVisible(false);
+            hidePopup("commitAllColumns");
             return;
         }
         String text = item.name();
@@ -323,16 +363,19 @@ public class SuggestionEngine {
             metadataService.ensureColumnsCachedAsync(item.name());
         }
         metadataService.recordUsage(item);
-        popup.setVisible(false);
+        hidePopup("commitItem");
     }
 
     private void insertText(String text) {
+        beginCaretDismissSuppression();
         try {
             int start = replaceStart >= 0 ? replaceStart : textArea.getSelectionStart();
             int end = replaceEnd >= 0 ? replaceEnd : textArea.getSelectionEnd();
             textArea.getDocument().remove(start, end - start);
             textArea.getDocument().insertString(start, text, null);
         } catch (Exception ignored) {
+        } finally {
+            SwingUtilities.invokeLater(this::endCaretDismissSuppression);
         }
     }
 
@@ -563,6 +606,134 @@ public class SuggestionEngine {
 
     private record TableBinding(String table, String alias) {}
     private record KeywordMatch(SuggestionType type, int start, int end, String keyword) {}
+
+    private void installDismissListeners() {
+        textArea.addFocusListener(new FocusAdapter() {
+            @Override
+            public void focusLost(FocusEvent e) {
+                hidePopup("focusLost");
+            }
+        });
+        CaretListener caretListener = new CaretListener() {
+            @Override
+            public void caretUpdate(CaretEvent e) {
+                int dot = e.getDot();
+                if (lastCaretPosition == -1) {
+                    lastCaretPosition = dot;
+                    return;
+                }
+                boolean changed = dot != lastCaretPosition;
+                lastCaretPosition = dot;
+                if (!changed || !isPopupVisible()) {
+                    return;
+                }
+                if (isCaretDismissSuppressed()) {
+                    return;
+                }
+                hidePopup("caretMoved");
+            }
+        };
+        textArea.addCaretListener(caretListener);
+        lastCaretPosition = textArea.getCaretPosition();
+    }
+
+    private void beginCaretDismissSuppression() {
+        suppressCaretDismiss = true;
+        suppressCaretDismissUntil = System.currentTimeMillis() + CARET_SUPPRESS_WINDOW_MS;
+    }
+
+    private void endCaretDismissSuppression() {
+        suppressCaretDismiss = false;
+        suppressCaretDismissUntil = 0L;
+    }
+
+    private boolean isCaretDismissSuppressed() {
+        if (!suppressCaretDismiss) {
+            return false;
+        }
+        if (System.currentTimeMillis() > suppressCaretDismissUntil) {
+            suppressCaretDismiss = false;
+            suppressCaretDismissUntil = 0L;
+            return false;
+        }
+        return true;
+    }
+
+    private void registerGlobalMouseListener() {
+        if (globalMouseListener != null) {
+            return;
+        }
+        globalMouseListener = event -> {
+            if (!(event instanceof MouseEvent mouseEvent)) {
+                return;
+            }
+            if (mouseEvent.getID() != MouseEvent.MOUSE_PRESSED) {
+                return;
+            }
+            if (!isPopupVisible()) {
+                return;
+            }
+            Component component = mouseEvent.getComponent();
+            if (component == null) {
+                hidePopup("globalMouse");
+                return;
+            }
+            if (isComponentInsidePopup(component) || isComponentInsideEditor(component)) {
+                return;
+            }
+            hidePopup("globalMouse");
+        };
+        Toolkit.getDefaultToolkit().addAWTEventListener(globalMouseListener, AWTEvent.MOUSE_EVENT_MASK);
+    }
+
+    private void unregisterGlobalMouseListener() {
+        if (globalMouseListener == null) {
+            return;
+        }
+        Toolkit.getDefaultToolkit().removeAWTEventListener(globalMouseListener);
+        globalMouseListener = null;
+    }
+
+    private boolean isComponentInsidePopup(Component component) {
+        return SwingUtilities.isDescendingFrom(component, popup)
+                || SwingUtilities.isDescendingFrom(component, popup.getRootPane());
+    }
+
+    private boolean isComponentInsideEditor(Component component) {
+        if (SwingUtilities.isDescendingFrom(component, textArea)) {
+            return true;
+        }
+        JScrollPane pane = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, textArea);
+        return pane != null && SwingUtilities.isDescendingFrom(component, pane);
+    }
+
+    private boolean isPopupVisible() {
+        return popupVisibilityOverride != null ? popupVisibilityOverride : popup.isVisible();
+    }
+
+    private void setPopupVisible(boolean visible) {
+        if (popupVisibilityOverride != null) {
+            popupVisibilityOverride = visible;
+            return;
+        }
+        popup.setVisible(visible);
+    }
+
+    void setPopupVisibilityForTest(boolean visible) {
+        popupVisibilityOverride = visible;
+    }
+
+    String getLastHideReasonForTest() {
+        return lastHideReason;
+    }
+
+    void clearLastHideReasonForTest() {
+        lastHideReason = null;
+    }
+
+    void insertTextForTest(String text) {
+        insertText(text);
+    }
 
     /**
      * 可调整大小的联想弹窗，使用无边框 JDialog + 自定义边缘拖拽手柄。

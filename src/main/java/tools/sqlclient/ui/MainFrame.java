@@ -36,6 +36,7 @@ import tools.sqlclient.util.Config;
 import tools.sqlclient.util.IconFactory;
 import tools.sqlclient.util.LinkResolver;
 import tools.sqlclient.util.OperationLog;
+import tools.sqlclient.util.UntitledNoteNamer;
 import tools.sqlclient.ui.DockManager;
 import tools.sqlclient.ui.DockPosition;
 import tools.sqlclient.ui.LayoutState;
@@ -102,7 +103,6 @@ public class MainFrame extends JFrame {
     private final MetadataService metadataService;
     private final EditorStyleRepository styleRepository;
     private final ThemeManager themeManager = new ThemeManager();
-    private final AtomicInteger untitledIndex = new AtomicInteger(1);
     private final java.util.Map<Long, EditorTabPanel> panelCache = new java.util.HashMap<>();
     private final Map<Long, java.util.List<RunningJobHandle>> runningExecutions = new ConcurrentHashMap<>();
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
@@ -264,6 +264,13 @@ public class MainFrame extends JFrame {
                 cancelScheduledBackup();
                 scheduledBackupExecutor.shutdownNow();
                 persistLayoutState();
+            }
+
+            @Override
+            public void windowDeactivated(java.awt.event.WindowEvent e) {
+                if (activePanel != null) {
+                    activePanel.hideSuggestionPopup("windowDeactivated");
+                }
             }
         });
         updateExecutionButtons();
@@ -1610,26 +1617,10 @@ public class MainFrame extends JFrame {
     }
 
     private void createNote(DatabaseType type) {
-        while (true) {
-            String suggested = "未命名" + untitledIndex.getAndIncrement();
-            String title = JOptionPane.showInputDialog(this, "输入笔记名称", suggested);
-            if (title == null) {
-                return;
-            }
-            title = title.trim();
-            if (title.isEmpty()) {
-                JOptionPane.showMessageDialog(this, "标题不能为空");
-                continue;
-            }
-            if (noteRepository.titleExists(title, null)) {
-                JOptionPane.showMessageDialog(this, "标题已存在，请重新输入");
-                continue;
-            }
-            Note note = createTemporaryNote(type, title, "");
-            OperationLog.log("新建临时笔记: " + title + " [" + type + "]");
-            openNoteInCurrentMode(note);
-            break;
-        }
+        String title = UntitledNoteNamer.nextTitle(t -> noteRepository.titleExists(t, null));
+        Note note = createTemporaryNote(type, title, "");
+        OperationLog.log("新建临时笔记: " + title + " [" + type + "]");
+        openNoteInCurrentMode(note);
     }
 
     private EditorTabPanel getOrCreatePanel(Note note) {
@@ -1809,6 +1800,9 @@ public class MainFrame extends JFrame {
 
     private void syncActivePanelWithSelection() {
         EditorTabPanel selected = selectedPanel();
+        if (selected != null && activePanel != null && activePanel != selected) {
+            activePanel.hideSuggestionPopup("tabChanged");
+        }
         if (selected != null) {
             activePanel = selected;
         }
@@ -2816,7 +2810,7 @@ public class MainFrame extends JFrame {
         panelCache.values().forEach(p -> {
             p.setSuggestionEnabled(suggestionEnabled);
             if (!suggestionEnabled) {
-                p.hideSuggestionPopup();
+                p.hideSuggestionPopup("suggestionDisabled");
             }
         });
     }

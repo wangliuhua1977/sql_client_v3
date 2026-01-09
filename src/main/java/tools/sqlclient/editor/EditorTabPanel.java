@@ -793,8 +793,8 @@ public class EditorTabPanel extends JPanel {
         this.pageSizeSelector.setSelectedItem(String.valueOf(this.defaultPageSize));
     }
 
-    public void hideSuggestionPopup() {
-        suggestionEngine.closePopup();
+    public void hideSuggestionPopup(String reason) {
+        suggestionEngine.hidePopup(reason);
     }
 
     public void focusEditorArea() {
