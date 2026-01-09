@@ -13,6 +13,7 @@ import javax.swing.border.EmptyBorder;
 import javax.swing.table.DefaultTableCellRenderer;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.JTableHeader;
+import javax.swing.table.TableCellEditor;
 import java.awt.*;
 import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
@@ -37,6 +38,7 @@ public class QueryResultPanel extends JPanel {
     private final JProgressBar progressBar = new JProgressBar(0, 100);
     private final ColumnarTableModel model = new ColumnarTableModel();
     private final JTable table = new JTable(model);
+    private final EditorDialogService editorDialogService = new EditorDialogService();
     private final DefaultTableModel infoModel = new DefaultTableModel(new Object[]{"字段", "值"}, 0) {
         @Override
         public boolean isCellEditable(int row, int column) {
@@ -126,6 +128,7 @@ public class QueryResultPanel extends JPanel {
         table.setFillsViewportHeight(true);
         table.setBorder(BorderFactory.createLineBorder(borderColor));
         installCopySupport();
+        installCellEditSupport();
 
         JTableHeader tableHeader = table.getTableHeader();
         Color headerBg = new Color(245, 247, 250);
@@ -522,6 +525,57 @@ public class QueryResultPanel extends JPanel {
         });
 
         table.setComponentPopupMenu(popupMenu);
+    }
+
+    private void installCellEditSupport() {
+        table.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() != 2 || !SwingUtilities.isLeftMouseButton(e)) {
+                    return;
+                }
+                int viewRow = table.rowAtPoint(e.getPoint());
+                int viewCol = table.columnAtPoint(e.getPoint());
+                if (viewRow < 0 || viewCol < 0) {
+                    return;
+                }
+                TableCellEditor activeEditor = table.getCellEditor();
+                if (activeEditor != null) {
+                    activeEditor.stopCellEditing();
+                }
+                int modelRow = table.convertRowIndexToModel(viewRow);
+                int modelCol = table.convertColumnIndexToModel(viewCol);
+                Object value = model.getValueAt(modelRow, modelCol);
+                String text = value == null ? "" : value.toString();
+                String title = buildEditorTitle(viewRow, viewCol);
+                Window owner = resolveOwnerWindow();
+                EditorDialogService.Result result = editorDialogService.showDialog(owner, title, text);
+                if (result != null && result.confirmed()) {
+                    editorDialogService.apply(model, modelRow, modelCol, result.value());
+                }
+            }
+        });
+    }
+
+    private Window resolveOwnerWindow() {
+        Window owner = SwingUtilities.getWindowAncestor(this);
+        if (owner != null) {
+            return owner;
+        }
+        owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().getActiveWindow();
+        if (owner != null) {
+            return owner;
+        }
+        return JOptionPane.getRootFrame();
+    }
+
+    private String buildEditorTitle(int viewRow, int viewCol) {
+        String colName = table.getColumnName(viewCol);
+        int displayRow = viewRow + 1;
+        if (colName == null || colName.isBlank()) {
+            return "编辑单元格 (row=" + displayRow + ")";
+        }
+        return "编辑单元格 (row=" + displayRow + ", col=" + colName + ")";
     }
 
     private void copySelectedCells() {

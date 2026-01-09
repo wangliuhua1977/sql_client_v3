@@ -10,6 +10,8 @@ import tools.sqlclient.model.Note;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
+import java.awt.event.ActionListener;
+import java.awt.event.WindowAdapter;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.function.Consumer;
@@ -17,13 +19,16 @@ import java.util.function.Consumer;
 /**
  * 存储过程/函数定义的临时查看窗口，不做持久化，允许用户显式另存为永久笔记。
  */
-public class TemporaryNoteWindow extends JFrame {
+public class TemporaryNoteWindow extends JDialog {
     private final NoteRepository noteRepository;
     private final Note temporaryNote;
     private final Consumer<Note> permanentNoteOpener;
     private final EditorTabPanel editorPanel;
+    private final WindowAdapter closeHandler;
+    private final ActionListener saveListener;
+    private final JButton saveButton;
 
-    public TemporaryNoteWindow(Frame owner,
+    public TemporaryNoteWindow(Window owner,
                                NoteRepository noteRepository,
                                MetadataService metadataService,
                                Note temporaryNote,
@@ -32,20 +37,22 @@ public class TemporaryNoteWindow extends JFrame {
                                int defaultPageSize,
                                Consumer<Note> permanentNoteOpener,
                                String routineDisplayName) {
-        super("临时查看：" + routineDisplayName);
+        super(owner, "临时查看：" + routineDisplayName, ModalityType.MODELESS);
         this.noteRepository = noteRepository;
         this.temporaryNote = temporaryNote;
         this.permanentNoteOpener = permanentNoteOpener;
         setLayout(new BorderLayout(8, 8));
+        setModalityType(ModalityType.MODELESS);
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
-        addWindowListener(new java.awt.event.WindowAdapter() {
+        closeHandler = new WindowAdapter() {
             @Override
             public void windowClosing(java.awt.event.WindowEvent e) {
                 if (confirmTemporaryClose()) {
                     dispose();
                 }
             }
-        });
+        };
+        addWindowListener(closeHandler);
 
         editorPanel = new EditorTabPanel(
                 noteRepository,
@@ -63,8 +70,9 @@ public class TemporaryNoteWindow extends JFrame {
         );
         editorPanel.setBorder(new EmptyBorder(4, 4, 4, 4));
         JPanel toolbar = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        JButton saveButton = new JButton("保存为永久笔记…");
-        saveButton.addActionListener(e -> saveAsPermanent());
+        saveButton = new JButton("保存为永久笔记…");
+        saveListener = e -> saveAsPermanent();
+        saveButton.addActionListener(saveListener);
         toolbar.add(saveButton);
 
         add(toolbar, BorderLayout.NORTH);
@@ -137,5 +145,16 @@ public class TemporaryNoteWindow extends JFrame {
             return true;
         }
         return false;
+    }
+
+    @Override
+    public void dispose() {
+        if (saveButton != null && saveListener != null) {
+            saveButton.removeActionListener(saveListener);
+        }
+        if (closeHandler != null) {
+            removeWindowListener(closeHandler);
+        }
+        super.dispose();
     }
 }
