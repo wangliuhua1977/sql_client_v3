@@ -7,6 +7,7 @@ import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.EditorStyle;
 import tools.sqlclient.model.Note;
 
+import java.awt.Dialog;
 import java.awt.Frame;
 import java.awt.Window;
 import java.util.function.Consumer;
@@ -31,9 +32,19 @@ public class RoutineSourceDialogFactory {
                                                boolean convertFullWidth,
                                                int defaultPageSize,
                                                String routineDisplayName) {
+        return openRoutineSourceDialog(owner, temporaryNote, style, convertFullWidth, defaultPageSize, routineDisplayName, false);
+    }
+
+    public TemporaryNoteWindow openRoutineSourceDialog(Window owner,
+                                                       Note temporaryNote,
+                                                       EditorStyle style,
+                                                       boolean convertFullWidth,
+                                                       int defaultPageSize,
+                                                       String routineDisplayName,
+                                                       boolean readOnly) {
         if (owner == null) {
-            log.error("Routine source window must be owned, resolve owner failed for routine={}", routineDisplayName);
-            throw new IllegalStateException("Routine source window must be owned by a main window.");
+            log.error("Routine source dialog requires owner. routine={} readOnly={}", routineDisplayName, readOnly);
+            throw new IllegalStateException("owner must not be null for routine source dialog");
         }
         TemporaryNoteWindow window = new TemporaryNoteWindow(
                 owner,
@@ -44,24 +55,36 @@ public class RoutineSourceDialogFactory {
                 convertFullWidth,
                 defaultPageSize,
                 permanentNoteOpener,
-                routineDisplayName);
+                routineDisplayName,
+                readOnly);
         if (window.getOwner() == null || window.getOwner() != owner) {
-            log.error("Routine source window owner mismatch routine={} expectedOwner={}#{} actualOwner={}#{}",
+            log.error("Routine source dialog owner mismatch routine={} expectedOwner={}#{} actualOwner={}#{}",
                     routineDisplayName,
                     owner.getClass().getName(),
                     System.identityHashCode(owner),
                     window.getOwner() == null ? "null" : window.getOwner().getClass().getName(),
                     window.getOwner() == null ? "null" : System.identityHashCode(window.getOwner()));
-            throw new IllegalStateException("Routine source window must be owned by a main window.");
+            throw new IllegalStateException("routine source dialog must be owned");
         }
-        String ownerTitle = owner instanceof Frame ? ((Frame) owner).getTitle() : owner.getName();
-        log.info("Open routine source window routine={} title={} owner={}#{} ownerTitle={}",
+        String ownerTitle = resolveOwnerTitle(owner);
+        log.info("Open routine source dialog routine={} readOnly={} title={} owner={}#{} ownerTitle={}",
                 routineDisplayName,
+                readOnly,
                 window.getTitle(),
                 owner.getClass().getName(),
                 System.identityHashCode(owner),
                 ownerTitle);
         window.bindOwnerVisibility(owner);
         return window;
+    }
+
+    private String resolveOwnerTitle(Window owner) {
+        if (owner instanceof Frame) {
+            return ((Frame) owner).getTitle();
+        }
+        if (owner instanceof Dialog) {
+            return ((Dialog) owner).getTitle();
+        }
+        return owner.getName();
     }
 }
