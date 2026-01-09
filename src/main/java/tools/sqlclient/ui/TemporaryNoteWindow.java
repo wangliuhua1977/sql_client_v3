@@ -27,6 +27,9 @@ public class TemporaryNoteWindow extends JDialog {
     private final WindowAdapter closeHandler;
     private final ActionListener saveListener;
     private final JButton saveButton;
+    private Window ownerWindow;
+    private java.awt.event.WindowStateListener ownerStateListener;
+    private java.awt.event.ComponentListener ownerComponentListener;
 
     public TemporaryNoteWindow(Window owner,
                                NoteRepository noteRepository,
@@ -79,6 +82,41 @@ public class TemporaryNoteWindow extends JDialog {
         add(editorPanel, BorderLayout.CENTER);
         setSize(960, 720);
         setLocationRelativeTo(owner);
+    }
+
+    public void bindOwnerVisibility(Window owner) {
+        if (owner == null) {
+            throw new IllegalStateException("Routine source window must be owned by a main window.");
+        }
+        if (ownerWindow != null) {
+            if (ownerStateListener != null) {
+                ownerWindow.removeWindowStateListener(ownerStateListener);
+            }
+            if (ownerComponentListener != null) {
+                ownerWindow.removeComponentListener(ownerComponentListener);
+            }
+        }
+        ownerWindow = owner;
+        ownerStateListener = new WindowAdapter() {
+            @Override
+            public void windowStateChanged(java.awt.event.WindowEvent e) {
+                if ((e.getNewState() & Frame.ICONIFIED) == Frame.ICONIFIED) {
+                    if (isVisible()) {
+                        setVisible(false);
+                    }
+                }
+            }
+        };
+        ownerComponentListener = new java.awt.event.ComponentAdapter() {
+            @Override
+            public void componentHidden(java.awt.event.ComponentEvent e) {
+                if (isVisible()) {
+                    setVisible(false);
+                }
+            }
+        };
+        owner.addWindowStateListener(ownerStateListener);
+        owner.addComponentListener(ownerComponentListener);
     }
 
     public EditorTabPanel getEditorPanel() {
@@ -154,6 +192,14 @@ public class TemporaryNoteWindow extends JDialog {
         }
         if (closeHandler != null) {
             removeWindowListener(closeHandler);
+        }
+        if (ownerWindow != null) {
+            if (ownerStateListener != null) {
+                ownerWindow.removeWindowStateListener(ownerStateListener);
+            }
+            if (ownerComponentListener != null) {
+                ownerWindow.removeComponentListener(ownerComponentListener);
+            }
         }
         super.dispose();
     }

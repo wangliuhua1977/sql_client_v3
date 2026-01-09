@@ -108,6 +108,7 @@ public class MainFrame extends JFrame {
     private final SqlExecutionService sqlExecutionService = new SqlExecutionService();
     private final PgRoutineService pgRoutineService = new PgRoutineService(sqlExecutionService);
     private final ColumnOrderDecider columnOrderDecider;
+    private final RoutineSourceDialogFactory routineSourceDialogFactory;
     private final Map<Long, java.util.concurrent.atomic.AtomicInteger> resultTabCounters = new java.util.HashMap<>();
     private final Map<Long, EditorTabPanel> routineTabIndex = new java.util.HashMap<>();
     private final Font uiBaseFont = new Font(Font.SANS_SERIF, Font.PLAIN, 13);
@@ -203,6 +204,7 @@ public class MainFrame extends JFrame {
         this.sqlHistoryRepository = new SqlHistoryRepository(sqliteManager);
         this.styleRepository = new EditorStyleRepository(sqliteManager);
         this.columnOrderDecider = new ColumnOrderDecider(metadataService);
+        this.routineSourceDialogFactory = new RoutineSourceDialogFactory(noteRepository, metadataService, this::openPermanentNote);
         this.defaultPageSize = sanitizePageSize(appStateRepository.loadDefaultPageSize(Config.getDefaultPageSize()));
         Config.overrideDefaultPageSize(defaultPageSize);
         initTheme();
@@ -2928,6 +2930,10 @@ public class MainFrame extends JFrame {
             return;
         }
         Window owner = resolveOwnerWindow(ownerSource);
+        if (owner == null) {
+            log.error("Routine source window must be owned, owner resolve failed for {}", info.displayName());
+            throw new IllegalStateException("Routine source window must be owned by a main window.");
+        }
         JDialog progress = showProgressDialog(owner, "正在获取源码...");
         pgRoutineService.loadRoutineDdl(info.oid()).whenComplete((ddl, ex) -> SwingUtilities.invokeLater(() -> {
             if (progress != null) {
@@ -2938,15 +2944,12 @@ public class MainFrame extends JFrame {
                 return;
             }
             Note tempNote = createTemporaryNote(info, ddl);
-            TemporaryNoteWindow window = new TemporaryNoteWindow(
+            TemporaryNoteWindow window = routineSourceDialogFactory.openOwnedDialog(
                     owner,
-                    noteRepository,
-                    metadataService,
                     tempNote,
                     resolveStyleForNote(tempNote),
                     convertFullWidth,
                     defaultPageSize,
-                    this::openPermanentNote,
                     info.displayName());
             EditorTabPanel panel = window.getEditorPanel();
             panel.setTextContent(ddl);

@@ -128,6 +128,25 @@
 - 载体：固定使用 `TemporaryNoteWindow`（`JDialog` + `MODELESS`），禁止 `JFrame`，保证 owned window 行为与任务栏不出现独立图标。
 - 内容：编辑器面板使用 `TemporaryNotePersistenceStrategy`，保持“临时笔记不自动保存、不入库”的既有语义与关闭提示。
 
+## Routine Source 子窗体实现
+- owner 规则：函数/存储过程源码窗口必须使用 **owned JDialog**，owner 来自触发组件的主窗体（`WindowOwnerResolver.resolve`），禁止 owner=null；若无法解析 owner 则直接抛出异常并记录日志，避免退化为独立顶层窗体。
+- 入口统一：对象树右键/双击/菜单等所有入口统一通过 `RoutineSourceDialogFactory#openOwnedDialog` 创建临时窗口，禁止各处直接 `new JFrame/JDialog`。
+- 最小化/隐藏联动：`TemporaryNoteWindow#bindOwnerVisibility` 监听 owner 最小化或隐藏事件，若子窗体可见则自动 `setVisible(false)`，防止主窗体最小化后子窗体悬浮。
+- 临时属性保持：仍使用 `TemporaryNotePersistenceStrategy`，关闭时保留“保存为正式笔记/不保存/取消”的提示逻辑。
+
+### 单元测试
+- `RoutineSourceDialogFactoryTest`：验证传入 owner 时 `Window.getOwner()` 必须等于该 owner；传入 `null` 直接抛出 `IllegalStateException`，防止回退为独立顶层窗口。
+
+### 手工回归步骤（Routine Source 子窗体）
+1. 启动程序并连接数据库。
+2. 从对象树对任意函数/存储过程选择“打开源码（只读）/编辑源码/查看定义”等入口。
+3. 验证：任务栏不出现新图标；主窗体最小化或隐藏后临时窗口不会独立悬浮。
+4. 关闭临时窗口时仍有“保存为正式笔记/不保存/取消”提示。
+
+### 构建验证命令（PowerShell）
+- `mvn -q -DskipTests=false test`
+- `mvn -q -DskipTests package`
+
 ### 手工回归步骤（临时编辑窗 Owned Window）
 1. 在对象树中打开任意函数/存储过程定义。
 2. 观察临时编辑窗不会在任务栏产生独立图标，且主窗体最小化后该窗口不残留在前台。
