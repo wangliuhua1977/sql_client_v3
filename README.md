@@ -9,6 +9,10 @@
 
 > 若容器/网络限制导致构建失败，可在联网环境下重新执行 Maven 下载依赖。
 
+### 构建命令（PowerShell）
+- `mvn -q -DskipTests=false test`
+- `mvn -q -DskipTests package`
+
 ## UI 设计与交互
 - 主布局：左侧对象/笔记树（可折叠）、中间 SQL 编辑器、多标签或子窗体，底部为结果/消息分栏，整体由左右、上下双重 SplitPane 构成；右侧日志/历史/设置区默认隐藏，仅通过 View 菜单显式打开。
 - 菜单结构：File（新建/导入/保存/关闭标签）、Edit（编辑器选项）、Run（执行/停止/标签切换）、View（区域显隐、布局重置、模式切换、焦点循环）、Tools（元数据/调试/备份/文本工具等低频入口）、Help（使用说明、快捷键）。
@@ -155,13 +159,20 @@
 - Token 错误或网络异常时，日志与状态栏会提示失败原因；SQL 本身失败会在结果面板呈现后端返回的 errorMessage。
 
 ## 前端开发技术文档：结果集列对齐与渲染
+### ResultSet columns/rows 协议（/jobs/result）
+- **columns 必须来自 JDBC ResultSetMetaData**，禁止在服务端解析 SQL 文本自行推断 `*`/`alias.*` 展开顺序。
+- columns 结构要求（字段可选但必须稳定）：`[{index(从1开始), name(原始列label), displayName(用于 UI 去重), dbType, tableName?, schema?, nullable?}]`
+- rows 必须是 **数组形式**：`[[v1, v2, ...], ...]`，并与 columns 顺序严格一致，支持重复列名。
+- 兼容旧字段：若存在 `rowsObject/resultRows`（Map/对象形式），客户端仅作为兜底读取；新前端始终优先使用 `rows` 数组。
+- archived=true 场景必须同样返回 columns + rows，保证分页重入可用。
+
 ### displayLabel 与 dataKey 的分工
 - `displayLabel`：用于 JTable 表头展示（来自 SQL 投影/别名/服务端 label），不参与取值对齐。
 - `dataKey`：用于从结果行中取值的真实 key（来自服务端 columns/columnMetas 或 raw rows 的实际 key）。
 - `ColumnDef` 内部使用 `displayName` 作为显示名，`sourceKey` 作为 dataKey；两者可不同以避免无别名表达式错位。
 
 ### 行值对齐策略（数组/对象 + fallback）
-- **行是数组/列表**：按列索引直接取 `row[i]`。
+- **行是数组/列表**：按列索引直接取 `row[i]`（唯一可信路径，支持重复列名）。
 - **行是对象/Map**：优先用 `dataKey` 取值；取不到时再尝试 `displayLabel`（大小写不敏感）。
 - **fallback 顺序**：
   1. `dataKey` 精确匹配；
@@ -170,6 +181,15 @@
   4. 若 Map 为有序且 `row.size == columnCount`，按插入顺序取第 i 个值（记录 debug）；
   5. 若只有 1 列且 Map 只有 1 个值，取唯一值（记录 debug）。
 - 所有 fallback 仅在无法命中 key 时触发，并且 debug 日志为一次性输出，避免刷屏。
+- **重复列名处理**：当 columns 中存在重复列名且 rows 仍为 Map 时，客户端会记录提示并避免错误重复取值（重复列将保持空值），提示后端必须改为 rows 数组。
+
+### 手工回归脚本（JOIN 重复列名）
+请在同一库中准备以下临时表并执行 SQL，验证列顺序与 count_* 列必须出现，且重复列按列序号对齐：
+1. `select * from tmp_wlh_jk2;`
+2. `select * from tmp_wlh_jk3_2;`
+3. `select * from tmp_wlh_jk2 a left join tmp_wlh_jk3_2 b on a.prod_inst_id=b.prod_inst_id;`
+4. `select a.*, b.* from tmp_wlh_jk2 a left join tmp_wlh_jk3_2 b on a.prod_inst_id=b.prod_inst_id;`
+期望行为：`a.*` 列在前、`b.*` 列在后；右表 `count_all/count_zj/count_bj` 必须出现；若列名重复，表头自动去重显示（如 `acc_nbr`、`acc_nbr#2` 或 `a.acc_nbr`、`b.acc_nbr`），但值仍按列序号严格对齐。
 
 ### SQL 示例（无别名表达式也可稳定显示）
 - SQL1（无别名）：`select sum(amount)/100 from tmp_wlh_mbhs1`

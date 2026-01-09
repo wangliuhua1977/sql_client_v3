@@ -7,12 +7,15 @@ public class ColumnMeta {
     private String name;
     private String displayLabel;
     private String dataKey;
+    private String dbType;
     private String type;
     private Integer position;
     private Integer jdbcType;
     private Integer precision;
     private Integer scale;
     private Integer nullable;
+    private String tableName;
+    private String schemaName;
 
     public String getName() {
         return name;
@@ -44,6 +47,14 @@ public class ColumnMeta {
 
     public void setType(String type) {
         this.type = type;
+    }
+
+    public String getDbType() {
+        return dbType;
+    }
+
+    public void setDbType(String dbType) {
+        this.dbType = dbType;
     }
 
     public Integer getPosition() {
@@ -84,5 +95,21 @@ public class ColumnMeta {
 
     public void setNullable(Integer nullable) {
         this.nullable = nullable;
+    }
+
+    public String getTableName() {
+        return tableName;
+    }
+
+    public void setTableName(String tableName) {
+        this.tableName = tableName;
+    }
+
+    public String getSchemaName() {
+        return schemaName;
+    }
+
+    public void setSchemaName(String schemaName) {
+        this.schemaName = schemaName;
     }
 }

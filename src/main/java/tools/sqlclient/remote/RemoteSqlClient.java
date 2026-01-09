@@ -325,6 +325,7 @@ public class RemoteSqlClient {
         rr.setColumnExpressions(expressions);
         JsonArray rows = extractRows(obj);
         rr.setRawRows(rows);
+        rr.setRows(extractRowValues(rows));
         rr.setRowMaps(extractRowMaps(rows, normalizedColumns, rawColumns));
         rr.setResultRows(extractResultRows(rows));
         rr.setTotalRows(resolveTotalRows(obj));
@@ -347,13 +348,23 @@ public class RemoteSqlClient {
             meta.setName(readString(col, "name"));
             String label = readString(col, "label");
             meta.setDisplayLabel(label != null ? label : readString(col, "displayLabel"));
+            if (meta.getDisplayLabel() == null) {
+                meta.setDisplayLabel(readString(col, "displayName"));
+            }
             meta.setDataKey(readString(col, "dataKey"));
+            meta.setDbType(readString(col, "dbType"));
             meta.setType(readString(col, "type"));
-            meta.setPosition(readInt(col, "position") != null ? readInt(col, "position") : idx);
+            Integer position = readInt(col, "position");
+            if (position == null) {
+                position = readInt(col, "index");
+            }
+            meta.setPosition(position != null ? position : idx);
             meta.setJdbcType(readInt(col, "jdbcType"));
             meta.setPrecision(readInt(col, "precision"));
             meta.setScale(readInt(col, "scale"));
             meta.setNullable(readInt(col, "nullable"));
+            meta.setTableName(readString(col, "tableName"));
+            meta.setSchemaName(readString(col, "schema"));
             if (meta.getDataKey() == null && meta.getName() != null) {
                 meta.setDataKey(meta.getName());
             }
@@ -451,6 +462,24 @@ public class RemoteSqlClient {
             }
         }
         return new JsonArray();
+    }
+
+    private List<List<Object>> extractRowValues(JsonArray rowsJson) {
+        List<List<Object>> rows = new ArrayList<>();
+        if (rowsJson == null) {
+            return rows;
+        }
+        for (JsonElement el : rowsJson) {
+            if (el != null && el.isJsonArray()) {
+                JsonArray arr = el.getAsJsonArray();
+                List<Object> row = new ArrayList<>(arr.size());
+                for (JsonElement cell : arr) {
+                    row.add(toJavaObject(cell));
+                }
+                rows.add(row);
+            }
+        }
+        return rows;
     }
 
     private List<Map<String, Object>> extractResultRows(JsonArray rowsJson) {

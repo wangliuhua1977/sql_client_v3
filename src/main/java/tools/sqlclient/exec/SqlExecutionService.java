@@ -483,13 +483,14 @@ public class SqlExecutionService {
 
             List<ColumnMeta> columnMetas = resp.getColumnMetas() != null ? resp.getColumnMetas() : List.of();
             List<java.util.Map<String, String>> rowMaps = resp.getRowMaps() != null ? resp.getRowMaps() : List.of();
+            List<List<Object>> rowValues = resp.getRows() != null ? resp.getRows() : List.of();
             List<String> columns = resolveColumns(columnMetas, resp.getColumns(), rowMaps);
             List<ColumnDef> columnDefs = buildColumnDefs(columns, columnMetas);
             if (Boolean.TRUE.equals(finalHasResultSet) && columns.isEmpty() && success) {
                 OperationLog.log("[" + jobId + "] 无法获取列信息，columns 为空");
                 throw new RuntimeException("无法获取列信息");
             }
-            List<List<String>> rows = extractRows(rowMaps, columns);
+            List<List<String>> rows = extractRows(rowValues, rowMaps, columns);
             Integer totalRows = resp.getTotalRows();
             int rowCount = firstPositive(totalRows, returnedRowCount, rows.size());
 
@@ -579,11 +580,13 @@ public class SqlExecutionService {
     private List<ColumnDef> buildColumnDefs(List<String> columns, List<ColumnMeta> metas) {
         List<ColumnDef> defs = new ArrayList<>();
         List<String> safe = columns == null ? List.of() : columns;
+        List<String> displayNames = ColumnDisplayNameResolver.resolveDisplayNames(safe, metas);
         int seq = 1;
         for (int i = 0; i < safe.size(); i++) {
             String col = safe.get(i);
             ColumnMeta meta = (metas != null && i < metas.size()) ? metas.get(i) : null;
-            String display = meta != null && meta.getDisplayLabel() != null ? meta.getDisplayLabel() : (col == null ? "" : col);
+            String display = i < displayNames.size() ? displayNames.get(i)
+                    : (meta != null && meta.getDisplayLabel() != null ? meta.getDisplayLabel() : (col == null ? "" : col));
             String dataKey = meta != null && meta.getDataKey() != null ? meta.getDataKey() : col;
             defs.add(new ColumnDef(display + "#" + seq, display, dataKey));
             seq++;
@@ -683,21 +686,81 @@ public class SqlExecutionService {
         return targetPageSize;
     }
 
-    private List<List<String>> extractRows(List<java.util.Map<String, String>> rowMaps, List<String> columns) {
+    private List<List<String>> extractRows(List<List<Object>> rowValues,
+                                           List<java.util.Map<String, String>> rowMaps,
+                                           List<String> columns) {
+        if (rowValues != null && !rowValues.isEmpty()) {
+            return extractRowsFromValues(rowValues, columns);
+        }
+        return extractRowsFromMaps(rowMaps, columns);
+    }
+
+    private List<List<String>> extractRowsFromValues(List<List<Object>> rowValues, List<String> columns) {
+        List<List<String>> rows = new ArrayList<>();
+        if (rowValues == null) {
+            return rows;
+        }
+        int colCount = columns != null && !columns.isEmpty() ? columns.size() : 0;
+        for (List<Object> values : rowValues) {
+            int targetCount = colCount > 0 ? colCount : (values != null ? values.size() : 0);
+            List<String> row = new ArrayList<>(targetCount);
+            for (int i = 0; i < targetCount; i++) {
+                Object value = (values != null && i < values.size()) ? values.get(i) : null;
+                row.add(stringify(value));
+            }
+            rows.add(row);
+        }
+        return rows;
+    }
+
+    private List<List<String>> extractRowsFromMaps(List<java.util.Map<String, String>> rowMaps, List<String> columns) {
         List<List<String>> rows = new ArrayList<>();
         if (rowMaps == null) {
             return rows;
         }
         List<String> targetColumns = columns == null ? List.of() : columns;
+        java.util.Set<String> duplicates = findDuplicateNames(targetColumns);
+        boolean hasDuplicates = !duplicates.isEmpty();
+        if (hasDuplicates) {
+            OperationLog.log("检测到重复列名，Map 结果无法完整对齐，需后端返回 rows 数组。重复列=" + duplicates);
+        }
         for (java.util.Map<String, String> map : rowMaps) {
             List<String> row = new ArrayList<>();
             for (int i = 0; i < targetColumns.size(); i++) {
-                Object value = RowValueResolver.resolveValueByName(targetColumns, map, i);
+                String name = targetColumns.get(i);
+                Object value = null;
+                if (!hasDuplicates || !duplicates.contains(name)) {
+                    value = RowValueResolver.resolveValueByName(targetColumns, map, i);
+                }
                 row.add(value != null ? value.toString() : null);
             }
             rows.add(row);
         }
         return rows;
+    }
+
+    private java.util.Set<String> findDuplicateNames(List<String> columns) {
+        java.util.Set<String> duplicates = new java.util.LinkedHashSet<>();
+        if (columns == null) {
+            return duplicates;
+        }
+        java.util.Map<String, Integer> seen = new java.util.HashMap<>();
+        for (String name : columns) {
+            String key = name == null ? "" : name;
+            int count = seen.getOrDefault(key, 0) + 1;
+            seen.put(key, count);
+            if (count > 1) {
+                duplicates.add(key);
+            }
+        }
+        return duplicates;
+    }
+
+    private String stringify(Object value) {
+        if (value == null) {
+            return null;
+        }
+        return String.valueOf(value);
     }
 
     private void logResultDetails(String jobId, String status, Boolean hasResultSet, Boolean resultAvailable, Boolean archived,
