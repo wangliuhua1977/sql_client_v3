@@ -23,7 +23,7 @@ public final class WindowOwnerResolver {
         if (owner == null) {
             owner = fallback;
         }
-        return owner;
+        return resolveRootOwner(owner);
     }
 
     private static Window activeWindow() {
@@ -33,5 +33,16 @@ public final class WindowOwnerResolver {
             }
         }
         return null;
+    }
+
+    private static Window resolveRootOwner(Window window) {
+        if (window == null) {
+            return null;
+        }
+        Window current = window;
+        while (current.getOwner() != null) {
+            current = current.getOwner();
+        }
+        return current;
     }
 }

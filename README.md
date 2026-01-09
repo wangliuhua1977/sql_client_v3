@@ -63,9 +63,15 @@
 - 线程边界：源码拉取、发布与运行均复用既有异步 SQL 提交流程；网络/计算在后台线程完成，所有 Swing 组件更新（进度条、Tab 切换、光标定位、对话框弹出）均通过 `SwingUtilities.invokeLater` 回到 EDT。
 
 ## 临时笔记窗口（过程/函数查看）
-- 触发场景：对象树中双击函数/存储过程节点、右键选择“打开源码（只读）/查看定义/Show DDL”等入口，或任何读取例程定义的动作，都会打开“临时查看：<schema.object()>”独立窗口。
+- 触发场景：对象树中双击函数/存储过程节点、右键选择“打开源码（只读）/查看定义/Show DDL”等入口，或任何读取例程定义的动作，都会打开“临时查看：<schema.object()>”临时查看子窗体。
 - 默认行为：窗口内的编辑器允许查看与临时修改源码，但不自动保存、不写入笔记数据库、不记录最近笔记；关闭窗口时若内容已修改，会提示“保存为正式笔记 / 不保存 / 取消”。
 - 保存为永久笔记：工具栏提供“保存为永久笔记…”按钮，点击后输入目标标题并确认，才会创建正式笔记并写入内容（可在主窗口继续编辑）。未点击前不会产生任何文件或数据库记录。
+
+## Routine/Procedure 源码临时查看窗口（Owned 子窗体）
+- **禁止独立窗体的原因**：独立顶层窗体会在任务栏/Alt-Tab 出现额外入口，且主窗体最小化后仍可能悬浮，造成焦点与激活状态不同步。
+- **owner 获取策略**：统一使用 `WindowOwnerResolver.resolve` 从触发组件向上解析窗口，并沿 `Window#getOwner()` 追溯到主窗体；若无法解析 owner 直接抛出 `IllegalStateException` 并记录日志，禁止降级为无 owner 窗口。
+- **最小化/隐藏联动**：`TemporaryNoteWindow#bindOwnerVisibility` 监听 owner `ICONIFIED`/`componentHidden`，owner 被最小化或隐藏时自动 `setVisible(false)`，避免子窗体留在前台。
+- **入口统一策略**：所有查看/编辑 routine 源码入口均通过 `RoutineSourceDialogFactory#openOwnedDialog` 创建临时查看窗，禁止各处自行 new `JFrame/JDialog`。
 
 ### 窗口与焦点
 - 支持独立窗口模式与面板模式，子窗口可拖动、最大化/最小化或平铺。

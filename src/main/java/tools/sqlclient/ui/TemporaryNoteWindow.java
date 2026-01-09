@@ -81,6 +81,7 @@ public class TemporaryNoteWindow extends JDialog {
         add(toolbar, BorderLayout.NORTH);
         add(editorPanel, BorderLayout.CENTER);
         setSize(960, 720);
+        setResizable(true);
         setLocationRelativeTo(owner);
     }
 

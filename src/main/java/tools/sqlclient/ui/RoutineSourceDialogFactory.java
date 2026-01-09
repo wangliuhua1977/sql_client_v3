@@ -32,6 +32,7 @@ public class RoutineSourceDialogFactory {
                                                int defaultPageSize,
                                                String routineDisplayName) {
         if (owner == null) {
+            log.error("Routine source window must be owned, resolve owner failed for routine={}", routineDisplayName);
             throw new IllegalStateException("Routine source window must be owned by a main window.");
         }
         TemporaryNoteWindow window = new TemporaryNoteWindow(
@@ -44,11 +45,19 @@ public class RoutineSourceDialogFactory {
                 defaultPageSize,
                 permanentNoteOpener,
                 routineDisplayName);
-        if (window.getOwner() == null) {
+        if (window.getOwner() == null || window.getOwner() != owner) {
+            log.error("Routine source window owner mismatch routine={} expectedOwner={}#{} actualOwner={}#{}",
+                    routineDisplayName,
+                    owner.getClass().getName(),
+                    System.identityHashCode(owner),
+                    window.getOwner() == null ? "null" : window.getOwner().getClass().getName(),
+                    window.getOwner() == null ? "null" : System.identityHashCode(window.getOwner()));
             throw new IllegalStateException("Routine source window must be owned by a main window.");
         }
         String ownerTitle = owner instanceof Frame ? ((Frame) owner).getTitle() : owner.getName();
-        log.info("Open routine source window owner={}#{} title={}",
+        log.info("Open routine source window routine={} title={} owner={}#{} ownerTitle={}",
+                routineDisplayName,
+                window.getTitle(),
                 owner.getClass().getName(),
                 System.identityHashCode(owner),
                 ownerTitle);
