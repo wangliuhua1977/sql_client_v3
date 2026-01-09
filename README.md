@@ -493,6 +493,21 @@
 - AES 解密失败：检查 Key/IV 与 UTF-8，参考 `AesCbcTest` 或下方 PowerShell 脚本生成密文。
 - pageSize/limit >1000：客户端自动裁剪并在 `ResultResponse.note` 与日志中提示裁剪值。
 
+### 前端开发技术文档（编辑器交互与临时笔记生命周期）
+#### 联想窗口关闭策略
+- 统一入口：`SuggestionEngine#hidePopup(reason)` 是唯一关闭方法，保证幂等；所有事件统一走该入口。
+- 触发条件：
+  - 编辑器失焦（`RSyntaxTextArea` 的 `focusLost`）。
+  - 光标位置改变且不是联想插入动作（`CaretListener` + `suppressCaretDismiss` 时间窗）。
+  - 弹窗显示时的全局鼠标点击（`AWTEventListener`，排除弹窗自身与编辑器组件）。
+  - Tab/窗口切换导致 active editor 变化或窗口失活（`MainFrame#syncActivePanelWithSelection` 与 `windowDeactivated`）。
+- 稳定性要点：联想插入前设置 `suppressCaretDismiss`，插入后 `invokeLater` 复位，避免“提交候选立刻关弹窗”抖动。
+
+#### 临时笔记默认命名规则与实现位置
+- 新建临时笔记不弹出命名对话框，标题由 `UntitledNoteNamer` 统一生成（`tools.sqlclient.util.UntitledNoteNamer`）。
+- 默认格式：`未命名 1/2/3...`（AtomicInteger 递增，进程内不回收）。
+- 命名生成入口：`MainFrame#createNote` → `UntitledNoteNamer.nextTitle(...)` → `createTemporaryNote`。
+
 ### 前端开发技术文档：临时笔记 / 正式笔记与滚轮滚动
 #### 状态字段与生命周期
 - 状态字段：`Note.temporary` 标记临时笔记；`EditorTabPanel` 维护 `dirty` 与 `initialContent`，用于判断是否需要关闭提示。
