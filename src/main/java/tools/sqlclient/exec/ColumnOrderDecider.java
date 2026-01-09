@@ -47,6 +47,9 @@ public class ColumnOrderDecider {
         if (columns == null || columns.isEmpty()) {
             return false;
         }
+        if (hasDuplicateNames(columns)) {
+            return false;
+        }
         if (original.getColumnDefs() != null && !original.getColumnDefs().isEmpty()
                 && original.getColumnDefs().size() != columns.size()) {
             return false;
@@ -60,6 +63,20 @@ public class ColumnOrderDecider {
             }
         }
         return true;
+    }
+
+    private boolean hasDuplicateNames(List<String> columns) {
+        if (columns == null) {
+            return false;
+        }
+        Set<String> seen = new HashSet<>();
+        for (String name : columns) {
+            String key = name == null ? "" : name;
+            if (!seen.add(key)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<String, List<String>> loadMetadataForStars(SelectProjectionParser.Projection projection,

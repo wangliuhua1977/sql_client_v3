@@ -49,7 +49,7 @@ public final class ColumnNameNormalizer {
             result.add(candidate);
         }
 
-        return deduplicate(result);
+        return result;
     }
 
     private static String deriveFromExpression(String expr) {
@@ -127,22 +127,6 @@ public final class ColumnNameNormalizer {
 
     private static String fallbackName(int index) {
         return "col_" + (index + 1);
-    }
-
-    private static List<String> deduplicate(List<String> names) {
-        List<String> result = new ArrayList<>(names.size());
-        java.util.Map<String, Integer> seen = new java.util.HashMap<>();
-        for (String name : names) {
-            String base = name == null ? "" : name;
-            int count = seen.getOrDefault(base, 0) + 1;
-            seen.put(base, count);
-            if (count > 1) {
-                result.add(base + "_" + count);
-            } else {
-                result.add(base);
-            }
-        }
-        return result;
     }
 
     private static String clean(String text) {

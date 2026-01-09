@@ -60,6 +60,7 @@ public class ResultResponse {
     private List<ColumnMeta> columnMetas;
     private List<java.util.Map<String, String>> rowMaps;
     private List<Map<String, Object>> resultRows;
+    private List<List<Object>> rows;
     private JsonArray rawRows;
     private Integer totalRows;
 
@@ -269,6 +270,10 @@ public class ResultResponse {
 
     public List<Map<String, Object>> getResultRows() {
         return resultRows;
+    }
+
+    public List<List<Object>> getRows() {
+        return rows;
     }
 
     public JsonArray getRawRows() {
@@ -485,6 +490,10 @@ public class ResultResponse {
 
     public void setResultRows(List<Map<String, Object>> resultRows) {
         this.resultRows = resultRows;
+    }
+
+    public void setRows(List<List<Object>> rows) {
+        this.rows = rows;
     }
 
     public void setRawRows(JsonArray rawRows) {
