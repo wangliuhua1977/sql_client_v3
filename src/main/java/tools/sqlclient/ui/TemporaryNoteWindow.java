@@ -47,6 +47,7 @@ public class TemporaryNoteWindow extends JDialog {
         this.temporaryNote = temporaryNote;
         this.permanentNoteOpener = permanentNoteOpener;
         this.baseTitle = "临时查看：" + routineDisplayName;
+        setType(Type.UTILITY);
         setLayout(new BorderLayout(8, 8));
         setModalityType(ModalityType.MODELESS);
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
