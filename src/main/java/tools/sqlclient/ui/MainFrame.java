@@ -2944,13 +2944,14 @@ public class MainFrame extends JFrame {
                 return;
             }
             Note tempNote = createTemporaryNote(info, ddl);
-            TemporaryNoteWindow window = routineSourceDialogFactory.openOwnedDialog(
+            TemporaryNoteWindow window = routineSourceDialogFactory.openRoutineSourceDialog(
                     owner,
                     tempNote,
                     resolveStyleForNote(tempNote),
                     convertFullWidth,
                     defaultPageSize,
-                    info.displayName());
+                    info.displayName(),
+                    !editable);
             EditorTabPanel panel = window.getEditorPanel();
             panel.setTextContent(ddl);
             panel.configureRoutineContext("例程: " + info.displayName(), editable, () -> publishRoutine(panel, info));

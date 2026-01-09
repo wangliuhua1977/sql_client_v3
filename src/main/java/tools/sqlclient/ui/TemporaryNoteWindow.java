@@ -27,6 +27,7 @@ public class TemporaryNoteWindow extends JDialog {
     private final WindowAdapter closeHandler;
     private final ActionListener saveListener;
     private final JButton saveButton;
+    private final String baseTitle;
     private Window ownerWindow;
     private java.awt.event.WindowStateListener ownerStateListener;
     private java.awt.event.ComponentListener ownerComponentListener;
@@ -39,11 +40,14 @@ public class TemporaryNoteWindow extends JDialog {
                                boolean convertFullWidth,
                                int defaultPageSize,
                                Consumer<Note> permanentNoteOpener,
-                               String routineDisplayName) {
-        super(owner, "临时查看：" + routineDisplayName, ModalityType.MODELESS);
+                               String routineDisplayName,
+                               boolean readOnly) {
+        super(owner, buildTitle(routineDisplayName, readOnly), ModalityType.MODELESS);
         this.noteRepository = noteRepository;
         this.temporaryNote = temporaryNote;
         this.permanentNoteOpener = permanentNoteOpener;
+        this.baseTitle = "临时查看：" + routineDisplayName;
+        setType(Type.UTILITY);
         setLayout(new BorderLayout(8, 8));
         setModalityType(ModalityType.MODELESS);
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
@@ -83,6 +87,7 @@ public class TemporaryNoteWindow extends JDialog {
         setSize(960, 720);
         setResizable(true);
         setLocationRelativeTo(owner);
+        applyReadOnlyMode(readOnly);
     }
 
     public void bindOwnerVisibility(Window owner) {
@@ -122,6 +127,23 @@ public class TemporaryNoteWindow extends JDialog {
 
     public EditorTabPanel getEditorPanel() {
         return editorPanel;
+    }
+
+    public void applyReadOnlyMode(boolean readOnly) {
+        editorPanel.setReadOnly(readOnly);
+        if (saveButton != null) {
+            saveButton.setEnabled(!readOnly);
+            saveButton.setVisible(!readOnly);
+        }
+        setTitle(buildTitle(baseTitle, readOnly));
+    }
+
+    private static String buildTitle(String routineDisplayName, boolean readOnly) {
+        String title = routineDisplayName;
+        if (!routineDisplayName.startsWith("临时查看：")) {
+            title = "临时查看：" + routineDisplayName;
+        }
+        return readOnly ? title + " (只读)" : title;
     }
 
     private void saveAsPermanent() {

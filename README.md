@@ -69,9 +69,19 @@
 
 ## Routine/Procedure 源码临时查看窗口（Owned 子窗体）
 - **禁止独立窗体的原因**：独立顶层窗体会在任务栏/Alt-Tab 出现额外入口，且主窗体最小化后仍可能悬浮，造成焦点与激活状态不同步。
-- **owner 获取策略**：统一使用 `WindowOwnerResolver.resolve` 从触发组件向上解析窗口，并沿 `Window#getOwner()` 追溯到主窗体；若无法解析 owner 直接抛出 `IllegalStateException` 并记录日志，禁止降级为无 owner 窗口。
+- **owner 获取策略**：右键入口统一用 `SwingUtilities.getWindowAncestor(tree)` 获取主窗体 owner，并沿 `Window#getOwner()` 追溯到主窗体；若无法解析 owner 直接抛出 `IllegalStateException` 并记录日志，禁止降级为无 owner 窗口。
 - **最小化/隐藏联动**：`TemporaryNoteWindow#bindOwnerVisibility` 监听 owner `ICONIFIED`/`componentHidden`，owner 被最小化或隐藏时自动 `setVisible(false)`，避免子窗体留在前台。
-- **入口统一策略**：所有查看/编辑 routine 源码入口均通过 `RoutineSourceDialogFactory#openOwnedDialog` 创建临时查看窗，禁止各处自行 new `JFrame/JDialog`。
+- **入口统一策略**：所有查看/编辑 routine 源码入口均通过 `RoutineSourceDialogFactory#openRoutineSourceDialog` 创建临时查看窗，禁止各处自行 new `JFrame/JDialog`。
+
+## 对象树右键“编辑源码/打开源码（只读）”窗口规则
+- **锚点入口**：对象树 → 右键菜单 → “打开源码（只读）/编辑源码” 必须走同一套 Routine 源码窗口入口。
+- **owner 获取方式**：使用 `SwingUtilities.getWindowAncestor(tree)` 获取主窗体 owner，禁止 `owner=null` 或临时创建 `JFrame`。
+- **owned 子窗体**：窗口必须是 owned `JDialog`，`dialog.getOwner() != null` 且 owner 必须是主窗体。
+- **最小化联动**：主窗体最小化或隐藏时，子窗体自动 `setVisible(false)`，避免任务栏/Alt-Tab 独立显示。
+- **只读/可编辑一致入口**：只通过参数切换只读模式（标题追加“(只读)”并禁用保存按钮），禁止分叉创建不同窗口类。
+- **构建验证（PowerShell）**：
+  - `mvn -q -DskipTests=false test`
+  - `mvn -q -DskipTests package`
 
 ### 窗口与焦点
 - 支持独立窗口模式与面板模式，子窗口可拖动、最大化/最小化或平铺。
@@ -124,10 +134,10 @@
 
 ## 前端开发技术文档：子窗体策略、结果集可编辑机制与完整内容编辑器
 ### 子窗体策略（临时查看窗口）
-- 临时查看函数/存储过程源码的窗口统一使用 **owned JDialog**（modeless），owner 来自触发动作所在主窗体（`SwingUtilities.getWindowAncestor` 或当前活动窗口），确保不在任务栏单独出现、与主窗体最小化/激活同步。
+- 临时查看函数/存储过程源码的窗口统一使用 **owned JDialog**（modeless），owner 来自触发动作所在主窗体（`SwingUtilities.getWindowAncestor`），确保不在任务栏单独出现、与主窗体最小化/激活同步。
 - 关闭链路：`setDefaultCloseOperation(DO_NOTHING_ON_CLOSE)` → `WindowListener` 拦截关闭 → 触发“保存为正式笔记/不保存/取消”的统一提示；仅在确认后 `dispose()`，避免绕过临时笔记保存提示。
 - 资源释放：窗口在 `dispose()` 中移除窗口监听与按钮监听，避免临时窗口频繁打开时的监听器残留。
-- owner 解析策略：优先从触发组件向上查找窗口（`SwingUtilities.getWindowAncestor`），若无法解析则回退当前激活窗口，再回退主窗体实例，确保子窗体始终有有效 owner。
+- owner 解析策略：优先从触发组件向上查找窗口（`SwingUtilities.getWindowAncestor`），若无法解析则回退主窗体实例，确保子窗体始终有有效 owner。
 
 ### 函数/存储过程临时编辑窗实现细节
 - 入口：对象树右键菜单/双击节点/调试运行入口等读取 routine 源码后统一打开临时编辑窗。
@@ -135,8 +145,8 @@
 - 内容：编辑器面板使用 `TemporaryNotePersistenceStrategy`，保持“临时笔记不自动保存、不入库”的既有语义与关闭提示。
 
 ## Routine Source 子窗体实现
-- owner 规则：函数/存储过程源码窗口必须使用 **owned JDialog**，owner 来自触发组件的主窗体（`WindowOwnerResolver.resolve`），禁止 owner=null；若无法解析 owner 则直接抛出异常并记录日志，避免退化为独立顶层窗体。
-- 入口统一：对象树右键/双击/菜单等所有入口统一通过 `RoutineSourceDialogFactory#openOwnedDialog` 创建临时窗口，禁止各处直接 `new JFrame/JDialog`。
+- owner 规则：函数/存储过程源码窗口必须使用 **owned JDialog**，owner 来自触发组件的主窗体（`SwingUtilities.getWindowAncestor` + owner 链回溯），禁止 owner=null；若无法解析 owner 则直接抛出异常并记录日志，避免退化为独立顶层窗体。
+- 入口统一：对象树右键/双击/菜单等所有入口统一通过 `RoutineSourceDialogFactory#openRoutineSourceDialog` 创建临时窗口，禁止各处直接 `new JFrame/JDialog`。
 - 最小化/隐藏联动：`TemporaryNoteWindow#bindOwnerVisibility` 监听 owner 最小化或隐藏事件，若子窗体可见则自动 `setVisible(false)`，防止主窗体最小化后子窗体悬浮。
 - 临时属性保持：仍使用 `TemporaryNotePersistenceStrategy`，关闭时保留“保存为正式笔记/不保存/取消”的提示逻辑。
 

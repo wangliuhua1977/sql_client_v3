@@ -31,7 +31,30 @@ class RoutineSourceDialogFactoryTest {
                 "#6F42C1", "#6F42C1", "#E36209", "#24292E",
                 "#032F62", "#FFFBCC", "#005CC5");
         JFrame owner = new JFrame("Main");
-        TemporaryNoteWindow window = factory.openOwnedDialog(owner, note, style, false, 200, "leshan.test()");
+        TemporaryNoteWindow window = factory.openRoutineSourceDialog(owner, note, style, false, 200, "leshan.test()", true);
+        try {
+            assertSame(owner, window.getOwner());
+        } finally {
+            window.dispose();
+            owner.dispose();
+        }
+    }
+
+    @Test
+    void openOwnedDialogBindsOwnerForEditableMode() {
+        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
+        NoteRepository noteRepository = mock(NoteRepository.class);
+        MetadataService metadataService = mock(MetadataService.class);
+        RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(noteRepository, metadataService, note -> {
+        });
+        Note note = new Note(-1L, "临时查看: test", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
+        EditorStyle style = new EditorStyle("default", 13,
+                "#FFFFFF", "#000000", "#D0E7FF", "#000000",
+                "#005CC5", "#22863A", "#6A737D", "#005CC5",
+                "#6F42C1", "#6F42C1", "#E36209", "#24292E",
+                "#032F62", "#FFFBCC", "#005CC5");
+        JFrame owner = new JFrame("Main");
+        TemporaryNoteWindow window = factory.openRoutineSourceDialog(owner, note, style, false, 200, "leshan.test()", false);
         try {
             assertSame(owner, window.getOwner());
         } finally {
@@ -55,6 +78,6 @@ class RoutineSourceDialogFactoryTest {
                 "#032F62", "#FFFBCC", "#005CC5");
 
         assertThrows(IllegalStateException.class,
-                () -> factory.openOwnedDialog(null, note, style, false, 200, "leshan.test()"));
+                () -> factory.openRoutineSourceDialog(null, note, style, false, 200, "leshan.test()", false));
     }
 }
