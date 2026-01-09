@@ -36,9 +36,9 @@ public class ObjectBrowserPanel extends JPanel {
     private final JPanel header = new JPanel(new BorderLayout(4, 4));
 
     public interface RoutineActionHandler {
-        void openRoutine(RoutineInfo info, boolean editable);
+        void openRoutine(Component source, RoutineInfo info, boolean editable);
 
-        void runRoutine(RoutineInfo info);
+        void runRoutine(Component source, RoutineInfo info);
     }
 
     public ObjectBrowserPanel(MetadataService metadataService, PgRoutineService routineService, RoutineActionHandler routineHandler) {
@@ -223,9 +223,9 @@ public class ObjectBrowserPanel extends JPanel {
                         }
                     }
                     if (run) {
-                        routineHandler.runRoutine(target);
+                        routineHandler.runRoutine(tree, target);
                     } else {
-                        routineHandler.openRoutine(target, editable);
+                        routineHandler.openRoutine(tree, target, editable);
                     }
                 })
         );
@@ -267,4 +267,3 @@ public class ObjectBrowserPanel extends JPanel {
         });
     }
 }
-

@@ -121,6 +121,17 @@
 - 临时查看函数/存储过程源码的窗口统一使用 **owned JDialog**（modeless），owner 来自触发动作所在主窗体（`SwingUtilities.getWindowAncestor` 或当前活动窗口），确保不在任务栏单独出现、与主窗体最小化/激活同步。
 - 关闭链路：`setDefaultCloseOperation(DO_NOTHING_ON_CLOSE)` → `WindowListener` 拦截关闭 → 触发“保存为正式笔记/不保存/取消”的统一提示；仅在确认后 `dispose()`，避免绕过临时笔记保存提示。
 - 资源释放：窗口在 `dispose()` 中移除窗口监听与按钮监听，避免临时窗口频繁打开时的监听器残留。
+- owner 解析策略：优先从触发组件向上查找窗口（`SwingUtilities.getWindowAncestor`），若无法解析则回退当前激活窗口，再回退主窗体实例，确保子窗体始终有有效 owner。
+
+### 函数/存储过程临时编辑窗实现细节
+- 入口：对象树右键菜单/双击节点/调试运行入口等读取 routine 源码后统一打开临时编辑窗。
+- 载体：固定使用 `TemporaryNoteWindow`（`JDialog` + `MODELESS`），禁止 `JFrame`，保证 owned window 行为与任务栏不出现独立图标。
+- 内容：编辑器面板使用 `TemporaryNotePersistenceStrategy`，保持“临时笔记不自动保存、不入库”的既有语义与关闭提示。
+
+### 手工回归步骤（临时编辑窗 Owned Window）
+1. 在对象树中打开任意函数/存储过程定义。
+2. 观察临时编辑窗不会在任务栏产生独立图标，且主窗体最小化后该窗口不残留在前台。
+3. 关闭临时编辑窗时确认会弹出“保存为正式笔记/不保存/取消”的提示。
 
 ### 结果集可编辑机制（仅前端）
 - 结果集表格 `ColumnarTableModel` 允许直接编辑：`isCellEditable` 对结果列返回 `true`，`setValueAt` 仅更新模型内存并 `fireTableCellUpdated`，**不触发任何 SQL/网络调用**。
