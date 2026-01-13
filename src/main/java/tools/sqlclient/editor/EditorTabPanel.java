@@ -11,6 +11,7 @@ import tools.sqlclient.model.Note;
 import tools.sqlclient.editor.NotePersistenceStrategy;
 import tools.sqlclient.editor.PersistentNotePersistenceStrategy;
 import tools.sqlclient.ui.scroll.EditorWheelScrollSupport;
+import tools.sqlclient.ui.findreplace.FindReplaceSupport;
 import tools.sqlclient.ui.swing.ScrollBarWheelSupport;
 import tools.sqlclient.util.AutoSaveService;
 import tools.sqlclient.util.Config;
@@ -408,7 +409,10 @@ public class EditorTabPanel extends JPanel {
         ScrollBarWheelSupport.enableWheelOnVerticalScrollBar(scrollPane);
         EditorWheelScrollSupport.install(textArea, scrollPane);
         editorPanel = new JPanel(new BorderLayout());
-        editorPanel.add(scrollPane, BorderLayout.CENTER);
+        JPanel editorContainer = new JPanel(new BorderLayout());
+        editorContainer.add(scrollPane, BorderLayout.CENTER);
+        FindReplaceSupport.install(textArea, editorContainer);
+        editorPanel.add(editorContainer, BorderLayout.CENTER);
 
         JPanel status = new JPanel(new FlowLayout(FlowLayout.LEFT));
         status.add(new JLabel("数据库: " + (databaseType == DatabaseType.POSTGRESQL ? "PostgreSQL" : "Hive")));
