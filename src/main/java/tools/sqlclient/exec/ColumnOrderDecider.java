@@ -22,7 +22,7 @@ public class ColumnOrderDecider {
             return null;
         }
         if (!shouldReorder(original)) {
-            return original;
+            return ensureColumnDefs(original);
         }
         SelectProjectionParser.Projection projection = SelectProjectionParser.parse(original.getSql());
 
@@ -188,5 +188,23 @@ public class ColumnOrderDecider {
                 .notices(original.getNotices())
                 .warnings(original.getWarnings())
                 .build();
+    }
+
+    private SqlExecResult ensureColumnDefs(SqlExecResult original) {
+        List<String> columns = original.getColumns();
+        if (columns == null || columns.isEmpty()) {
+            return original;
+        }
+        List<ColumnDef> defs = original.getColumnDefs();
+        if (defs != null && defs.size() == columns.size()) {
+            return original;
+        }
+        List<ColumnDef> fallback = new ArrayList<>();
+        int idx = 1;
+        for (String name : columns) {
+            String display = name != null ? name : "";
+            fallback.add(new ColumnDef(display + "#" + idx++, display, name));
+        }
+        return cloneWith(original, columns, fallback, original.getRows(), original.getRowMaps());
     }
 }

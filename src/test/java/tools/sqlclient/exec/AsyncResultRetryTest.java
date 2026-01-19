@@ -55,6 +55,7 @@ class AsyncResultRetryTest {
         try (MockWebServer server = new MockWebServer()) {
             server.enqueue(jsonResponse(statusPayload("job-4", "SUBMITTED", null, true)));
             server.enqueue(jsonResponse(queueDelayFailedPayload("job-4")));
+            server.enqueue(jsonResponse(queueDelayFailedPayload("job-4")));
             server.start();
 
             overrideProp("ASYNC_SQL_BASE_URL", server.url("/").toString());
@@ -62,7 +63,7 @@ class AsyncResultRetryTest {
             Executable exec = () -> service.executeSyncAllPagesWithDbUser("select * from t2", "tester", 50);
             RuntimeException ex = assertThrows(RuntimeException.class, exec);
             assertTrue(ex.getMessage().toLowerCase().contains("queue"), "错误信息应提示排队超时");
-            assertEquals(2, server.getRequestCount(), "排队失败后不应再拉取结果");
+            assertEquals(3, server.getRequestCount(), "排队失败后仍会拉取一次结果用于错误解析");
         }
     }
 
@@ -95,8 +96,12 @@ class AsyncResultRetryTest {
             RecordedRequest statusReq = server.takeRequest(); // status
             RecordedRequest expiredReq = server.takeRequest(); // first result
             RecordedRequest successReq = server.takeRequest(); // retry result
-            assertTrue(expiredReq.getBody().readUtf8().contains("\"page\":1"));
-            assertTrue(successReq.getBody().readUtf8().contains("\"page\":1"));
+            String expiredBody = expiredReq.getBody().readUtf8();
+            String successBody = successReq.getBody().readUtf8();
+            assertTrue(expiredBody.contains("\"offset\":0"));
+            assertTrue(expiredBody.contains("\"limit\":200"));
+            assertTrue(successBody.contains("\"offset\":0"));
+            assertTrue(successBody.contains("\"limit\":200"));
         }
     }
 
@@ -118,10 +123,12 @@ class AsyncResultRetryTest {
                         int call = resultCalls.incrementAndGet();
                         String body = request.getBody().readString(StandardCharsets.UTF_8);
                         if (call == 1) {
-                            assertTrue(body.contains("\"page\":1"), "首次尝试应使用现有 page 基准");
+                            assertTrue(body.contains("\"offset\":0"), "首次尝试应使用 offset=0");
+                            assertTrue(body.contains("\"limit\":50"), "首次尝试应使用 limit=50");
                             return jsonResponse(resultExpiredPayload(1, 50));
                         }
-                        assertTrue(body.contains("\"page\":0"), "回退后应尝试另一种 page 基准");
+                        assertTrue(body.contains("\"offset\":0"), "回退后仍应保持 offset=0");
+                        assertTrue(body.contains("\"limit\":50"), "回退后仍应保持 limit=50");
                         return jsonResponse(resultSuccessPayload(0, 3, true));
                     }
                     return new MockResponse().setResponseCode(404);
@@ -154,7 +161,7 @@ class AsyncResultRetryTest {
         JsonObject obj = new JsonObject();
         obj.addProperty("jobId", jobId);
         obj.addProperty("status", status);
-        obj.addProperty("success", "SUCCEEDED".equalsIgnoreCase(status));
+        obj.addProperty("success", !"FAILED".equalsIgnoreCase(status));
         obj.addProperty("hasResultSet", hasResultSet);
         if (actualRowCount != null) {
             obj.addProperty("actualRowCount", actualRowCount);

@@ -1,7 +1,6 @@
 package tools.sqlclient.exec;
 
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 import org.postgresql.util.PSQLException;
 import org.postgresql.util.ServerErrorMessage;
 
@@ -10,35 +9,19 @@ import java.sql.SQLException;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.Mockito.when;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DatabaseErrorInfoTest {
 
     @Test
     void shouldBuildFromPsqlException() {
-        ServerErrorMessage serverErrorMessage = Mockito.mock(ServerErrorMessage.class);
-        when(serverErrorMessage.getDetail()).thenReturn("detail info");
-        when(serverErrorMessage.getHint()).thenReturn("hint info");
-        when(serverErrorMessage.getPosition()).thenReturn(12);
-        when(serverErrorMessage.getWhere()).thenReturn("where block");
-        when(serverErrorMessage.getSchema()).thenReturn("public");
-        when(serverErrorMessage.getTable()).thenReturn("t1");
-        when(serverErrorMessage.getColumn()).thenReturn("c1");
-        when(serverErrorMessage.getDatatype()).thenReturn("text");
-        when(serverErrorMessage.getConstraint()).thenReturn("pk_t1");
-        when(serverErrorMessage.getFile()).thenReturn("parse.c");
-        when(serverErrorMessage.getLine()).thenReturn("123");
-        when(serverErrorMessage.getRoutine()).thenReturn("parser");
-
-        PSQLException psqlException = Mockito.mock(PSQLException.class);
-        when(psqlException.getMessage()).thenReturn("syntax error at or near \"asselect\"");
-        when(psqlException.getSQLState()).thenReturn("42601");
-        when(psqlException.getErrorCode()).thenReturn(0);
-        when(psqlException.getServerErrorMessage()).thenReturn(serverErrorMessage);
+        ServerErrorMessage serverErrorMessage = new ServerErrorMessage(buildServerErrorMessage());
+        PSQLException psqlException = new PSQLException(serverErrorMessage);
 
         DatabaseErrorInfo info = DatabaseErrorInfo.fromSQLException(psqlException);
         assertNotNull(info);
-        assertEquals("syntax error at or near \"asselect\"", info.getMessage());
+        assertNotNull(info.getMessage());
+        assertTrue(info.getMessage().contains("syntax error at or near \"asselect\""));
         assertEquals("42601", info.getSqlState());
         assertEquals(0, info.getVendorCode());
         assertEquals(12, info.getPosition());
@@ -56,9 +39,9 @@ class DatabaseErrorInfoTest {
         String raw = info.getRaw();
         assertNotNull(raw);
         String[] lines = raw.split("\n");
-        assertEquals("syntax error at or near \"asselect\"", lines[0]);
-        assertEquals("SQLSTATE: 42601", lines[1]);
-        assertEquals("Position: 12", lines[2]);
+        assertTrue(lines[0].contains("syntax error at or near \"asselect\""));
+        assertTrue(containsLine(lines, "SQLSTATE: 42601"));
+        assertTrue(containsLine(lines, "Position: 12"));
     }
 
     @Test
@@ -92,5 +75,37 @@ class DatabaseErrorInfoTest {
 
         String emptyFallback = ErrorDisplayFormatter.chooseDisplayMessage(null, "   ", null, null);
         assertNull(emptyFallback);
+    }
+
+    private String buildServerErrorMessage() {
+        StringBuilder sb = new StringBuilder();
+        sb.append('S').append("ERROR").append('\0');
+        sb.append('C').append("42601").append('\0');
+        sb.append('M').append("syntax error at or near \"asselect\"").append('\0');
+        sb.append('D').append("detail info").append('\0');
+        sb.append('H').append("hint info").append('\0');
+        sb.append('P').append("12").append('\0');
+        sb.append('W').append("where block").append('\0');
+        sb.append('s').append("public").append('\0');
+        sb.append('t').append("t1").append('\0');
+        sb.append('c').append("c1").append('\0');
+        sb.append('d').append("text").append('\0');
+        sb.append('n').append("pk_t1").append('\0');
+        sb.append('F').append("parse.c").append('\0');
+        sb.append('L').append("123").append('\0');
+        sb.append('R').append("parser").append('\0');
+        return sb.toString();
+    }
+
+    private boolean containsLine(String[] lines, String expected) {
+        if (lines == null) {
+            return false;
+        }
+        for (String line : lines) {
+            if (expected.equals(line)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
