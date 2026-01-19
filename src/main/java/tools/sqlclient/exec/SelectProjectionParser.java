@@ -52,8 +52,9 @@ public class SelectProjectionParser {
                 list.add(new ProjectionItem(type, alias, trimmed, null, "*"));
             } else {
                 String alias = extractAlias(trimmed);
-                String display = alias != null ? alias : deriveNameFromExpression(trimmed);
-                list.add(new ProjectionItem(type, null, trimmed, alias, display));
+                String expression = alias != null ? stripAliasExpression(trimmed, alias) : trimmed;
+                String display = alias != null ? alias : deriveNameFromExpression(expression);
+                list.add(new ProjectionItem(type, null, expression, alias, display));
             }
         }
         return list;
@@ -218,6 +219,24 @@ public class SelectProjectionParser {
             }
         }
         return null;
+    }
+
+    private static String stripAliasExpression(String expr, String alias) {
+        if (expr == null || alias == null) {
+            return expr;
+        }
+        String trimmed = expr.trim();
+        String lowered = trimmed.toLowerCase(Locale.ROOT);
+        String aliasLower = alias.toLowerCase(Locale.ROOT);
+        int asIdx = lowered.lastIndexOf(" as ");
+        if (asIdx > 0) {
+            return trimmed.substring(0, asIdx).trim();
+        }
+        String suffix = " " + aliasLower;
+        if (lowered.endsWith(suffix)) {
+            return trimmed.substring(0, trimmed.length() - suffix.length()).trim();
+        }
+        return trimmed;
     }
 
     private static String deriveNameFromExpression(String expr) {

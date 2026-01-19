@@ -1,20 +1,24 @@
 package tools.sqlclient.util;
 
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import tools.sqlclient.metadata.MetadataService;
 
 import javax.swing.SwingUtilities;
+import java.awt.GraphicsEnvironment;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.Mockito.mock;
 
 class SuggestionEngineTest {
     @Test
     void hidePopupIsIdempotent() throws Exception {
+        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
         RSyntaxTextArea textArea = new RSyntaxTextArea();
-        SuggestionEngine engine = new SuggestionEngine(mock(MetadataService.class), textArea);
+        SuggestionEngine engine = new SuggestionEngine(createMetadataService(), textArea);
         SwingUtilities.invokeAndWait(() -> {
             engine.setPopupVisibilityForTest(true);
             engine.hidePopup("first");
@@ -25,8 +29,9 @@ class SuggestionEngineTest {
 
     @Test
     void caretDismissIsSuppressedDuringInsert() throws Exception {
+        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
         RSyntaxTextArea textArea = new RSyntaxTextArea();
-        SuggestionEngine engine = new SuggestionEngine(mock(MetadataService.class), textArea);
+        SuggestionEngine engine = new SuggestionEngine(createMetadataService(), textArea);
         SwingUtilities.invokeAndWait(() -> {
             textArea.setText("select ");
             textArea.setCaretPosition(textArea.getText().length());
@@ -40,8 +45,9 @@ class SuggestionEngineTest {
 
     @Test
     void caretMoveDismissesPopup() throws Exception {
+        Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
         RSyntaxTextArea textArea = new RSyntaxTextArea();
-        SuggestionEngine engine = new SuggestionEngine(mock(MetadataService.class), textArea);
+        SuggestionEngine engine = new SuggestionEngine(createMetadataService(), textArea);
         SwingUtilities.invokeAndWait(() -> {
             textArea.setText("select * from demo");
             textArea.setCaretPosition(textArea.getText().length());
@@ -51,5 +57,11 @@ class SuggestionEngineTest {
         });
         SwingUtilities.invokeAndWait(() -> {});
         assertEquals("caretMoved", engine.getLastHideReasonForTest());
+    }
+
+    private MetadataService createMetadataService() throws Exception {
+        Path dbPath = Files.createTempFile("sql-client-test", ".db");
+        dbPath.toFile().deleteOnExit();
+        return new MetadataService(dbPath);
     }
 }

@@ -3,6 +3,7 @@ package tools.sqlclient.ui;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import tools.sqlclient.db.NoteRepository;
+import tools.sqlclient.db.SQLiteManager;
 import tools.sqlclient.metadata.MetadataService;
 import tools.sqlclient.model.DatabaseType;
 import tools.sqlclient.model.EditorStyle;
@@ -10,18 +11,20 @@ import tools.sqlclient.model.Note;
 
 import javax.swing.JFrame;
 import java.awt.GraphicsEnvironment;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.Mockito.mock;
 
 class RoutineSourceDialogFactoryTest {
 
     @Test
     void openOwnedDialogBindsOwner() {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
-        NoteRepository noteRepository = mock(NoteRepository.class);
-        MetadataService metadataService = mock(MetadataService.class);
+        SQLiteManager sqliteManager = createSQLiteManager();
+        NoteRepository noteRepository = new NoteRepository(sqliteManager);
+        MetadataService metadataService = new MetadataService(sqliteManager.getDbPath());
         RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(noteRepository, metadataService, note -> {
         });
         Note note = new Note(-1L, "临时查看: test", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
@@ -43,8 +46,9 @@ class RoutineSourceDialogFactoryTest {
     @Test
     void openOwnedDialogBindsOwnerForEditableMode() {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
-        NoteRepository noteRepository = mock(NoteRepository.class);
-        MetadataService metadataService = mock(MetadataService.class);
+        SQLiteManager sqliteManager = createSQLiteManager();
+        NoteRepository noteRepository = new NoteRepository(sqliteManager);
+        MetadataService metadataService = new MetadataService(sqliteManager.getDbPath());
         RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(noteRepository, metadataService, note -> {
         });
         Note note = new Note(-1L, "临时查看: test", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
@@ -66,8 +70,9 @@ class RoutineSourceDialogFactoryTest {
     @Test
     void openOwnedDialogRejectsNullOwner() {
         Assumptions.assumeFalse(GraphicsEnvironment.isHeadless());
-        NoteRepository noteRepository = mock(NoteRepository.class);
-        MetadataService metadataService = mock(MetadataService.class);
+        SQLiteManager sqliteManager = createSQLiteManager();
+        NoteRepository noteRepository = new NoteRepository(sqliteManager);
+        MetadataService metadataService = new MetadataService(sqliteManager.getDbPath());
         RoutineSourceDialogFactory factory = new RoutineSourceDialogFactory(noteRepository, metadataService, note -> {
         });
         Note note = new Note(-1L, "临时查看: test", "", DatabaseType.POSTGRESQL, 0L, 0L, "", false, false, 0L, "");
@@ -79,5 +84,17 @@ class RoutineSourceDialogFactoryTest {
 
         assertThrows(IllegalStateException.class,
                 () -> factory.openRoutineSourceDialog(null, note, style, false, 200, "leshan.test()", false));
+    }
+
+    private SQLiteManager createSQLiteManager() {
+        try {
+            Path dbPath = Files.createTempFile("sql-client-notes", ".db");
+            dbPath.toFile().deleteOnExit();
+            SQLiteManager manager = new SQLiteManager(dbPath);
+            manager.initSchema();
+            return manager;
+        } catch (Exception e) {
+            throw new RuntimeException("创建临时 SQLite 失败", e);
+        }
     }
 }

@@ -114,7 +114,48 @@ public final class SqlSplitter {
             return;
         }
         String segment = text.substring(start, end);
-        statements.add(new SqlStatement(segment, start, end, terminated));
+        String cleaned = stripLeadingComments(segment);
+        if (cleaned == null || cleaned.isBlank()) {
+            return;
+        }
+        statements.add(new SqlStatement(cleaned, start, end, terminated));
+    }
+
+    private static String stripLeadingComments(String segment) {
+        if (segment == null || segment.isBlank()) {
+            return segment;
+        }
+        String text = segment;
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            String trimmed = ltrim(text);
+            if (trimmed.startsWith("--")) {
+                int idx = trimmed.indexOf('\n');
+                text = idx >= 0 ? trimmed.substring(idx + 1) : "";
+                changed = true;
+                continue;
+            }
+            if (trimmed.startsWith("/*")) {
+                int idx = trimmed.indexOf("*/");
+                if (idx >= 0) {
+                    text = trimmed.substring(idx + 2);
+                    changed = true;
+                }
+            }
+        }
+        return text.trim();
+    }
+
+    private static String ltrim(String text) {
+        if (text == null || text.isEmpty()) {
+            return text;
+        }
+        int idx = 0;
+        while (idx < text.length() && Character.isWhitespace(text.charAt(idx))) {
+            idx++;
+        }
+        return text.substring(idx);
     }
 
     private static String extractDollarTag(String sql, int index) {

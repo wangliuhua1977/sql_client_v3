@@ -42,9 +42,12 @@ public class MetadataService {
     private static final Logger log = LoggerFactory.getLogger(MetadataService.class);
     private static final String DEFAULT_SCHEMA = "leshan";
     private static final String METADATA_DB_USER = "leshan";
-    private static final int OBJECT_PAGE_SIZE = 900;
+    private static final int OBJECT_PAGE_SIZE = 200;
     private static final int METADATA_BATCH_SIZE = 1000;
     private static final int TRACE_ROW_LIMIT = 200;
+    private static final int METADATA_FETCH_THREADS = 4;
+    private static final String DEFAULT_LOG_FORMAT = "{time} [{thread}] {type} {status} {message}";
+    private static final String DEFAULT_LOG_PATH = ".Sql_client_v3/logs/metadata-sync.log";
 
     private static final Pattern DDL_PATTERN = Pattern.compile(
             "^(?i)(create|drop|alter)\\s+(or\\s+replace\\s+)?(table|view|function|procedure)\\s+(if\\s+not\\s+exists\\s+|if\\s+exists\\s+)?([A-Za-z0-9_\\.\\\"]+)");
@@ -52,8 +55,12 @@ public class MetadataService {
     private final SQLiteManager sqliteManager;
     private final ExecutorService metadataPool = Executors.newFixedThreadPool(resolveMetadataConcurrency(), r -> new Thread(r, "metadata-pool"));
     private final ExecutorService networkPool = Executors.newFixedThreadPool(resolveNetworkConcurrency(), r -> new Thread(r, "network-pool"));
+    private final ExecutorService metadataFetchPool = Executors.newFixedThreadPool(METADATA_FETCH_THREADS, newMetadataFetchThreadFactory());
     private final MetadataRefreshService refreshService;
     private final Object dbWriteLock = new Object();
+    private final Object metadataLogLock = new Object();
+    private final Path metadataLogPath;
+    private final String metadataLogFormat;
     private final Map<String, CompletableFuture<Void>> inflightColumns = new ConcurrentHashMap<>();
 
     record RemoteSignature(long count, String signature) {}
@@ -84,6 +91,8 @@ public class MetadataService {
         this.sqliteManager = new SQLiteManager(dbPath);
         this.sqliteManager.initSchema();
         this.refreshService = new MetadataRefreshService(sqliteManager, dbWriteLock);
+        this.metadataLogPath = resolveMetadataLogPath();
+        this.metadataLogFormat = resolveMetadataLogFormat();
     }
 
     private static int resolveMetadataConcurrency() {
@@ -112,6 +121,18 @@ public class MetadataService {
             try {
                 return Integer.parseInt(raw.trim());
             } catch (NumberFormatException ignored) {}
+        }
+        return defaultValue;
+    }
+
+    private static String readString(String key, String defaultValue) {
+        String sys = System.getProperty(key);
+        if (sys != null && !sys.isBlank()) {
+            return sys.trim();
+        }
+        String raw = Config.getRawProperty(key);
+        if (raw != null && !raw.isBlank()) {
+            return raw.trim();
         }
         return defaultValue;
     }
@@ -194,6 +215,7 @@ public class MetadataService {
     private MetadataRefreshResult refreshMetadata(boolean forceFullFetch) {
         long startedAt = System.currentTimeMillis();
         int beforeObjects = countCachedObjects();
+        auditLog("refresh", "START", "forceFullFetch=" + forceFullFetch + " cachedObjects=" + beforeObjects);
         try {
             List<ObjectSyncStats> stats = syncAllObjectTypes(forceFullFetch);
             int totalObjects = countCachedObjects();
@@ -204,11 +226,13 @@ public class MetadataService {
                     .map(s -> s.objectType() + (s.skipped() ? "(skip)" : "") + " +" + s.inserted() + " -" + s.deleted())
                     .collect(Collectors.joining(", "));
             OperationLog.log(String.format("元数据同步完成 对象=%d 变动=%d 批次=%d 用时=%dms", totalObjects, changed, batches, duration));
+            auditLog("refresh", "SUCCESS", "objects=" + totalObjects + " changed=" + changed + " batches=" + batches + " costMs=" + duration);
             return new MetadataRefreshResult(true, totalObjects, Math.max(0, totalObjects - beforeObjects), 0, batches, duration, message);
         } catch (Exception e) {
             log.error("刷新元数据失败", e);
             OperationLog.log("刷新元数据失败: " + e.getMessage());
             long cost = System.currentTimeMillis() - startedAt;
+            auditLog("refresh", "ERROR", "costMs=" + cost + " error=" + safeMessage(e));
             return new MetadataRefreshResult(false, countCachedObjects(), 0, countCachedColumns(), 0, cost, e.getMessage());
         }
     }
@@ -235,7 +259,7 @@ public class MetadataService {
             OperationLog.log(String.format("[meta] %s 远程签名命中，跳过拉取 cnt=%d sig=%s", objectType, remoteSignature.count(), remoteSignature.signature()));
             return new ObjectSyncStats(objectType, (int) remoteSignature.count(), 0, 0, 0, true);
         }
-        FetchResult fetchResult = fetchRemoteObjects(objectType);
+        FetchResult fetchResult = fetchRemoteObjects(objectType, remoteSignature);
         DiffResult diff = diffAndApply(objectType, fetchResult.objects());
         saveSnapshot(objectType, remoteSignature);
         long cost = System.currentTimeMillis() - startedAt;
@@ -307,18 +331,71 @@ public class MetadataService {
         return new RemoteSignature(cnt, sig);
     }
 
-    FetchResult fetchRemoteObjects(String objectType) throws Exception {
-        int offset = 0;
-        int batches = 0;
-        Set<RemoteObject> merged = new LinkedHashSet<>();
-        while (true) {
-            List<RemoteObject> page = fetchRemoteObjectsPaged(objectType, offset);
-            batches++;
-            merged.addAll(page);
-            if (page.size() < OBJECT_PAGE_SIZE) break;
-            offset += OBJECT_PAGE_SIZE;
+    FetchResult fetchRemoteObjects(String objectType, RemoteSignature remoteSignature) throws Exception {
+        long expected = remoteSignature != null ? remoteSignature.count() : 0L;
+        if (expected <= 0L) {
+            auditLog(objectType, "EMPTY", "expected=0");
+            return new FetchResult(new LinkedHashSet<>(), 0);
         }
-        return new FetchResult(merged, batches);
+        int totalPages = (int) ((expected + OBJECT_PAGE_SIZE - 1L) / OBJECT_PAGE_SIZE);
+        java.util.concurrent.atomic.AtomicInteger batches = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicInteger duplicates = new java.util.concurrent.atomic.AtomicInteger(0);
+        java.util.concurrent.atomic.AtomicReference<Exception> errorRef = new java.util.concurrent.atomic.AtomicReference<>();
+        Set<RemoteObject> merged = ConcurrentHashMap.newKeySet();
+        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(totalPages);
+
+        auditLog(objectType, "FETCH_BEGIN", "pages=" + totalPages + " pageSize=" + OBJECT_PAGE_SIZE + " expected=" + expected);
+
+        for (int pageIndex = 0; pageIndex < totalPages; pageIndex++) {
+            final int page = pageIndex;
+            final int offset = pageIndex * OBJECT_PAGE_SIZE;
+            metadataFetchPool.submit(() -> {
+                auditLog(objectType, "PAGE_START", "page=" + page + " offset=" + offset);
+                try {
+                    List<RemoteObject> pageRows = fetchRemoteObjectsPaged(objectType, offset);
+                    batches.incrementAndGet();
+                    for (RemoteObject ro : pageRows) {
+                        if (!merged.add(ro)) {
+                            duplicates.incrementAndGet();
+                        }
+                    }
+                    auditLog(objectType, "PAGE_END", "page=" + page + " rows=" + pageRows.size());
+                    if (page < totalPages - 1 && pageRows.size() < OBJECT_PAGE_SIZE) {
+                        auditLog(objectType, "PAGE_SHORT", "page=" + page + " rows=" + pageRows.size());
+                    }
+                } catch (Exception e) {
+                    errorRef.compareAndSet(null, e);
+                    auditLog(objectType, "PAGE_ERROR", "page=" + page + " error=" + safeMessage(e));
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+
+        try {
+            latch.await();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new Exception("等待元数据分页任务中断", ie);
+        }
+
+        Exception err = errorRef.get();
+        if (err != null) {
+            throw err;
+        }
+        if (duplicates.get() > 0) {
+            String message = "发现重复元数据: duplicates=" + duplicates.get();
+            auditLog(objectType, "DUPLICATE", message);
+            throw new IllegalStateException(message);
+        }
+        long fetched = merged.size();
+        if (fetched != expected) {
+            String message = "元数据数量不一致 expected=" + expected + " fetched=" + fetched;
+            auditLog(objectType, "MISMATCH", message);
+            throw new IllegalStateException(message);
+        }
+        auditLog(objectType, "FETCH_DONE", "batches=" + batches.get() + " fetched=" + fetched);
+        return new FetchResult(merged, batches.get());
     }
 
     List<RemoteObject> fetchRemoteObjectsPaged(String objectType, int offset) throws Exception {
@@ -799,6 +876,58 @@ public class MetadataService {
         String message = trimToNull(resp.getMessage());
         if (message != null) return message;
         return trimToNull(resp.getNote());
+    }
+
+    private String safeMessage(Exception e) {
+        if (e == null) return "<null>";
+        String msg = e.getMessage();
+        if (msg == null || msg.isBlank()) {
+            return e.getClass().getSimpleName();
+        }
+        return msg.trim();
+    }
+
+    private static java.util.concurrent.ThreadFactory newMetadataFetchThreadFactory() {
+        java.util.concurrent.atomic.AtomicInteger idx = new java.util.concurrent.atomic.AtomicInteger(1);
+        return r -> new Thread(r, "metadata-fetch-" + idx.getAndIncrement());
+    }
+
+    private Path resolveMetadataLogPath() {
+        String raw = readString("metadata.log.path", DEFAULT_LOG_PATH);
+        Path path = Paths.get(raw);
+        if (!path.isAbsolute()) {
+            path = Paths.get(System.getProperty("user.home")).resolve(raw);
+        }
+        return path.normalize();
+    }
+
+    private String resolveMetadataLogFormat() {
+        return readString("metadata.log.format", DEFAULT_LOG_FORMAT);
+    }
+
+    private void auditLog(String type, String status, String message) {
+        String time = java.time.LocalDateTime.now().toString();
+        String thread = Thread.currentThread().getName();
+        String line = metadataLogFormat;
+        line = line.replace("{time}", time);
+        line = line.replace("{thread}", thread);
+        line = line.replace("{type}", type != null ? type : "");
+        line = line.replace("{status}", status != null ? status : "");
+        line = line.replace("{message}", message != null ? message : "");
+        synchronized (metadataLogLock) {
+            try {
+                Path dir = metadataLogPath.getParent();
+                if (dir != null) {
+                    Files.createDirectories(dir);
+                }
+                Files.writeString(metadataLogPath, line + System.lineSeparator(),
+                        StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE,
+                        java.nio.file.StandardOpenOption.APPEND);
+            } catch (Exception e) {
+                log.debug("写入元数据本地日志失败: {}", metadataLogPath, e);
+            }
+        }
     }
 
     private String trimToNull(String text) {

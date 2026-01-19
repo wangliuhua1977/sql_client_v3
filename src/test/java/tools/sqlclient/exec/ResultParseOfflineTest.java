@@ -1,8 +1,6 @@
 package tools.sqlclient.exec;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-
 import java.util.List;
 
 public class ResultParseOfflineTest {
@@ -23,7 +21,7 @@ public class ResultParseOfflineTest {
                   ]
                 }
                 """;
-        JsonObject resp = new Gson().fromJson(json, JsonObject.class);
+        ResultResponse resp = new Gson().fromJson(json, ResultResponse.class);
         SqlExecutionService service = new SqlExecutionService();
         SqlExecResult result = service.parseResultResponse(resp, "select * from wlh_acct_item_owe limit 5", "job-offline", 1, 5);
 
